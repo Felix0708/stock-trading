@@ -1,0 +1,11 @@
+//@version=6
+indicator("Stock Trading Webhook One-shot Test", overlay = true)
+
+varip bool sent = false
+string payload = "{\"ticker\":\"TVTEST\",\"name\":\"TradingView 실제 알람 테스트\",\"exchange\":\"SIMULATOR\",\"timeframe\":\"1\",\"action\":\"CHECK\",\"type\":\"셋업 형성 중\",\"price\":100,\"sl\":null,\"rr\":null,\"desc\":\"TradingView 서버 실제 웹훅 테스트\",\"market\":\"TEST\",\"ai_summary\":\"TEST\",\"score\":0,\"status\":\"Yellow\",\"signal\":\"\",\"conviction\":\"B\",\"momentum\":\"\",\"momentum_sl\":null,\"momentum_tp\":null,\"momentum_bars\":null,\"energy\":0,\"ema1_dist\":0,\"candle_type\":\"테스트\",\"candle_strength\":0,\"ema_touch\":\"none\",\"ema_align\":\"테스트\",\"daily_trend\":\"MIXED\",\"daily_ema_aligned\":false,\"daily_rs\":0,\"daily_above_200ma\":false,\"daily_setup_stage\":\"FORMING\",\"daily_volume_trend\":\"NEUTRAL\",\"daily_dist_from_high\":0,\"rsi2\":0,\"upper_wick_pct\":0,\"atr_multiple\":null,\"atr_dot\":false,\"atr_dot_threshold\":7,\"sb_z_score\":0}"
+
+if barstate.isrealtime and not sent
+    alert(payload, alert.freq_once_per_bar)
+    sent := true
+
+plotchar(sent, "테스트 발송", "✓", location.top, color.green)

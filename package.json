@@ -1,0 +1,35 @@
+{
+  "name": "stock-trading-discord-panel",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Five Discord investment personas backed by persistent Codex CLI sessions",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node --env-file=.env bot.js",
+    "start:all": "sh start-all.sh",
+    "start:webhook": "node --env-file=.env webhook-server.js",
+    "test:webhook-live": "node --env-file=.env send-test-webhook.js",
+    "setup-discord": "node --env-file=.env setup-discord.js",
+    "self-test": "node bot.js --self-test && node webhook-schema.test.js && node signal-normalizer.test.js && node signal-state-machine.test.js && node webhook-server.test.js && node webhook-discord.test.js && node signal-review.test.js && node trade-controller.test.js && node buy-approval.test.js && node kiwoom-client.test.js && node paper-order-executor.test.js && node order-tracker.test.js && node position-sizer.test.js && node recent-research.test.js && node telegram-collector.test.js",
+    "test:webhook-schema": "node webhook-schema.test.js",
+    "test:signal-normalizer": "node signal-normalizer.test.js",
+    "test:signal-state-machine": "node signal-state-machine.test.js",
+    "test:webhook-server": "node webhook-server.test.js",
+    "test:webhook-discord": "node webhook-discord.test.js",
+    "test:signal-review": "node signal-review.test.js",
+    "test:trade-controller": "node trade-controller.test.js",
+    "test:kiwoom-client": "node kiwoom-client.test.js",
+    "kiwoom:check": "node --env-file=.env kiwoom-check.js",
+    "kiwoom:smoke-order": "node --env-file=.env kiwoom-order-smoke.js",
+    "telegram:login": "node --env-file=.env telegram-collector.js login",
+    "telegram:list": "node --env-file=.env telegram-collector.js list",
+    "telegram:collect": "node --env-file=.env telegram-collector.js collect"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "discord.js": "^14.22.1",
+    "teleproto": "^1.228.5"
+  }
+}

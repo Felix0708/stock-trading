@@ -1,0 +1,13 @@
+//@version=6
+indicator("Kiwoom Mock Order One-shot Test", overlay = true)
+
+bool rightChart = syminfo.ticker == "005930"
+
+if barstate.isrealtime and rightChart
+    string price = str.tostring(close)
+    string stop = str.tostring(close * 0.98)
+    string payload = '{"ticker":"005930","name":"삼성전자 모의주문 테스트","exchange":"KRX","timeframe":"' + timeframe.period + '","action":"BUY","type":"💰 정석 진입 @SR↩","price":' + price + ',"sl":' + stop + ',"rr":2,"desc":"TradingView 서버→키움 국내 모의계좌 1주 체결 시험","market":"TEST","ai_summary":"TEST ONLY","score":60,"status":"Green(GO)","signal":"TV_MOCK_ORDER_TEST","conviction":"A","momentum":"BUY","momentum_sl":' + stop + ',"momentum_tp":null,"momentum_bars":1,"energy":1,"ema1_dist":0,"candle_type":"테스트","candle_strength":50,"ema_touch":"none","ema_align":"테스트","daily_trend":"BULL","daily_ema_aligned":true,"daily_rs":50,"daily_above_200ma":true,"daily_setup_stage":"COMPLETE","daily_volume_trend":"NEUTRAL","daily_dist_from_high":0,"rsi2":50,"upper_wick_pct":0,"atr_multiple":1,"atr_dot":false,"atr_dot_threshold":7,"sb_z_score":0,"paper_order_test":true}'
+    alert(payload, alert.freq_once_per_bar)
+
+plotchar(barstate.isrealtime and rightChart, "테스트 준비", "✓", location.top, color.green)
+bgcolor(not rightChart ? color.new(color.red, 85) : na, title = "005930 차트 확인")
