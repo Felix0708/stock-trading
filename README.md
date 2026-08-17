@@ -62,7 +62,7 @@ TradingView 웹훅 URL 복사 완료: https://your-domain.ngrok-free.dev/webhook
 | `npm run kiwoom:check` | 키움 모의투자 인증·계좌 연결 확인(주문 없음) |
 | `CONFIRM_MOCK_ORDER=AAPL-1-USD npm run kiwoom:smoke-order` | 영업일에 해외 모의계좌 AAPL 1주 `$1` 지정가 접수·취소 시험 |
 | `npm run telegram:login` | Telegram 사용자 계정 최초 1회 로그인 |
-| `npm run telegram:list` | `무니인사이트`가 포함된 허용 채널 확인 |
+| `npm run telegram:list` | 설정한 Telegram 뉴스·시황 채널 확인 |
 | `npm run telegram:collect` | 전날 채널 글을 Markdown으로 즉시 수집 |
 | `npm run telegram:collect -- 2026-08-09` | 지정 날짜 글을 다시 수집 |
 | `npm run setup-discord` | Discord 카테고리와 채널 자동 생성 |
@@ -137,9 +137,9 @@ Codex CLI는 현재 저장된 ChatGPT 로그인을 재사용합니다. 먼저 `c
 !roundtable 최근 추가된 반도체 자료를 바탕으로 핵심 주장, 반대 근거, 확인할 종목을 토론해줘
 ```
 
-## 허락받은 Telegram 채널 일일 수집
+## Telegram 뉴스·시황 일일 수집
 
-운영자에게 허락받은 채널만 수집합니다. 제목에 `무니인사이트`가 들어간 채널 중 최근 활동 채널을 자동 선택하므로 `7.15~8.15`처럼 매달 방 이름이 바뀌어도 설정을 다시 바꿀 필요가 없습니다.
+`TELEGRAM_CHANNEL_MATCH`에 지정한 뉴스·시황 채널 중 최근 활동 채널을 자동 선택하므로 방 이름이 주기적으로 바뀌어도 설정을 다시 바꿀 필요가 없습니다.
 
 1. [Telegram API 개발 도구](https://my.telegram.org/apps)에서 본인 계정의 `api_id`와 `api_hash`를 발급합니다.
 2. 두 값을 `.env`의 `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`에 입력합니다. 채팅이나 Discord에는 붙여넣지 않습니다.
@@ -151,7 +151,7 @@ Codex CLI는 현재 저장된 ChatGPT 로그인을 재사용합니다. 먼저 `c
 활성화 후 매일 `00:10`(한국 시간)에 전날 본문·캡션·링크를 Markdown으로 저장합니다. 사진과 동영상 원본은 내려받지 않습니다.
 
 ```text
-iCloud Drive/주식/텔레그램/2026-08-09_무니인사이트 7.15~8.15.md
+iCloud Drive/주식/텔레그램/2026-08-09_뉴스시황.md
 ```
 
 새 Markdown은 기존 PDF와 같은 최근 자료로 인식되어 자동 브리핑과 수동 `!roundtable`에서 참고됩니다. 실시간 웹 검색을 완료하고 정상 본문을 반환한 자동 브리핑만 실행·자료 검토 완료로 기록합니다. 실패·시간초과·검색 불가 안내문은 완료로 처리하지 않으며, 사용자가 직접 질문하면 자료를 재검토할 수 있습니다.

@@ -62,7 +62,7 @@ function markdownForDay({ title, channelId, targetDate, timeZone, messages, coll
     `- 채널 ID: ${channelId}`,
     `- 시간대: ${timeZone}`,
     `- 마지막 수집 대상 시각: ${collectedAt.toISOString()}`,
-    "- 수집 범위: 운영자에게 허락받은 채널의 본문·캡션·링크",
+    "- 수집 범위: 설정한 뉴스·시황 채널의 본문·캡션·링크",
     "- 자동 생성 파일: 원문 사실 확인용 자료이며 투자 판단이나 주문 명령이 아님",
     "",
     ...blocks,
@@ -79,7 +79,7 @@ function config() {
   return {
     apiId,
     apiHash,
-    match: process.env.TELEGRAM_CHANNEL_MATCH || "무니인사이트",
+    match: process.env.TELEGRAM_CHANNEL_MATCH || "뉴스시황",
     timeZone: process.env.TELEGRAM_TIMEZONE || "Asia/Seoul",
     outputDirectory: process.env.TELEGRAM_OUTPUT_DIR,
   };
