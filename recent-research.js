@@ -53,7 +53,7 @@ function ensureOcrBinary() {
 function extractPdfText(item, maxPages) {
   fs.mkdirSync(CACHE_DIR, { recursive: true });
   const key = crypto.createHash("sha256")
-    .update(`${item.file}\0${item.size}\0${item.mtimeMs}\0${maxPages}`)
+    .update(`${item.file}\0${item.size}\0${item.mtimeMs}\0${maxPages}\0${fs.statSync(OCR_SOURCE).mtimeMs}`)
     .digest("hex");
   const cached = path.join(CACHE_DIR, `${key}.txt`);
   if (fs.existsSync(cached)) return fs.readFileSync(cached, "utf8");
@@ -72,6 +72,10 @@ function extractResearchText(item, maxPages) {
   return path.extname(item.file).toLowerCase() === ".md"
     ? fs.readFileSync(item.file, "utf8")
     : extractPdfText(item, maxPages);
+}
+
+function hasResearchBody(text) {
+  return Boolean(String(text || "").replace(/^\s*--- page \d+ ---\s*$/gim, "").trim());
 }
 
 function markdownImagePaths(file) {
@@ -99,7 +103,8 @@ function loadRecentResearch({
     let text = "";
     try {
       text = extractResearchText(item, maxPages).trim();
-      item.readable = Boolean(text);
+      item.readable = hasResearchBody(text);
+      if (!item.readable) text = `[본문 인식 실패: PDF 파일은 있으나 앞 ${maxPages}쪽에서 읽을 수 있는 텍스트를 추출하지 못했습니다.]`;
     } catch (error) {
       item.readable = false;
       text = `[본문 인식 실패: ${error.message}]`;
@@ -125,4 +130,4 @@ function loadRecentResearch({
   };
 }
 
-module.exports = { loadRecentResearch, markdownImagePaths, recentPdfFiles, researchFileId };
+module.exports = { hasResearchBody, loadRecentResearch, markdownImagePaths, recentPdfFiles, researchFileId };

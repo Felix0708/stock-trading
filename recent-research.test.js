@@ -4,7 +4,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { markdownImagePaths, recentPdfFiles } = require("./recent-research");
+const { hasResearchBody, markdownImagePaths, recentPdfFiles } = require("./recent-research");
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "recent-research-"));
 try {
@@ -25,6 +25,8 @@ try {
   const files = recentPdfFiles({ directory: root, now, lookbackDays: 7, maxFiles: 3 });
   assert.deepEqual(files.map((item) => path.basename(item.file)), ["telegram.md", "newest.pdf", "older.pdf"]);
   assert.deepEqual(markdownImagePaths(markdown), [image]);
+  assert.equal(hasResearchBody("\n--- page 1 ---\n"), false);
+  assert.equal(hasResearchBody("\n--- page 1 ---\nSTM 본문"), true);
   const remaining = recentPdfFiles({
     directory: root,
     now,

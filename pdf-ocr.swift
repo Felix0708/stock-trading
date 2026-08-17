@@ -17,6 +17,11 @@ guard let document = PDFDocument(url: URL(fileURLWithPath: file)) else {
 
 for index in 0..<min(document.pageCount, maxPages) {
     guard let page = document.page(at: index) else { continue }
+    if let text = page.string?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty {
+        print("\n--- page \(index + 1) ---")
+        print(text)
+        continue
+    }
     let bounds = page.bounds(for: .mediaBox)
     let scale = min(2.0, 2200.0 / max(bounds.width, bounds.height))
     let size = NSSize(width: bounds.width * scale, height: bounds.height * scale)
