@@ -8,6 +8,7 @@
 |---|---|
 | [`../README.md`](../README.md) | 설치, 실행, 명령어를 설명하는 사용 설명서 |
 | `tradingview-webhook-v6.2.md` | 로컬에서만 보관하는 TradingView 원본 신호 명세 |
+| [`shared-trading-context.md`](./shared-trading-context.md) | 다섯 AI가 모든 대화에서 함께 사용하는 핵심 신호·위험·사용자 원칙 요약 |
 | [`development-history.md`](./development-history.md) | 구현 과정, 설계 이유, 현재 상태와 다음 작업 기록 |
 | [`tradingview-webhook-test.pine`](./tradingview-webhook-test.pine) | TradingView 서버의 실제 웹훅 경로를 확인하는 일회성 테스트 지표 |
 | [`tradingview-mock-order-test.pine`](./tradingview-mock-order-test.pine) | `005930` 실제 알람으로 키움 국내 모의주문 1주·1회를 확인하는 테스트 지표 |

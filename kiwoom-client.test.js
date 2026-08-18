@@ -35,7 +35,9 @@ async function fakeFetch(url, options) {
   }
   if (options.headers["api-id"] === "ka10001") {
     return new Response(JSON.stringify({
-      stk_cd: "005930", stk_nm: "삼성전자", cur_prc: "+100000", return_code: 0, return_msg: "",
+      stk_cd: "005930", stk_nm: "삼성전자", cur_prc: "+100000", open_pric: "+99000",
+      high_pric: "+101000", low_pric: "+98000", flu_rt: "+1.01", trde_qty: "123456",
+      return_code: 0, return_msg: "",
     }));
   }
   if (["kt10000", "kt10001"].includes(options.headers["api-id"])) {
@@ -76,7 +78,8 @@ async function fakeFetch(url, options) {
   if (options.headers["api-id"] === "usa20100") {
     return new Response(JSON.stringify({
       stex_tp: "NY", stk_cd: "DELL", stk_nm: "Dell Technologies", cur_prc: "459.1200",
-      base_close_pric: "468.1700", flu_rt: "-1.93", acc_trde_qty: "123456", return_code: 0, return_msg: "",
+      base_close_pric: "468.1700", open_pric: "462.0000", high_pric: "465.0000", low_pric: "455.5000",
+      flu_rt: "-1.93", acc_trde_qty: "123456", return_code: 0, return_msg: "",
     }));
   }
   if (["ust20000", "ust20001"].includes(options.headers["api-id"])) {
@@ -123,6 +126,7 @@ async function fakeFetch(url, options) {
   assert.deepEqual(await client.getDomesticCash(), { deposit: 500000000, orderableAmount: 400000000 });
   assert.deepEqual(await client.getDomesticQuote({ symbol: "005930" }), {
     symbol: "005930", name: "삼성전자", currentPrice: 100000,
+    dayOpen: 99000, dayHigh: 101000, dayLow: 98000, changeRate: 1.01, volume: 123456,
   });
   assert.deepEqual(await client.placeDomesticMarketOrder({ side: "BUY", symbol: "005930", quantity: 1 }), {
     status: "ACCEPTED", orderNo: "00024", side: "BUY", symbol: "005930", orderQuantity: 1,
@@ -147,7 +151,8 @@ async function fakeFetch(url, options) {
   assert.deepEqual(await client.getUsCash(), { usd: 100000, krw: 0, usdExchangeRate: 1507.7 });
   assert.deepEqual(await client.getUsQuote({ exchange: "NY", symbol: "DELL" }), {
     exchange: "NY", symbol: "DELL", name: "Dell Technologies", currentPrice: 459.12,
-    previousClose: 468.17, changeRate: -1.93, volume: 123456,
+    previousClose: 468.17, dayOpen: 462, dayHigh: 465, dayLow: 455.5,
+    changeRate: -1.93, volume: 123456,
   });
   await assert.rejects(() => client.placeUsLimitOrder({ side: "BUY", exchange: "XX", symbol: "AAPL", quantity: 1, price: 250 }), /거래소/);
   assert.deepEqual(await client.placeUsLimitOrder({ side: "BUY", exchange: "ND", symbol: "AAPL", quantity: 1, price: 0.5 }), {

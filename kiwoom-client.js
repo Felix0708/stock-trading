@@ -8,6 +8,12 @@ function toNumber(value, field) {
   return number;
 }
 
+function toOptionalNumber(value, field, absolute = false) {
+  if (value === undefined || value === null || value === "") return null;
+  const number = toNumber(value, field);
+  return absolute ? Math.abs(number) : number;
+}
+
 class KiwoomClient {
   #appKey;
   #secretKey;
@@ -133,6 +139,11 @@ class KiwoomClient {
       symbol: String(data.stk_cd || symbol).replace(/^A/, ""),
       name: String(data.stk_nm || ""),
       currentPrice: Math.abs(toNumber(data.cur_prc, "국내주식 현재가")),
+      dayOpen: toOptionalNumber(data.open_pric, "국내주식 시가", true),
+      dayHigh: toOptionalNumber(data.high_pric, "국내주식 고가", true),
+      dayLow: toOptionalNumber(data.low_pric, "국내주식 저가", true),
+      changeRate: toOptionalNumber(data.flu_rt, "국내주식 등락률"),
+      volume: toOptionalNumber(data.trde_qty, "국내주식 거래량"),
     };
   }
 
@@ -246,6 +257,9 @@ class KiwoomClient {
       name: String(data.stk_nm || data.stk_enm || ""),
       currentPrice: Math.abs(toNumber(data.cur_prc, "미국주식 현재가")),
       previousClose: Math.abs(toNumber(data.base_close_pric, "미국주식 전일종가")),
+      dayOpen: toOptionalNumber(data.open_pric, "미국주식 시가", true),
+      dayHigh: toOptionalNumber(data.high_pric, "미국주식 고가", true),
+      dayLow: toOptionalNumber(data.low_pric, "미국주식 저가", true),
       changeRate: toNumber(data.flu_rt, "미국주식 등락률"),
       volume: toNumber(data.acc_trde_qty, "미국주식 누적거래량"),
     };
