@@ -5,6 +5,7 @@ node_modules/
 !.env.example
 state.json*
 .codex-chat/
+.omo/
 .research-cache/
 webhook-events.jsonl
 webhook-events.jsonl.*

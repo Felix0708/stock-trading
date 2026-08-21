@@ -147,6 +147,41 @@ class KiwoomClient {
     };
   }
 
+  async getDomesticMarketClose({ date } = {}) {
+    date = String(date || "");
+    if (!/^\d{8}$/.test(date)) throw new Error("국내장 마감 기준일은 YYYYMMDD 형식이어야 합니다.");
+    await this.getAccessToken();
+    const markets = [];
+    for (const [index, [name, marketType, sectorCode]] of [["KOSPI", "0", "001"], ["KOSDAQ", "1", "101"]].entries()) {
+      if (index) await new Promise((resolve) => setTimeout(resolve, 1100));
+      const [market, flow] = await Promise.all([
+        this.post("/api/dostk/sect", {
+          apiId: "ka20001",
+          authorization: true,
+          body: { mrkt_tp: marketType, inds_cd: sectorCode },
+        }),
+        this.post("/api/dostk/sect", {
+          apiId: "ka10051",
+          authorization: true,
+          body: { mrkt_tp: marketType, amt_qty_tp: "0", base_dt: date, stex_tp: "3" },
+        }),
+      ]);
+      const flowRow = Array.isArray(flow.inds_netprps) ? flow.inds_netprps[0] : null;
+      if (!flowRow) throw new Error(`키움 ${name} 투자자 수급 응답이 비어 있습니다.`);
+      markets.push({
+        name,
+        index: Math.abs(toNumber(market.cur_prc, `${name} 종가`)),
+        change: toNumber(market.pred_pre, `${name} 전일대비`),
+        changeRate: toNumber(market.flu_rt, `${name} 등락률`),
+        turnoverMillionKrw: toNumber(market.trde_prica, `${name} 거래대금`),
+        individualNetBuyBillionKrw: toNumber(flowRow.ind_netprps, `${name} 개인 순매수`),
+        foreignNetBuyBillionKrw: toNumber(flowRow.frgnr_netprps, `${name} 외국인 순매수`),
+        institutionNetBuyBillionKrw: toNumber(flowRow.orgn_netprps, `${name} 기관 순매수`),
+      });
+    }
+    return { date, markets };
+  }
+
   async placeDomesticMarketOrder({ side, symbol, quantity } = {}) {
     side = String(side || "").toUpperCase();
     symbol = String(symbol || "");

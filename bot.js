@@ -8,7 +8,12 @@ const {
   Events,
   GatewayIntentBits,
 } = require("discord.js");
-const { formatOrderStatus, formatWebhookRecord } = require("./webhook-discord");
+const {
+  formatBuyApproval,
+  formatDailyJournal,
+  formatOrderStatus,
+  formatWebhookRecord,
+} = require("./webhook-discord");
 const { createWebhookService, loadOrCreateWebhookToken } = require("./webhook-server");
 const { SignalReviewBatcher, buildSignalReviewTopic } = require("./signal-review");
 const { TradeController } = require("./trade-controller");
@@ -19,6 +24,14 @@ const { calculatePositionSize, calculateWebhookPositionPreview } = require("./po
 const { loadRecentResearch } = require("./recent-research");
 const { collectTelegramDay, previousDate } = require("./telegram-collector");
 const { createBuyApproval, findBuyApproval, parseBuyApprovalCommand } = require("./buy-approval");
+const {
+  formatDuquesne13fContext,
+  formatInvestorPortfolioMessage,
+  formatMyPortfolioMessage,
+  loadLatestDuquesne13f,
+  loadManager13fContexts,
+  shouldRefreshInvestorPortfolio,
+} = require("./investor-portfolio");
 const {
   extractRoundtableTopic,
   isHelpRequest,
@@ -49,10 +62,16 @@ const AUTO_BRIEFING_TIMES = (process.env.AUTO_BRIEFING_TIMES || "08:30,15:40,22:
   .split(",")
   .map((value) => value.trim())
   .filter(Boolean);
-const BRIEFING_MARKER = "BRIEFING_OK";
+const MANUAL_BRIEFING_TIME = process.env.MANUAL_BRIEFING_TIME || "";
 const TELEGRAM_ENABLED = process.env.TELEGRAM_ENABLED === "true";
 const TELEGRAM_TIMEZONE = process.env.TELEGRAM_TIMEZONE || "Asia/Seoul";
 const TELEGRAM_COLLECT_TIME = process.env.TELEGRAM_COLLECT_TIME || "00:10";
+const INVESTOR_PORTFOLIO_ENABLED = process.env.INVESTOR_PORTFOLIO_ENABLED === "true";
+const INVESTOR_PORTFOLIO_CHANNEL = process.env.INVESTOR_PORTFOLIO_CHANNEL || "주요인사-포트폴리오";
+const INSTITUTION_PORTFOLIO_CHANNEL = process.env.INSTITUTION_PORTFOLIO_CHANNEL || "기관-포트폴리오";
+const INVESTOR_PORTFOLIO_REFRESH_DAYS = Number(process.env.INVESTOR_PORTFOLIO_REFRESH_DAYS || 1);
+const MY_PORTFOLIO_CHANNEL = process.env.MY_PORTFOLIO_CHANNEL || "나의-포트폴리오";
+const MY_PORTFOLIO_SYNC_MINUTES = Number(process.env.MY_PORTFOLIO_SYNC_MINUTES || 10);
 const WEBHOOK_ENABLED = process.env.WEBHOOK_ENABLED === "true";
 const WEBHOOK_HOST = process.env.WEBHOOK_HOST || "127.0.0.1";
 const WEBHOOK_PORT = Number(process.env.WEBHOOK_PORT || 8787);
@@ -146,6 +165,7 @@ let state = loadState();
 let codexQueue = Promise.resolve();
 let briefingInProgress = false;
 let telegramCollectionInProgress = false;
+let investorPortfolioRefreshInProgress = false;
 let webhookService = null;
 let signalReviewBatcher = null;
 let tradingController = null;
@@ -171,6 +191,10 @@ const DEFAULT_PERSONA_BY_CHANNEL = {
 function loadState() {
   if (!fs.existsSync(STATE_FILE)) return {
     sessions: {}, scheduledRuns: {}, reviewedResearch: {}, telegramRuns: {},
+    investorPortfolioContext: "", investorPortfolioUpdatedAt: "", investorPortfolioSourceMtime: 0,
+    investorPortfolioAnnouncedAt: "", investorPortfolioMessageId: "", duquesne13fContext: "", duquesne13fUpdatedAt: "",
+    institutionPortfolioContext: "", institutionPortfolioUpdatedAt: "", institutionPortfolioMessageId: "",
+    myPortfolioMessageId: "", myPortfolioUpdatedAt: "",
     watchlist: {}, watchlistMessageId: "", watchlistMessageIds: [], watchlistSyncRuns: {},
     alertRegistry: {}, alertRegistryMessageIds: [], alertRegistrySyncRuns: {}, alertRegistryUpdatedAt: "",
     dailyJournals: {}, journaledOrders: {}, buyApprovals: {}, scheduledPaperExits: {},
@@ -182,6 +206,18 @@ function loadState() {
       scheduledRuns: parsed.scheduledRuns || {},
       reviewedResearch: parsed.reviewedResearch || {},
       telegramRuns: parsed.telegramRuns || {},
+      investorPortfolioContext: parsed.investorPortfolioContext || "",
+      investorPortfolioUpdatedAt: parsed.investorPortfolioUpdatedAt || "",
+      investorPortfolioSourceMtime: Number(parsed.investorPortfolioSourceMtime || 0),
+      investorPortfolioAnnouncedAt: parsed.investorPortfolioAnnouncedAt || "",
+      investorPortfolioMessageId: parsed.investorPortfolioMessageId || "",
+      duquesne13fContext: parsed.duquesne13fContext || "",
+      duquesne13fUpdatedAt: parsed.duquesne13fUpdatedAt || "",
+      institutionPortfolioContext: parsed.institutionPortfolioContext || "",
+      institutionPortfolioUpdatedAt: parsed.institutionPortfolioUpdatedAt || "",
+      institutionPortfolioMessageId: parsed.institutionPortfolioMessageId || "",
+      myPortfolioMessageId: parsed.myPortfolioMessageId || "",
+      myPortfolioUpdatedAt: parsed.myPortfolioUpdatedAt || "",
       watchlist: parsed.watchlist || {},
       watchlistMessageId: parsed.watchlistMessageId || "",
       watchlistMessageIds: parsed.watchlistMessageIds || (parsed.watchlistMessageId ? [parsed.watchlistMessageId] : []),
@@ -223,14 +259,30 @@ function personaPrompt(persona, question) {
     "최근 Discord 대화는 이 채널의 모든 AI가 공유하는 공용 대화 기록입니다. 생략된 주어와 대명사를 문맥에 맞춰 해석하고, 이미 나온 말을 반복하지 말고 직전 흐름을 이어서 답하세요.",
     "안부, 농담, 일상적인 잡담에는 투자 방법론을 억지로 설명하지 말고 자연스러운 대화로 짧게 답하세요.",
     "실제 인물의 현재 보유 종목, 발언 또는 확신을 꾸며내지 마세요. 개인화된 매수·매도 지시 대신 분석 근거, 반대 근거, 무효화 조건과 위험을 제시하세요.",
+    "포트폴리오 요약에 종목이 없다는 사실만으로 미보유라고 단정하지 마세요. 전체 공시인지 일부 공개 언급인지 먼저 구분하고, 공개 근거가 부족하면 '보유하지 않는다'가 아니라 '공개 자료로 확인되지 않는다'고 답하세요.",
     "실시간 정보 확인에는 웹 검색을 사용하세요. 셸 명령, 로컬 파일 읽기·쓰기, 코드 수정 도구는 사용하지 말고 대화 답변만 작성하세요.",
     "다른 AI의 발언이 전달되면 무조건 동의하지 말고 자신의 관점에서 검토하세요.",
     `<shared-trading-context>\n${SHARED_TRADING_CONTEXT}\n</shared-trading-context>`,
+    state.investorPortfolioContext
+      ? `<investor-portfolio-context>\n${state.investorPortfolioContext}\n</investor-portfolio-context>`
+      : "",
+    state.institutionPortfolioContext
+      ? `<institution-portfolio-context>\n${state.institutionPortfolioContext}\n</institution-portfolio-context>`
+      : "",
+    duquesne13fEvidence(persona, question),
     peerMentions ? `혼자 답하기 어려워 다른 관점이 실질적으로 필요할 때만 다음 AI 중 정확히 한 명에게 구체적인 질문 하나를 덧붙이세요: ${peerMentions}. 상대 AI의 요청에 답하는 중이라면 다른 AI를 다시 부르지 마세요.` : "",
     "Discord에 바로 게시할 답변 본문만 출력하세요.",
     "",
     question,
   ].join("\n");
+}
+
+function duquesne13fEvidence(persona, question) {
+  if (!state.duquesne13fContext) return "";
+  const asksHoldings = /보유|갖고|가지고|포트폴리오|포폴|13f|매입|매수한|종목/.test(normalizeName(question));
+  const namesDruckenmiller = PERSONAS[0].aliases.some((alias) => normalizeName(question).includes(normalizeName(alias)));
+  if (!asksHoldings || (!namesDruckenmiller && persona.id !== "druckenmiller")) return "";
+  return `<duquesne-13f-full-evidence>\n${state.duquesne13fContext}\n</duquesne-13f-full-evidence>`;
 }
 
 function enqueueCodex(work) {
@@ -386,11 +438,6 @@ function parseCodexJsonl(output) {
   return { sessionId, text: text.trim() };
 }
 
-function stripRequiredPrefix(answer, prefix = "") {
-  if (prefix && !answer.startsWith(prefix)) return "";
-  return (prefix ? answer.slice(prefix.length) : answer).trim();
-}
-
 function webhookAge(receivedAt, now = Date.now()) {
   const elapsed = now - Date.parse(receivedAt);
   if (!Number.isFinite(elapsed) || elapsed < 0) return "경과시간 불명";
@@ -484,6 +531,21 @@ async function sendChunks(channel, text, allowedMentions) {
   if (!remaining) return;
   const chunks = splitDiscordText(remaining);
   for (const chunk of chunks) await channel.send(allowedMentions ? { content: chunk, allowedMentions } : chunk);
+}
+
+async function sendFormattedWebhook(channel, formatted, content = "") {
+  if (!formatted.embed) return sendChunks(channel, `${content}${content ? "\n" : ""}${formatted.text}`, { parse: [] });
+  const message = { embeds: [formatted.embed], allowedMentions: { parse: [] } };
+  if (content) message.content = content.trim();
+  return channel.send(message);
+}
+
+async function editOrSend(channel, messageId, payload) {
+  let message = null;
+  if (messageId) {
+    try { message = await channel.messages.fetch(messageId); } catch {}
+  }
+  return message ? message.edit(payload) : channel.send(payload);
 }
 
 async function withTyping(channel, work) {
@@ -662,7 +724,6 @@ async function runRoundtable(message, topic, {
   includeResearchImages = true,
   dedupeResearch = false,
   participants = PERSONAS,
-  requiredPrefix = "",
 } = {}) {
   const version = conversationVersion(message.channel.id);
   roundtableChannels.add(message.channel.id);
@@ -674,11 +735,6 @@ async function runRoundtable(message, topic, {
     catch (error) { console.warn("최근 참고자료를 읽지 못했습니다:", error.message); }
   }
   const researchImages = includeResearchImages ? research.images : [];
-  if (research.files.length) {
-    const names = research.files.map((item) => `\`${path.basename(item.file).normalize("NFC")}\``).join(", ");
-    await message.channel.send(`📚 **최근 추가 자료 참고** — ${names}`);
-    if (researchImages.length) await message.channel.send(`🖼️ **Telegram 원본 이미지 ${researchImages.length}장도 함께 확인합니다.**`);
-  }
   const researchContext = research.context ? `\n\n${research.context}` : "";
   const statements = [];
   for (let index = 0; index < participants.length; index += 1) {
@@ -704,8 +760,7 @@ async function runRoundtable(message, topic, {
           version,
         ),
       );
-      const publishedAnswer = stripRequiredPrefix(answer, requiredPrefix);
-      if (requiredPrefix && !publishedAnswer) throw new Error("실시간 검색을 완료한 브리핑 응답이 아닙니다.");
+      const publishedAnswer = answer.trim();
       if (!publishedAnswer) throw new Error("브리핑 본문이 비어 있습니다.");
       statements.push({ name: persona.name, text: publishedAnswer });
       await sendChunks(channel, publishedAnswer);
@@ -768,6 +823,77 @@ function scheduledTopic(time) {
   if (time === "15:40") return "국내장 마감 복기: 코스피·코스닥 종가와 등락, 거래대금, 외국인·기관 수급, 원달러, 아시아 주요 지수, 주도 업종·종목과 뉴스를 최신 자료로 확인하세요. 다음 5거래일의 경제지표·중앙은행·실적 등 주요 이벤트와 다음 거래일 위험도 날짜와 시간대로 정리해 토론하세요.";
   if (time === "22:00") return "미국장 준비: S&P500·나스닥 선물, 미국 2년·10년물 금리, 달러인덱스·유가·VIX, 주요 실적과 뉴스를 최신 자료로 확인하세요. 앞으로 5거래일의 경제지표·중앙은행·실적 등 주요 이벤트를 날짜와 시간대로 정리하고 가능한 장세 시나리오를 토론하세요.";
   return "현재 시점 자동 시장 브리핑: 최신 시장 자료와 뉴스를 확인하고 기회, 반대 근거, 핵심 위험을 토론하세요.";
+}
+
+function formatDomesticCloseSnapshot(snapshot, usdExchangeRate) {
+  const signed = (value) => `${value > 0 ? "+" : ""}${value.toLocaleString("ko-KR")}`;
+  const lines = snapshot.markets.map((market) => [
+    `${market.name} ${market.index.toLocaleString("ko-KR")} (${signed(market.change)}, ${signed(market.changeRate)}%)`,
+    `거래대금 ${(market.turnoverMillionKrw / 1_000_000).toLocaleString("ko-KR", { maximumFractionDigits: 2 })}조원`,
+    `개인 ${signed(market.individualNetBuyBillionKrw)}억원 / 외국인 ${signed(market.foreignNetBuyBillionKrw)}억원 / 기관 ${signed(market.institutionNetBuyBillionKrw)}억원`,
+  ].join(" / "));
+  if (Number.isFinite(usdExchangeRate)) lines.push(`원·달러 키움 계좌 환산환율 ${usdExchangeRate.toLocaleString("ko-KR")}원/USD`);
+  return [`기준일 ${snapshot.date}`, ...lines].join("\n");
+}
+
+async function domesticCloseContext(clock) {
+  const [marketResult, cashResult] = await Promise.allSettled([
+    getDomesticKiwoomClient().getDomesticMarketClose({ date: clock.date.replaceAll("-", "") }),
+    getOverseasKiwoomClient().getUsCash(),
+  ]);
+  if (marketResult.status === "fulfilled") {
+    const snapshot = formatDomesticCloseSnapshot(
+      marketResult.value,
+      cashResult.status === "fulfilled" ? cashResult.value.usdExchangeRate : null,
+    );
+    return {
+      prompt: `키움 REST에서 먼저 조회한 국내장 마감 스냅샷입니다. 아래 수치는 다시 추정하지 말고 브리핑의 기준값으로 사용하세요.\n${snapshot}\n그 밖의 아시아 지수·업종·뉴스·일정은 실시간 웹 검색으로 보완하고 각 수치의 확인 시각과 출처를 밝히세요.`,
+      fallback: `📊 **${clock.date} 국내장 마감 수치**\n${snapshot}\n\nAI 해설은 지연됐지만 확인된 마감 수치는 먼저 게시합니다.`,
+    };
+  }
+  return {
+    prompt: `키움 REST 마감 수치 선조회가 실패했습니다: ${String(marketResult.reason?.message || marketResult.reason).slice(0, 200)}\n브리핑을 생략하지 말고 코스피·코스닥 종가·등락·거래대금·외국인 및 기관 수급을 최신 웹 자료에서 반드시 찾아 출처와 확인 시각을 밝히세요. 값을 찾지 못한 항목만 명확히 구분하세요.`,
+    fallback: `📊 **${clock.date} 국내장 마감 브리핑 지연**\n키움 마감 수치 조회 실패: ${String(marketResult.reason?.message || marketResult.reason).slice(0, 200)}\n\nAI 해설도 지연되어 조회 상태를 먼저 게시합니다.`,
+  };
+}
+
+function formatUsMarketSnapshot(quotes) {
+  const signed = (value) => `${value > 0 ? "+" : ""}${value.toLocaleString("en-US")}`;
+  return quotes.map(({ label, quote }) => {
+    const range = Number.isFinite(quote.dayLow) && Number.isFinite(quote.dayHigh)
+      ? ` / 당일 ${quote.dayLow.toLocaleString("en-US")}~${quote.dayHigh.toLocaleString("en-US")}`
+      : "";
+    return `${label} ${quote.currentPrice.toLocaleString("en-US")} (${signed(quote.changeRate)}%)${range}`;
+  }).join("\n");
+}
+
+async function usMarketContext(clock) {
+  const proxies = [
+    ["S&P500 ETF SPY", "NY", "SPY"],
+    ["나스닥100 ETF QQQ", "ND", "QQQ"],
+    ["러셀2000 ETF IWM", "NY", "IWM"],
+    ["반도체 ETF SOXX", "ND", "SOXX"],
+  ];
+  const quotes = [];
+  const failures = [];
+  for (const [label, exchange, symbol] of proxies) {
+    try {
+      if (quotes.length || failures.length) await new Promise((resolve) => setTimeout(resolve, 1100));
+      quotes.push({ label, quote: await getOverseasKiwoomClient().getUsQuote({ exchange, symbol }) });
+    } catch (error) {
+      failures.push(`${symbol}: ${String(error.message).slice(0, 120)}`);
+    }
+  }
+  const snapshot = quotes.length ? formatUsMarketSnapshot(quotes) : "조회 성공한 미국 시장 ETF가 없습니다.";
+  const failureText = failures.length ? `\n조회 실패: ${failures.join(" / ")}` : "";
+  return {
+    prompt: `키움 REST에서 먼저 조회한 미국 시장 ETF 스냅샷입니다 (${new Date().toISOString()}). 지수·선물 자체가 아닌 방향 확인용 ETF이므로 그렇게 명시하세요.\n${snapshot}${failureText}\n정확한 S&P500·나스닥 선물, 미국 2년·10년물 금리, 달러인덱스, 유가와 VIX는 최신 웹 검색으로 별도 확인하고 출처와 확인 시각을 밝히세요. 찾지 못한 항목 때문에 브리핑 전체를 생략하지 마세요.`,
+    fallback: `📊 **${clock.time} 미국 시장 확인 스냅샷**\n${snapshot}${failureText}\n\nAI 해설은 지연됐지만 키움에서 확인한 ETF 시세는 먼저 게시합니다. 선물·금리·달러·유가·VIX와 동일한 상품은 아닙니다.`,
+  };
+}
+
+async function briefingSourceContext(clock) {
+  return clock.time === "15:40" ? domesticCloseContext(clock) : usMarketContext(clock);
 }
 
 function findTextChannelByName(name) {
@@ -1046,14 +1172,6 @@ async function updateWatchlist(record) {
   await syncWatchlistMessage();
 }
 
-function formatDailyJournal(date, entries) {
-  return [
-    `📘 **${date} 모의매매 일지**`,
-    ...entries,
-    "※ 키움 모의계좌 체결 기준",
-  ].join("\n");
-}
-
 async function appendDailyJournal(order) {
   if (order.status !== "FILLED" || order.source === "TRADINGVIEW_TEST" || state.journaledOrders[order.orderNo]) return;
   const channel = findTextChannelByName(JOURNAL_CHANNEL);
@@ -1074,9 +1192,11 @@ async function appendDailyJournal(order) {
   if (journal.messageId) {
     try { message = await channel.messages.fetch(journal.messageId); } catch {}
   }
-  if (message) await message.edit(formatDailyJournal(clock.date, journal.entries));
+  const formatted = formatDailyJournal(clock.date, journal.entries);
+  const messagePayload = { embeds: [formatted.embed], allowedMentions: { parse: [] } };
+  if (message) await message.edit(messagePayload);
   else {
-    message = await channel.send(formatDailyJournal(clock.date, journal.entries));
+    message = await channel.send(messagePayload);
     journal.messageId = message.id;
   }
   state.dailyJournals[clock.date] = journal;
@@ -1120,7 +1240,7 @@ async function submitAndTrackOrder(record) {
   let tracking = null;
   if (record.orderAttempt?.status === "ACCEPTED") {
     const approvalChannel = findTextChannelByName(ORDER_APPROVAL_CHANNEL);
-    if (approvalChannel) await sendChunks(approvalChannel, formatOrderStatus(record.orderAttempt).text);
+    if (approvalChannel) await sendFormattedWebhook(approvalChannel, formatOrderStatus(record.orderAttempt));
     tracking = record.payload?.paper_order_test === true
       ? trackPaperTestOrder(record.orderAttempt, { client: getDomesticKiwoomClient(), tracker: orderTracker })
       : trackPaperOrder(record.orderAttempt, {
@@ -1213,16 +1333,7 @@ async function queueBuyApproval(record) {
   saveState();
   const channel = findTextChannelByName(ORDER_APPROVAL_CHANNEL);
   if (channel) {
-    await channel.send([
-      "⏳ **BUY 승인 대기**",
-      `종목: **${approval.name || approval.ticker} (${approval.ticker})** / ${record.payload.exchange}`,
-      `신호: ${record.payload.type} / 가격 ${record.payload.price} / 손절 ${record.payload.sl}`,
-      `유효시간: ${BUY_APPROVAL_TTL_MINUTES}분`,
-      `승인: \`사줘 ${approval.ticker}\``,
-      record.positionPreview?.earlyEntry
-        ? "승인 시 잔고를 다시 확인하며 기본 위험 절반·한 종목 최대 10%로 제한합니다."
-        : "승인 시 잔고·기존 비중·20% 한도·보유 종목 수를 다시 확인합니다.",
-    ].join("\n"));
+    await sendFormattedWebhook(channel, formatBuyApproval(record, approval, BUY_APPROVAL_TTL_MINUTES));
   }
 }
 
@@ -1233,7 +1344,7 @@ async function publishWebhookRecord(record, options = {}) {
       || (formatted.channel === "signal" ? WEBHOOK_SIGNAL_CHANNEL : WEBHOOK_SYSTEM_CHANNEL);
     const channel = findTextChannelByName(channelName);
     if (!channel) throw new Error(`Discord 채널을 찾지 못했습니다: #${channelName}`);
-    await sendChunks(channel, `♻️ **수신 중단 중 발생한 신호 복구**\n${formatted.text}`, { parse: [] });
+    await sendFormattedWebhook(channel, formatted, "♻️ **수신 중단 중 발생한 신호 복구**");
     return;
   }
   await updateWatchlist(record);
@@ -1246,7 +1357,7 @@ async function publishWebhookRecord(record, options = {}) {
     || (formatted.channel === "signal" ? WEBHOOK_SIGNAL_CHANNEL : WEBHOOK_SYSTEM_CHANNEL);
   const channel = findTextChannelByName(channelName);
   if (!channel) throw new Error(`Discord 채널을 찾지 못했습니다: #${channelName}`);
-  await sendChunks(channel, formatted.text, { parse: [] });
+  await sendFormattedWebhook(channel, formatted);
   signalReviewBatcher?.add(record);
 }
 
@@ -1328,6 +1439,38 @@ async function getDomesticAccountSnapshot() {
     holdingPositions: balance.holdings,
   };
   return domesticAccountCache;
+}
+
+async function syncMyPortfolioMessage() {
+  if (!KIWOOM_ENABLED) return false;
+  const channel = findTextChannelByName(MY_PORTFOLIO_CHANNEL);
+  if (!channel) return false;
+  const [domestic, overseas] = await Promise.all([
+    getDomesticAccountSnapshot(),
+    getUsAccountSnapshot(),
+  ]);
+  const updatedAt = new Date().toISOString();
+  const message = await editOrSend(channel, state.myPortfolioMessageId, formatMyPortfolioMessage({
+    domestic,
+    overseas,
+    environment: KIWOOM_ENV,
+    updatedAt,
+  }));
+  state.myPortfolioMessageId = message.id;
+  state.myPortfolioUpdatedAt = updatedAt;
+  saveState();
+  return true;
+}
+
+function startMyPortfolioScheduler() {
+  if (!KIWOOM_ENABLED) return;
+  console.log(`나의 포트폴리오 갱신: ${MY_PORTFOLIO_SYNC_MINUTES}분마다 #${MY_PORTFOLIO_CHANNEL}`);
+  void syncMyPortfolioMessage().catch((error) => console.error("나의 포트폴리오 갱신 실패:", error.message));
+  setInterval(() => {
+    usAccountCache = null;
+    domesticAccountCache = null;
+    void syncMyPortfolioMessage().catch((error) => console.error("나의 포트폴리오 갱신 실패:", error.message));
+  }, MY_PORTFOLIO_SYNC_MINUTES * 60_000);
 }
 
 async function buildPositionPreview(record) {
@@ -1555,12 +1698,17 @@ async function handleBuyApprovalCommand(message, content) {
   }
 }
 
-function startOrderStatusWatcher() {
+async function startOrderStatusWatcher() {
+  const expired = orderTracker.expirePreviousDayOrders();
+  if (expired.length) console.log(`거래일이 지난 미완료 주문 ${expired.length}건을 만료 처리했습니다.`);
   let revision = orderTracker.snapshot().revision;
-  const pending = orderTracker.pending();
+  const pending = orderTracker.unnotifiedPending();
   if (pending.length) {
     const channel = findTextChannelByName(WEBHOOK_SYSTEM_CHANNEL);
-    if (channel) sendChunks(channel, `♻️ **재시작 복구** — 미완료 키움 모의주문 ${pending.length}건을 불러왔습니다.`).catch(console.error);
+    if (channel) {
+      await sendChunks(channel, `♻️ **재시작 복구** — 미완료 키움 모의주문 ${pending.length}건을 불러왔습니다.`);
+      orderTracker.markRecoveryNotified(pending);
+    }
   }
   fs.watchFile(KIWOOM_ORDER_STATE_FILE, { interval: 1000 }, async () => {
     try {
@@ -1572,8 +1720,15 @@ function startOrderStatusWatcher() {
       const channel = findTextChannelByName(ORDER_EXECUTION_CHANNEL);
       for (const order of changed.filter((item) => item.status !== "ACCEPTED")) {
         updateScheduledPaperExitFromOrder(order);
-        if (channel) await sendChunks(channel, formatOrderStatus(order).text);
+        if (channel) await sendFormattedWebhook(channel, formatOrderStatus(order));
         await appendDailyJournal(order);
+        if (order.status === "FILLED") {
+          usAccountCache = null;
+          domesticAccountCache = null;
+          await syncMyPortfolioMessage().catch((error) => {
+            console.error("나의 포트폴리오 체결 후 갱신 실패:", error.message);
+          });
+        }
       }
     } catch (error) {
       console.error("키움 주문상태 알림 실패:", error.message);
@@ -1619,12 +1774,13 @@ async function startWebhookReceiver() {
   console.log(`웹훅 수신기: http://${WEBHOOK_HOST}:${WEBHOOK_PORT}/webhook/<secret> (${KIWOOM_ENABLED && KIWOOM_ENV === "mock" ? "모의주문 연결" : "주문 차단"})`);
 }
 
-async function checkScheduledBriefing(now = new Date()) {
+async function checkScheduledBriefing(now = new Date(), forceTime = "") {
   if (!AUTO_BRIEFING_ENABLED || briefingInProgress) return false;
   const clock = zonedClock(now);
+  if (forceTime) clock.time = forceTime;
   if (AUTO_BRIEFING_WEEKDAYS_ONLY && ["Sat", "Sun"].includes(clock.weekday)) return false;
   if (!AUTO_BRIEFING_TIMES.includes(clock.time)) return false;
-  const runKey = `${clock.date}|${clock.time}`;
+  const runKey = forceTime ? `${clock.date}|${clock.time}|manual-${Date.now()}` : `${clock.date}|${clock.time}`;
   if (state.scheduledRuns[runKey]) return false;
   const channel = findBriefingChannel();
   if (!channel) {
@@ -1639,20 +1795,21 @@ async function checkScheduledBriefing(now = new Date()) {
   saveState();
   try {
     await channel.send(`⏰ **${clock.time} 자동 시장 브리핑을 시작합니다.**`);
+    const sourceContext = await briefingSourceContext(clock);
     delete state.sessions[sessionKey(PERSONAS[0].id, channel.id)];
     saveState();
     const responses = await runRoundtable(
       { channel },
-      `${scheduledTopic(clock.time)}\n\n실시간 웹 검색을 완료했다면 답변 첫 줄에 정확히 ${BRIEFING_MARKER}를 적으세요. 검색하지 못했다면 이 표식을 쓰지 마세요.`,
+      `${scheduledTopic(clock.time)}\n\n${sourceContext.prompt}\n\n반드시 최신 웹 검색과 제공된 스냅샷을 함께 사용해 브리핑을 완성하세요. 확인되지 않은 수치를 추정하지 마세요.`,
       {
         includeResearch: true,
         includeResearchImages: false,
         dedupeResearch: true,
         participants: [PERSONAS[0]],
-        requiredPrefix: BRIEFING_MARKER,
       },
     );
-    if (!responses) throw new Error("완료된 자동 브리핑 응답이 없습니다.");
+    if (!responses && sourceContext.fallback) await channel.send(sourceContext.fallback);
+    else if (!responses) throw new Error("완료된 자동 브리핑 응답이 없습니다.");
     state.scheduledRuns[runKey] = { status: "COMPLETED", startedAt, completedAt: new Date().toISOString() };
     saveState();
     return true;
@@ -1706,6 +1863,134 @@ function startTelegramScheduler() {
   setInterval(() => {
     void checkTelegramCollection().catch((error) => console.error("Telegram 일일 수집 실패:", error.message));
   }, 60_000);
+}
+
+function investorPortfolioRefreshRequested(text) {
+  return /(?:투자자|무니|기관).*(?:포트폴리오|포폴).*(?:갱신|업데이트|새로)/.test(text);
+}
+
+function investorPortfolioPrompt(researchContext, secContext) {
+  return [
+    "투자 관점 AI가 공유할 최신 공개 포트폴리오·종목 언급 문맥을 작성하세요.",
+    "갱신 대상은 스탠리 드러켄밀러, 워런 버핏, 캐시 우드, 마이클 버리, 조지 소로스, 레오폴드 아셴브레너와 사용자 제공 자료의 무니입니다. 레이 달리오, 빌 애크먼, 윌리엄 오닐, 제시 리버모어, 마크 미너비니, 크리스티안 쿨라메기는 현재 공개 포트폴리오 대상에서 제외하세요.",
+    "드러켄밀러는 아래 Duquesne SEC 전체 13F 명세를 최우선 근거로 사용하세요. 그 밖에는 Berkshire Hathaway(CIK 1067983), ARK Investment Management(CIK 1697748), Scion Asset Management(CIK 1649339), Soros Fund Management(CIK 1029160), Situational Awareness LP(CIK 2045724)의 최신 SEC 13F-HR 정보표와 공식 자료만 사용하세요. 제출목록 페이지만 보고 멈추지 말고 최신 정보표 원문에서 상위 항목을 확인하세요.",
+    "각 인물은 최신 공식 공시의 상위 7개 종목을 공시가액 비중 내림차순으로 적고, 공시 항목이 7개보다 적으면 확인되는 만큼만 적으세요. 종목명·티커·비중은 한 줄에 표시하세요. 주식·콜·풋이 섞이면 유형을 구분하고 옵션 공시가액은 실제 투자원금이 아니라 기초자산 명목가일 수 있다고 짧게 밝히세요.",
+    "운용사 공시를 개인의 실시간 보유로 표현하지 말고 보고일을 붙이세요. 13F는 지연된 미국 상장 롱·일부 옵션 공시이며 숏·현금·비상장 자산·공시 뒤 거래는 보여주지 않는다는 공통 한계는 상태판 맨 아래 한 번만 적으세요.",
+    "무니는 아래 사용자 제공 무니인사이트 채팅·자료에서 실제 매입·보유, 관심·긍정 언급, 단순 뉴스 언급을 구분하세요. 파일명에 무니가 없는 PDF는 무니 채팅에서 인용한 경우에만 무니 자료로 연결하세요.",
+    "무니는 최신 자료의 핵심 종목을 최대 5개만 적고, 출처에는 긴 파일명을 나열하지 말고 '최근 무니인사이트 자료 N건'처럼 자료 수와 최신 자료일만 짧게 적으세요.",
+    "각 인물의 출처는 공식 링크 하나와 보고일만 60자 안팎으로 짧게 적고, 확인 불가하면 없다고 명시하세요. 현재 사실은 웹에서 다시 확인하세요.",
+    "표시는 각 인물의 이름·운용사를 굵은 제목 한 줄로 끝내고 빈 줄을 넣은 뒤, 그 아래에 종목을 한 줄에 하나씩 불릿으로 나열하세요. 인물 제목 뒤에 종목들을 문장으로 이어 붙이지 마세요.",
+    "Discord 상태판에 담을 수 있도록 4,000자 이내의 한국어 요약만 출력하세요.",
+    secContext || "SEC 전체 13F 명세를 불러오지 못했습니다. 드러켄밀러의 특정 종목 보유 여부를 단정하지 마세요.",
+    researchContext || "사용자 제공 무니 자료를 읽지 못했습니다. 무니 항목은 확인 불가로 표시하세요.",
+  ].join("\n\n");
+}
+
+async function checkInvestorPortfolioRefresh(now = new Date(), force = false) {
+  if (!INVESTOR_PORTFOLIO_ENABLED || investorPortfolioRefreshInProgress) return false;
+  const refreshDue = shouldRefreshInvestorPortfolio(
+    state.investorPortfolioUpdatedAt,
+    now.getTime(),
+    INVESTOR_PORTFOLIO_REFRESH_DAYS,
+  );
+  if (!force && !refreshDue) {
+    const channel = findTextChannelByName(INVESTOR_PORTFOLIO_CHANNEL);
+    if (!channel || state.investorPortfolioMessageId || !state.investorPortfolioContext) return false;
+    const message = await editOrSend(channel, "", formatInvestorPortfolioMessage(
+      state.investorPortfolioContext,
+      state.investorPortfolioUpdatedAt,
+    ));
+    state.investorPortfolioMessageId = message.id;
+    state.investorPortfolioAnnouncedAt = state.investorPortfolioUpdatedAt;
+    saveState();
+    return true;
+  }
+
+  investorPortfolioRefreshInProgress = true;
+  try {
+    const research = process.env.RESEARCH_ENABLED === "true"
+      ? loadRecentResearch({ lookbackDays: 31, maxFiles: 100, maxPages: 8, maxChars: 30_000, maxImages: 0 })
+      : { context: "", files: [] };
+    let secContext = state.duquesne13fContext;
+    try {
+      secContext = formatDuquesne13fContext(await loadLatestDuquesne13f({ userAgent: process.env.SEC_USER_AGENT }));
+      state.duquesne13fContext = secContext;
+      state.duquesne13fUpdatedAt = new Date().toISOString();
+    } catch (error) {
+      console.error("Duquesne SEC 13F 전체 명세 갱신 실패:", error.message);
+    }
+    const public13fContext = await loadManager13fContexts([
+      { name: "워런 버핏 · Berkshire Hathaway", cik: 1067983 },
+      { name: "캐시 우드 · ARK Investment Management", cik: 1697748 },
+      { name: "마이클 버리 · Scion Asset Management", cik: 1649339 },
+      { name: "조지 소로스 · Soros Fund Management", cik: 1029160 },
+      { name: "레오폴드 아셴브레너 · Situational Awareness LP", cik: 2045724 },
+    ], 7, { userAgent: process.env.SEC_USER_AGENT });
+    const key = sessionKey(PERSONAS[0].id, "investor-portfolio-refresh");
+    delete state.sessions[key];
+    saveState();
+    const answer = (await runCodex(
+      PERSONAS[0],
+      investorPortfolioPrompt(research.context, [secContext, public13fContext].filter(Boolean).join("\n\n")),
+      [],
+      "investor-portfolio-refresh",
+    )).trim();
+    if (!answer) throw new Error("투자자 포트폴리오 문맥이 비어 있습니다.");
+    const institutionHoldings = await loadManager13fContexts([
+      { name: "Citadel Advisors", cik: 1423053 },
+      { name: "BlackRock", cik: 2012383 },
+      { name: "Vanguard Group", cik: 102909 },
+      { name: "State Street", cik: 93751 },
+      { name: "FMR · Fidelity", cik: 315066 },
+      { name: "Capital Research Global Investors", cik: 1422848 },
+      { name: "JPMorgan Chase", cik: 19617 },
+      { name: "Goldman Sachs", cik: 886982 },
+      { name: "Morgan Stanley", cik: 895421 },
+      { name: "Renaissance Technologies", cik: 1037389 },
+    ], 4, { userAgent: process.env.SEC_USER_AGENT });
+    const institutionAnswer = `${institutionHoldings}\n\n13F는 지연 공시이며 숏·현금·비상장·공시 후 거래를 보여주지 않습니다. 지수·고객자산·수탁·마켓메이킹·헤지 목적 보유는 기관의 확신 매수로 해석하면 안 됩니다.`.trim();
+    if (!institutionAnswer) throw new Error("기관 포트폴리오 문맥이 비어 있습니다.");
+    state.investorPortfolioContext = answer;
+    state.investorPortfolioUpdatedAt = new Date().toISOString();
+    state.institutionPortfolioContext = institutionAnswer;
+    state.institutionPortfolioUpdatedAt = state.investorPortfolioUpdatedAt;
+    state.investorPortfolioSourceMtime = Math.max(0, ...research.files.map((item) => item.mtimeMs || 0));
+    delete state.sessions[key];
+    saveState();
+    const channel = findTextChannelByName(INVESTOR_PORTFOLIO_CHANNEL);
+    if (channel) {
+      const message = await editOrSend(channel, state.investorPortfolioMessageId, formatInvestorPortfolioMessage(
+        answer,
+        state.investorPortfolioUpdatedAt,
+      ));
+      state.investorPortfolioMessageId = message.id;
+      state.investorPortfolioAnnouncedAt = state.investorPortfolioUpdatedAt;
+      saveState();
+    }
+    const institutionChannel = findTextChannelByName(INSTITUTION_PORTFOLIO_CHANNEL);
+    if (institutionChannel) {
+      const message = await editOrSend(
+        institutionChannel,
+        state.institutionPortfolioMessageId,
+        formatInvestorPortfolioMessage(institutionAnswer, state.institutionPortfolioUpdatedAt, "주요 기관 공개 포트폴리오"),
+      );
+      state.institutionPortfolioMessageId = message.id;
+      saveState();
+    }
+    return true;
+  } finally {
+    investorPortfolioRefreshInProgress = false;
+  }
+}
+
+function startInvestorPortfolioScheduler() {
+  if (!INVESTOR_PORTFOLIO_ENABLED) return;
+  console.log(`투자자 포트폴리오 갱신: ${INVESTOR_PORTFOLIO_REFRESH_DAYS}일마다 #${INVESTOR_PORTFOLIO_CHANNEL}`);
+  console.log(`기관 포트폴리오 갱신: ${INVESTOR_PORTFOLIO_REFRESH_DAYS}일마다 #${INSTITUTION_PORTFOLIO_CHANNEL}`);
+  void checkInvestorPortfolioRefresh().catch((error) => console.error("투자자 포트폴리오 갱신 실패:", error.message));
+  setInterval(() => {
+    void checkInvestorPortfolioRefresh().catch((error) => console.error("투자자 포트폴리오 갱신 실패:", error.message));
+  }, 60 * 60 * 1000);
 }
 
 function cleanMention(message, client) {
@@ -1811,6 +2096,15 @@ async function handleMessage(persona, client, message, edited = false) {
     return;
   }
 
+  if (investorPortfolioRefreshRequested(content)) {
+    if (persona.id === PERSONAS[0].id) {
+      await message.reply("무니 제공 자료와 생존 투자자의 최신 공개 자료를 다시 확인합니다.");
+      const refreshed = await checkInvestorPortfolioRefresh(new Date(), true);
+      if (!refreshed) await message.reply("투자자 포트폴리오 갱신이 이미 진행 중입니다.");
+    }
+    return;
+  }
+
   const safeTradeCommand = naturalTradeCommand(content);
   if (safeTradeCommand) {
     if (persona.id === PERSONAS[0].id) await handleTradingCommand(message, safeTradeCommand);
@@ -1897,8 +2191,15 @@ function validateConfig() {
   if (!AUTO_BRIEFING_TIMES.length || AUTO_BRIEFING_TIMES.some((value) => !/^([01]\d|2[0-3]):[0-5]\d$/.test(value))) {
     throw new Error("AUTO_BRIEFING_TIMES는 08:30,15:40처럼 HH:MM 형식이어야 합니다.");
   }
+  if (MANUAL_BRIEFING_TIME && !AUTO_BRIEFING_TIMES.includes(MANUAL_BRIEFING_TIME)) {
+    throw new Error("MANUAL_BRIEFING_TIME은 AUTO_BRIEFING_TIMES에 포함된 시간이어야 합니다.");
+  }
   if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(TELEGRAM_COLLECT_TIME)) {
     throw new Error("TELEGRAM_COLLECT_TIME은 00:10처럼 HH:MM 형식이어야 합니다.");
+  }
+  if (!Number.isInteger(INVESTOR_PORTFOLIO_REFRESH_DAYS)
+      || INVESTOR_PORTFOLIO_REFRESH_DAYS < 1 || INVESTOR_PORTFOLIO_REFRESH_DAYS > 365) {
+    throw new Error("INVESTOR_PORTFOLIO_REFRESH_DAYS는 1~365 범위의 정수여야 합니다.");
   }
   if (WEBHOOK_ENABLED && (!Number.isInteger(WEBHOOK_PORT) || WEBHOOK_PORT < 1 || WEBHOOK_PORT > 65535)) {
     throw new Error("WEBHOOK_PORT가 올바르지 않습니다.");
@@ -1917,6 +2218,9 @@ function validateConfig() {
   }
   if (!Number.isInteger(BUY_APPROVAL_TTL_MINUTES) || BUY_APPROVAL_TTL_MINUTES < 1 || BUY_APPROVAL_TTL_MINUTES > 1440) {
     throw new Error("BUY_APPROVAL_TTL_MINUTES는 1~1440 범위의 정수여야 합니다.");
+  }
+  if (!Number.isInteger(MY_PORTFOLIO_SYNC_MINUTES) || MY_PORTFOLIO_SYNC_MINUTES < 1 || MY_PORTFOLIO_SYNC_MINUTES > 1440) {
+    throw new Error("MY_PORTFOLIO_SYNC_MINUTES는 1~1440 범위의 정수여야 합니다.");
   }
   if (!["OFF", "SHADOW", "PAPER_AUTO"].includes(TRADING_MODE)) {
     throw new Error("TRADING_MODE는 OFF, SHADOW, PAPER_AUTO 중 하나여야 합니다.");
@@ -1972,12 +2276,15 @@ async function main() {
   await checkAlertRegistrySync(new Date(), true);
   startAlertRegistryScheduler();
   startTradingController();
-  startOrderStatusWatcher();
+  startMyPortfolioScheduler();
+  await startOrderStatusWatcher();
   startScheduledPaperExitScheduler();
   startSignalReviewBatcher();
   await startWebhookReceiver();
   startTelegramScheduler();
+  startInvestorPortfolioScheduler();
   startBriefingScheduler();
+  if (MANUAL_BRIEFING_TIME) await checkScheduledBriefing(new Date(), MANUAL_BRIEFING_TIME);
 }
 
 function selfTest() {
@@ -1999,10 +2306,23 @@ function selfTest() {
   if (splitDiscordText("a\n".repeat(2_000)).some((chunk) => chunk.length > 1900)) throw new Error("Discord 관심종목 분할 실패");
   const parsedWatchlist = parseSharedWatchlist('<script type="application/prs.init-data+json">{"sharedWatchlist":{"list":{"symbols":["NASDAQ:NVDA"]}}}</script>');
   if (parsedWatchlist.symbols[0] !== "NASDAQ:NVDA") throw new Error("공유 관심종목 파서 실패");
-  if (!formatDailyJournal("2026-08-10", ["- BUY NVDA"]).includes("모의매매 일지")) throw new Error("매매일지 형식 실패");
+  if (!formatDailyJournal("2026-08-10", ["- BUY NVDA"]).embed.title.includes("모의매매 일지")) throw new Error("매매일지 형식 실패");
   if (PERSONAS.length !== 5 || new Set(PERSONAS.map((item) => item.id)).size !== 5) throw new Error("페르소나 설정 실패");
   const sharedContextPrompts = PERSONAS.map((persona) => personaPrompt(persona, "테스트"));
   if (sharedContextPrompts.some((prompt) => (prompt.match(/<shared-trading-context>/g) || []).length !== 1 || !prompt.includes("</shared-trading-context>"))) throw new Error("공통 매매 기준 주입 실패");
+  if (!investorPortfolioRefreshRequested("투자자 포폴 새로 갱신해줘")
+      || investorPortfolioRefreshRequested("오늘 포트폴리오 어때?")) throw new Error("투자자 포폴 갱신 요청 식별 실패");
+  const originalInvestorContext = state.investorPortfolioContext;
+  state.investorPortfolioContext = "검증용 문맥";
+  const investorPrompts = PERSONAS.map((persona) => personaPrompt(persona, "테스트"));
+  state.investorPortfolioContext = originalInvestorContext;
+  if (investorPrompts.some((prompt) => (prompt.match(/<investor-portfolio-context>/g) || []).length !== 1
+      || !prompt.includes("</investor-portfolio-context>"))) throw new Error("다섯 AI 투자자 포폴 공통 문맥 주입 실패");
+  const original13fContext = state.duquesne13fContext;
+  state.duquesne13fContext = "SEA LTD | 81141R100";
+  if (PERSONAS.some((persona) => !duquesne13fEvidence(persona, "드러켄밀러가 SE를 보유하고 있어?"))
+      || duquesne13fEvidence(PERSONAS[2], "SE 차트 어때?")) throw new Error("Duquesne 전체 13F 선택 주입 실패");
+  state.duquesne13fContext = original13fContext;
   if (!namesPersona("드라켄 밀러 이거 어때?", PERSONAS[0])) throw new Error("한글 이름 라우팅 실패");
   if (!namesPersona("미너미니는 어때?", PERSONAS[2])) throw new Error("오타 별칭 라우팅 실패");
   if (!namesPersona("쿨라매기 의견은?", PERSONAS[4])) throw new Error("별칭 라우팅 실패");
@@ -2029,8 +2349,24 @@ function selfTest() {
   const clock = zonedClock(new Date("2026-08-07T23:30:00.000Z"));
   if (clock.date !== "2026-08-08" || clock.time !== "08:30" || clock.weekday !== "Sat") throw new Error("자동 브리핑 시간대 계산 실패");
   if (!scheduledTopic("08:30").includes("장전 브리핑")) throw new Error("자동 브리핑 주제 선택 실패");
-  if (stripRequiredPrefix(`${BRIEFING_MARKER}\n본문`, BRIEFING_MARKER) !== "본문") throw new Error("자동 브리핑 완료 표식 실패");
-  if (stripRequiredPrefix("검색 실패", BRIEFING_MARKER)) throw new Error("미완료 브리핑 차단 실패");
+  const usSnapshot = formatUsMarketSnapshot([{
+    label: "S&P500 ETF SPY",
+    quote: { currentPrice: 650.12, changeRate: -0.42, dayLow: 648.5, dayHigh: 653.25 },
+  }]);
+  if (!usSnapshot.includes("S&P500 ETF SPY 650.12 (-0.42%) / 당일 648.5~653.25")) throw new Error("미국 시장 스냅샷 포맷 실패");
+  const closeSnapshot = formatDomesticCloseSnapshot({
+    date: "20260818",
+    markets: [{
+      name: "KOSPI", index: 6869.83, change: -108.11, changeRate: -1.55,
+      turnoverMillionKrw: 29644769, individualNetBuyBillionKrw: 11890,
+      foreignNetBuyBillionKrw: 515, institutionNetBuyBillionKrw: -11875,
+    }],
+  }, 1412.73);
+  if (!closeSnapshot.includes("KOSPI 6,869.83 (-108.11, -1.55%)")
+      || !closeSnapshot.includes("거래대금 29.64조원")
+      || !closeSnapshot.includes("원·달러 키움 계좌 환산환율 1,412.73원/USD")) {
+    throw new Error("국내장 마감 스냅샷 포맷 실패");
+  }
   const scheduledExit = { status: "SCHEDULED", dueAt: "2026-08-12T00:00:00.000Z", expiresAt: "2026-08-12T06:30:00.000Z" };
   if (scheduledPaperExitPhase(scheduledExit, new Date("2026-08-11T23:59:59.000Z")) !== "WAITING") throw new Error("예약 매도 대기 판정 실패");
   if (scheduledPaperExitPhase(scheduledExit, new Date("2026-08-12T00:00:00.000Z")) !== "DUE") throw new Error("예약 매도 실행 판정 실패");
@@ -2063,7 +2399,14 @@ function selfTest() {
 }
 
 if (process.argv.includes("--self-test")) selfTest();
-else main().catch((error) => {
+else if (process.argv.includes("--refresh-investor-portfolios")) {
+  checkInvestorPortfolioRefresh(new Date(), true)
+    .then((refreshed) => console.log(refreshed ? "투자자 포트폴리오 갱신 완료" : "투자자 포트폴리오 갱신 비활성"))
+    .catch((error) => {
+      console.error(error.message);
+      process.exitCode = 1;
+    });
+} else main().catch((error) => {
   console.error(error.message);
   process.exitCode = 1;
 });

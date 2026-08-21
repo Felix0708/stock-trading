@@ -40,6 +40,27 @@ async function fakeFetch(url, options) {
       return_code: 0, return_msg: "",
     }));
   }
+  if (options.headers["api-id"] === "ka20001") {
+    const { mrkt_tp } = JSON.parse(options.body);
+    return new Response(JSON.stringify(mrkt_tp === "0" ? {
+      cur_prc: "-6869.83", pred_pre: "-108.11", flu_rt: "-1.55", trde_prica: "29644769",
+      return_code: 0, return_msg: "",
+    } : {
+      cur_prc: "+1354.72", pred_pre: "+12.34", flu_rt: "+0.92", trde_prica: "10456789",
+      return_code: 0, return_msg: "",
+    }));
+  }
+  if (options.headers["api-id"] === "ka10051") {
+    const { mrkt_tp } = JSON.parse(options.body);
+    return new Response(JSON.stringify({
+      inds_netprps: [mrkt_tp === "0" ? {
+        inds_nm: "종합(KOSPI)", ind_netprps: "+11890", frgnr_netprps: "+515", orgn_netprps: "-11875",
+      } : {
+        inds_nm: "종합(KOSDAQ)", ind_netprps: "-1420", frgnr_netprps: "+830", orgn_netprps: "+610",
+      }],
+      return_code: 0, return_msg: "",
+    }));
+  }
   if (["kt10000", "kt10001"].includes(options.headers["api-id"])) {
     return new Response(JSON.stringify({ ord_no: "00024", return_code: 0, return_msg: "주문 접수" }));
   }
@@ -176,7 +197,19 @@ async function fakeFetch(url, options) {
   assert.deepEqual(await client.cancelUsOrder({ orderNo: "000000282", exchange: "ND", symbol: "AAPL" }), {
     status: "CANCEL_REQUESTED", orderNo: "000000282", cancellationOrderNo: "000000285", symbol: "AAPL",
   });
-  assert.equal(calls.length, 15);
+  assert.deepEqual(await client.getDomesticMarketClose({ date: "20260818" }), {
+    date: "20260818",
+    markets: [{
+      name: "KOSPI", index: 6869.83, change: -108.11, changeRate: -1.55,
+      turnoverMillionKrw: 29644769, individualNetBuyBillionKrw: 11890,
+      foreignNetBuyBillionKrw: 515, institutionNetBuyBillionKrw: -11875,
+    }, {
+      name: "KOSDAQ", index: 1354.72, change: 12.34, changeRate: 0.92,
+      turnoverMillionKrw: 10456789, individualNetBuyBillionKrw: -1420,
+      foreignNetBuyBillionKrw: 830, institutionNetBuyBillionKrw: 610,
+    }],
+  });
+  assert.equal(calls.length, 19);
   assert.equal(calls[0].url, `${MOCK_BASE_URL}/oauth2/token`);
   assert.deepEqual(JSON.parse(calls[0].options.body), {
     grant_type: "client_credentials",
@@ -209,6 +242,12 @@ async function fakeFetch(url, options) {
   assert.equal(calls[13].options.headers["api-id"], "ust21510");
   assert.equal(calls[14].options.headers["api-id"], "ust20003");
   assert.deepEqual(JSON.parse(calls[14].options.body), { orig_ord_no: "000000282", stex_tp: "ND", stk_cd: "AAPL" });
+  assert.equal(calls[15].options.headers["api-id"], "ka20001");
+  assert.deepEqual(JSON.parse(calls[15].options.body), { mrkt_tp: "0", inds_cd: "001" });
+  assert.equal(calls[16].options.headers["api-id"], "ka10051");
+  assert.equal(calls[17].options.headers["api-id"], "ka20001");
+  assert.deepEqual(JSON.parse(calls[17].options.body), { mrkt_tp: "1", inds_cd: "101" });
+  assert.equal(calls[18].options.headers["api-id"], "ka10051");
   console.log("kiwoom-client test OK");
 })().catch((error) => {
   console.error(error);
