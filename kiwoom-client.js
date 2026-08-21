@@ -111,6 +111,10 @@ class KiwoomClient {
         currentPrice: toNumber(item.cur_prc, "현재가"),
         evaluationAmount: toNumber(item.evlt_amt, "평가금액"),
         positionRatio: toNumber(item.poss_rt, "보유비중"),
+        purchasePrice: toOptionalNumber(item.pur_pric, "매입가"),
+        purchaseAmount: toOptionalNumber(item.pur_amt, "매입금액"),
+        profitLoss: toOptionalNumber(item.evltv_prft, "평가손익"),
+        profitRate: toOptionalNumber(item.prft_rt, "수익률"),
       })),
     };
   }
@@ -260,6 +264,10 @@ class KiwoomClient {
         tradableQuantity: toNumber(item.sell_alowq, "미국주식 매도가능수량"),
         currentPrice: toNumber(item.now_pric, "미국주식 현재가"),
         evaluationAmount: toNumber(item.evlt_amt, "미국주식 평가금액"),
+        purchasePrice: toOptionalNumber(item.frgn_stk_book_uv, "미국주식 매입가"),
+        purchaseAmount: toOptionalNumber(item.frgn_stk_book_amt, "미국주식 매입금액"),
+        profitLoss: toOptionalNumber(item.pl_amt, "미국주식 평가손익"),
+        profitRate: toOptionalNumber(item.pl_rt, "미국주식 수익률"),
       })),
     };
   }

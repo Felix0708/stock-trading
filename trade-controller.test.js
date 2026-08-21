@@ -72,10 +72,15 @@ assert.equal(paper.evaluate(paperEntry).verdict, "PAPER_ENTRY");
 assert.equal(paper.evaluate(paperEntry).verdict, "BLOCKED_PENDING_ORDER");
 paper.reconcileOrder(paperEntry, { status: "FILLED", orderNo: "10", filledQuantity: 3, fillPrice: 101 });
 assert.equal(paper.status().positions[0].quantity, 3);
-const paperAdd = { ...paperEntry, requestId: "request-10-add", positionPreview: { hasExistingPosition: true, currentPositionQuantity: 3 } };
+const paperAdd = { ...paperEntry, requestId: "request-10-add", outcome: { decision: "ADD_CANDIDATE" }, positionPreview: { hasExistingPosition: true, currentPositionQuantity: 3, positionProfitable: true } };
 assert.equal(paper.evaluate(paperAdd).verdict, "PAPER_ADD");
 paper.reconcileOrder(paperAdd, { status: "FILLED", orderNo: "11", filledQuantity: 2, fillPrice: 102 });
 assert.equal(paper.status().positions[0].quantity, 5);
+assert.equal(paper.status().positions[0].fillPrice, 101.4);
+const losingAdd = { ...paperAdd, requestId: "request-10-losing-add", positionPreview: { ...paperAdd.positionPreview, positionProfitable: false } };
+assert.equal(paper.evaluate(losingAdd).verdict, "BLOCKED_ADD_NOT_PROFITABLE");
+const unknownAdd = { ...paperAdd, requestId: "request-10-unknown-add", positionPreview: { ...paperAdd.positionPreview, positionProfitable: null } };
+assert.equal(paper.evaluate(unknownAdd).verdict, "BLOCKED_ADD_PROFIT_UNKNOWN");
 const paperPartial = {
   ...paperEntry,
   requestId: "request-10-partial",

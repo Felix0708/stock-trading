@@ -171,6 +171,11 @@ class TradeController {
       return { verdict: "BLOCKED_DAILY_200MA", reason: "일봉 200일선 아래 — BUY 차단" };
     }
     if (existing?.pendingOrder) return { verdict: "BLOCKED_PENDING_ORDER", reason: "이전 진입 주문 체결 확인 중" };
+    if ((existing || record.positionPreview?.hasExistingPosition) && record.positionPreview?.positionProfitable !== true) {
+      return record.positionPreview?.positionProfitable === false
+        ? { verdict: "BLOCKED_ADD_NOT_PROFITABLE", reason: "손실 또는 본전 포지션 추가매수 차단" }
+        : { verdict: "BLOCKED_ADD_PROFIT_UNKNOWN", reason: "기존 포지션 수익 여부를 확인할 수 없어 추가매수 차단" };
+    }
     if (payload.daily_trend !== "BULL" || !payload.daily_ema_aligned) {
       if (!this.earlyEntryApprovalEnabled || this.state.mode !== "PAPER_AUTO") {
         return { verdict: "REVIEW_DAILY_CONFIRMATION", reason: "일봉 강세·정배열 미확정 — 주문 없이 검토" };
@@ -253,10 +258,14 @@ class TradeController {
       else delete this.state.positions[key];
     }
     if (entry && position && order.status === "FILLED") {
-      position.quantity = (record.positionPreview?.currentPositionQuantity || 0) + order.filledQuantity;
+      const previousQuantity = Number(position.quantity) || 0;
+      const previousPrice = Number(position.fillPrice);
+      position.quantity = previousQuantity + order.filledQuantity;
       position.pendingOrder = false;
       position.orderNo = order.orderNo;
-      position.fillPrice = order.fillPrice;
+      position.fillPrice = previousQuantity > 0 && Number.isFinite(previousPrice)
+        ? ((previousPrice * previousQuantity) + (order.fillPrice * order.filledQuantity)) / position.quantity
+        : order.fillPrice;
       position.updatedAt = order.updatedAt;
     }
     if (exit && order.status === "FILLED") delete this.state.positions[key];

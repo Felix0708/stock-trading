@@ -22,7 +22,8 @@ async function fakeFetch(url, options) {
       tot_evlt_pl: "000000000000000",
       acnt_evlt_remn_indv_tot: [{
         stk_cd: "A005930", stk_nm: "삼성전자", rmnd_qty: "3", trde_able_qty: "3",
-        cur_prc: "100000", evlt_amt: "300000", poss_rt: "0.06",
+        cur_prc: "100000", evlt_amt: "300000", poss_rt: "0.06", pur_pric: "90000",
+        pur_amt: "270000", evltv_prft: "30000", prft_rt: "11.11",
       }],
       return_code: 0,
       return_msg: "",
@@ -81,7 +82,8 @@ async function fakeFetch(url, options) {
       tot_pl_amt: "0.0000",
       result_list: [{
         stk_cd: "AAPL", frgn_stk_nm: "Apple", stex_nm: "NASDAQ", poss_qty: "2", sell_alowq: "2",
-        now_pric: "250.0000", evlt_amt: "500.0000",
+        now_pric: "250.0000", evlt_amt: "500.0000", frgn_stk_book_uv: "200.0000",
+        frgn_stk_book_amt: "400.0000", pl_amt: "100.0000", pl_rt: "25.00",
       }],
       return_code: 0,
       return_msg: "",
@@ -142,6 +144,7 @@ async function fakeFetch(url, options) {
     holdings: [{
       code: "A005930", name: "삼성전자", quantity: 3, tradableQuantity: 3,
       currentPrice: 100000, evaluationAmount: 300000, positionRatio: 0.06,
+      purchasePrice: 90000, purchaseAmount: 270000, profitLoss: 30000, profitRate: 11.11,
     }],
   });
   assert.deepEqual(await client.getDomesticCash(), { deposit: 500000000, orderableAmount: 400000000 });
@@ -167,6 +170,7 @@ async function fakeFetch(url, options) {
     holdings: [{
       code: "AAPL", name: "Apple", exchange: "NASDAQ", quantity: 2, tradableQuantity: 2,
       currentPrice: 250, evaluationAmount: 500,
+      purchasePrice: 200, purchaseAmount: 400, profitLoss: 100, profitRate: 25,
     }],
   });
   assert.deepEqual(await client.getUsCash(), { usd: 100000, krw: 0, usdExchangeRate: 1507.7 });

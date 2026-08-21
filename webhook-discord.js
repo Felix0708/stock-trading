@@ -22,6 +22,8 @@ const TRADE_GATE_VERDICTS = new Set([
   "PAPER_EXIT",
 ]);
 const DOMESTIC_EXCHANGES = new Set(["KRX", "KOSPI", "KOSDAQ"]);
+const ENTRY_DECISIONS = new Set(["ENTRY_CANDIDATE", "ADD_CANDIDATE"]);
+const EXIT_DECISIONS = new Set(["EXIT_CANDIDATE", "PARTIAL_EXIT_CANDIDATE", "REVIEW_PARTIAL_EXIT", "EXIT_IF_FILLED"]);
 const CONVICTION_ICONS = { S: "🟣", A: "🟢", B: "🟡", C: "🟠", D: "🔴" };
 const ORDER_STATUS = {
   ACCEPTED: ["📨", "접수", 0x5865F2],
@@ -36,10 +38,26 @@ function isTradeSignal(record) {
   return TRADE_GATE_VERDICTS.has(record.risk?.verdict);
 }
 
-function targetSignalChannel(record) {
+function signalKind(record) {
+  const decision = record.outcome?.decision;
+  const action = record.payload?.action;
+  return ENTRY_DECISIONS.has(decision) || action === "BUY"
+    ? "진입"
+    : EXIT_DECISIONS.has(decision) || action === "SELL" ? "청산" : "관찰";
+}
+
+function targetSignalChannels(record) {
   const market = DOMESTIC_EXCHANGES.has(record.payload?.exchange) ? "국장" : "미국";
-  const kind = isTradeSignal(record) ? "매매" : "관찰";
-  return `${market}-${kind}신호`;
+  const kind = signalKind(record);
+  return [
+    `${market}-전체신호`,
+    `${market}-${kind}신호`,
+    ...(record.orderAttempt?.status === "ACCEPTED" ? [`${market}-매매신호`] : []),
+  ];
+}
+
+function targetSignalChannel(record) {
+  return targetSignalChannels(record)[1];
 }
 
 function display(value) {
@@ -161,11 +179,10 @@ function formatWebhookRecord(record) {
   return {
     channel: "signal",
     targetChannel: targetSignalChannel(record),
+    targetChannels: targetSignalChannels(record),
     embed: signalEmbed(record, identity, orderLine),
     text: [
-      isTradeSignal(record)
-        ? "🚨 **TradingView 매매 신호**"
-        : "📡 **TradingView 관찰 신호**",
+      `📡 **TradingView ${signalKind(record)} 신호**`,
       `**종목**: ${identity} / ${display(payload.exchange)}`,
       `**원본 신호**: ${display(payload.type)}`,
       `**내부 코드**: \`${display(signal.signalCode)}\`${signal.modifiers?.length ? ` / ${signal.modifiers.join(", ")}` : ""}`,
@@ -252,4 +269,5 @@ module.exports = {
   formatWebhookRecord,
   positionPreviewLines,
   targetSignalChannel,
+  targetSignalChannels,
 };

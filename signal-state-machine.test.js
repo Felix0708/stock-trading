@@ -39,6 +39,10 @@ const partial = machine.handle(signal("SELL", "🎯 TP1 달성", 110), "2026-08-
 assert.equal(partial.decision, "PARTIAL_EXIT_CANDIDATE");
 assert.equal(partial.state.status, "ENTRY_CONFIRMED");
 
+assert.equal(new SignalStateMachine().handle(signal("BUY", "🪜 강한 눌림목", 105)).decision, "ADD_CANDIDATE");
+assert.equal(new SignalStateMachine().handle(signal("SELL", "🛑 급락 손절 -10%", 90)).decision, "EXIT_CANDIDATE");
+assert.equal(new SignalStateMachine().handle(signal("CHECK", "변동성 수축", 100)).decision, "INFO_ONLY");
+
 const second = new SignalStateMachine();
 second.handle(signal("BUY", "🚀 돌파 진입", 100), "2026-08-10T02:00:00Z");
 second.handle(signal("SELL", "🚫 진입 무효", 97), "2026-08-10T02:00:01Z");

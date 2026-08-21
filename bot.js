@@ -20,7 +20,7 @@ const { TradeController } = require("./trade-controller");
 const { OrderTracker } = require("./order-tracker");
 const { KiwoomClient } = require("./kiwoom-client");
 const { submitPaperOrder, trackPaperOrder, submitPaperTestOrder, trackPaperTestOrder } = require("./paper-order-executor");
-const { calculatePositionSize, calculateWebhookPositionPreview } = require("./position-sizer");
+const { calculatePositionSize, calculateWebhookPositionPreview, inferPositionProfitable } = require("./position-sizer");
 const { loadRecentResearch } = require("./recent-research");
 const { collectTelegramDay, previousDate } = require("./telegram-collector");
 const { createBuyApproval, findBuyApproval, parseBuyApprovalCommand } = require("./buy-approval");
@@ -70,7 +70,7 @@ const INVESTOR_PORTFOLIO_ENABLED = process.env.INVESTOR_PORTFOLIO_ENABLED === "t
 const INVESTOR_PORTFOLIO_CHANNEL = process.env.INVESTOR_PORTFOLIO_CHANNEL || "주요인사-포트폴리오";
 const INSTITUTION_PORTFOLIO_CHANNEL = process.env.INSTITUTION_PORTFOLIO_CHANNEL || "기관-포트폴리오";
 const INVESTOR_PORTFOLIO_REFRESH_DAYS = Number(process.env.INVESTOR_PORTFOLIO_REFRESH_DAYS || 1);
-const MY_PORTFOLIO_CHANNEL = process.env.MY_PORTFOLIO_CHANNEL || "나의-포트폴리오";
+const MY_PORTFOLIO_CHANNEL = process.env.MY_PORTFOLIO_CHANNEL || "내-포트폴리오";
 const MY_PORTFOLIO_SYNC_MINUTES = Number(process.env.MY_PORTFOLIO_SYNC_MINUTES || 10);
 const WEBHOOK_ENABLED = process.env.WEBHOOK_ENABLED === "true";
 const WEBHOOK_HOST = process.env.WEBHOOK_HOST || "127.0.0.1";
@@ -1185,7 +1185,9 @@ async function appendDailyJournal(order) {
       : `$${fillPrice.toLocaleString("en-US", { maximumFractionDigits: 2 })}`
     : "체결가 미확인";
   const identity = order.name ? `${order.name} (${order.symbol})` : order.symbol;
-  const line = `- ${clock.time} · **${order.side}** · ${identity} · ${order.filledQuantity}주 @ ${price}${order.signalType ? ` · ${order.signalType}` : ""}`;
+  const details = [order.signalType, order.conviction && `등급 ${order.conviction}`];
+  if (Number.isFinite(order.stopPrice)) details.push(`SL ${order.stopPrice}`);
+  const line = `- ${clock.time} · **${order.side}** · ${identity} · ${order.filledQuantity}주 @ ${price}${details.filter(Boolean).length ? ` · ${details.filter(Boolean).join(" · ")}` : ""}`;
   const journal = state.dailyJournals[clock.date] || { messageId: "", entries: [] };
   journal.entries.push(line);
   let message = null;
@@ -1340,11 +1342,13 @@ async function queueBuyApproval(record) {
 async function publishWebhookRecord(record, options = {}) {
   if (options.replayOnly) {
     const formatted = formatWebhookRecord(record);
-    const channelName = formatted.targetChannel
-      || (formatted.channel === "signal" ? WEBHOOK_SIGNAL_CHANNEL : WEBHOOK_SYSTEM_CHANNEL);
-    const channel = findTextChannelByName(channelName);
-    if (!channel) throw new Error(`Discord 채널을 찾지 못했습니다: #${channelName}`);
-    await sendFormattedWebhook(channel, formatted, "♻️ **수신 중단 중 발생한 신호 복구**");
+    const channelNames = formatted.targetChannels || [formatted.targetChannel
+      || (formatted.channel === "signal" ? WEBHOOK_SIGNAL_CHANNEL : WEBHOOK_SYSTEM_CHANNEL)];
+    for (const channelName of channelNames) {
+      const channel = findTextChannelByName(channelName);
+      if (!channel) throw new Error(`Discord 채널을 찾지 못했습니다: #${channelName}`);
+      await sendFormattedWebhook(channel, formatted, "♻️ **수신 중단 중 발생한 신호 복구**");
+    }
     return;
   }
   await updateWatchlist(record);
@@ -1353,11 +1357,13 @@ async function publishWebhookRecord(record, options = {}) {
   if (record.risk.verdict === "BUY_PENDING_APPROVAL") await queueBuyApproval(record);
   else await submitAndTrackOrder(record);
   const formatted = formatWebhookRecord(record);
-  const channelName = formatted.targetChannel
-    || (formatted.channel === "signal" ? WEBHOOK_SIGNAL_CHANNEL : WEBHOOK_SYSTEM_CHANNEL);
-  const channel = findTextChannelByName(channelName);
-  if (!channel) throw new Error(`Discord 채널을 찾지 못했습니다: #${channelName}`);
-  await sendFormattedWebhook(channel, formatted);
+  const channelNames = formatted.targetChannels || [formatted.targetChannel
+    || (formatted.channel === "signal" ? WEBHOOK_SIGNAL_CHANNEL : WEBHOOK_SYSTEM_CHANNEL)];
+  for (const channelName of channelNames) {
+    const channel = findTextChannelByName(channelName);
+    if (!channel) throw new Error(`Discord 채널을 찾지 못했습니다: #${channelName}`);
+    await sendFormattedWebhook(channel, formatted);
+  }
   signalReviewBatcher?.add(record);
 }
 
@@ -1497,11 +1503,13 @@ async function buildPositionPreview(record) {
     const trackedPosition = trackedPositions.find((position) => String(position.ticker).toUpperCase() === ticker);
     const trackedPositionQuantity = trackedPosition?.quantity || 0;
     const currentPositionValue = Math.max(brokerPositionValue, trackedPositionQuantity * record.payload.price);
+    const positionProfitable = inferPositionProfitable(matchingHoldings, trackedPosition, record.payload.price);
     return calculateWebhookPositionPreview(record, {
       ...account,
       currentPositionValue,
       currentPositionQuantity: Math.max(brokerPositionQuantity, trackedPositionQuantity),
       hasExistingPosition: matchingHoldings.length > 0 || Boolean(trackedPosition),
+      positionProfitable,
       openPositions: new Set([...account.holdingSymbols, ...trackedSymbols]).size,
       maxOpenPositions: MAX_OPEN_POSITIONS,
     });

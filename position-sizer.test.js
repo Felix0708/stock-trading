@@ -1,7 +1,7 @@
 "use strict";
 
 const assert = require("node:assert/strict");
-const { calculatePositionSize, calculateWebhookPositionPreview } = require("./position-sizer");
+const { calculatePositionSize, calculateWebhookPositionPreview, inferPositionProfitable } = require("./position-sizer");
 
 const base = { equity: 100000, availableCash: 100000, entryPrice: 100, stopPrice: 95 };
 assert.equal(calculatePositionSize({ ...base, conviction: "B" }).quantity, 100);
@@ -46,6 +46,10 @@ assert.equal(heldPreview.blocked, false);
 assert.equal(heldPreview.quantity, 10);
 assert.equal(heldPreview.projectedPositionValue, 20000);
 assert.equal(heldPreview.projectedPositionRatio, 20);
+assert.equal(inferPositionProfitable([{ profitRate: 1.2 }], null, 100), true);
+assert.equal(inferPositionProfitable([{ purchaseAmount: 1000, evaluationAmount: 950 }], null, 100), false);
+assert.equal(inferPositionProfitable([], { fillPrice: 90 }, 100), true);
+assert.equal(inferPositionProfitable([], null, 100), null);
 assert.match(calculateWebhookPositionPreview(record, {
   equity: 100000, availableCash: 100000, openPositions: 1, maxOpenPositions: 5,
   currentPositionValue: 20000, hasExistingPosition: true,

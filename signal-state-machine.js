@@ -13,6 +13,7 @@ const ENTRY_CODES = new Set([
 const FULL_EXIT_CODES = new Set([
   "EXIT_FINAL",
   "EXIT_BREAKOUT",
+  "EXIT_CRASH",
   "MOMENTUM_SELL",
   "PEG_INVALIDATED",
 ]);
@@ -70,7 +71,7 @@ class SignalStateMachine {
     } else if (ENTRY_CODES.has(normalized.signalCode)) {
       status = "ENTRY_SIGNALLED";
       decision = "ENTRY_CANDIDATE";
-    } else if (normalized.signalCode === "ADD_PYRAMID") {
+    } else if (["ADD_PYRAMID", "ADD_STRONG_PULLBACK"].includes(normalized.signalCode)) {
       decision = "ADD_CANDIDATE";
     } else if (normalized.signalCode === "ENTRY_INVALIDATED") {
       if (!["ENTRY_SIGNALLED", "ENTRY_CONFIRMED", "ENTRY_INVALID_PENDING"].includes(current.status)) {

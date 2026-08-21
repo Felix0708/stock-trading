@@ -2,6 +2,18 @@
 
 const CONVICTION_MULTIPLIER = { S: 1.3, A: 1.1, B: 1, C: 0.7, D: 0 };
 
+function inferPositionProfitable(holdings = [], trackedPosition = null, signalPrice = null) {
+  const profitLosses = holdings.map((holding) => holding.profitLoss).filter(Number.isFinite);
+  if (profitLosses.length) return profitLosses.reduce((sum, value) => sum + value, 0) > 0;
+  const purchaseAmount = holdings.reduce((sum, holding) => sum + (Number.isFinite(holding.purchaseAmount) ? holding.purchaseAmount : 0), 0);
+  const evaluationAmount = holdings.reduce((sum, holding) => sum + (Number.isFinite(holding.evaluationAmount) ? holding.evaluationAmount : 0), 0);
+  if (purchaseAmount > 0 && evaluationAmount > 0) return evaluationAmount > purchaseAmount;
+  const profitRate = holdings.find((holding) => Number.isFinite(holding.profitRate))?.profitRate;
+  if (Number.isFinite(profitRate)) return profitRate > 0;
+  if (Number.isFinite(trackedPosition?.fillPrice) && Number.isFinite(signalPrice)) return signalPrice > trackedPosition.fillPrice;
+  return null;
+}
+
 function calculatePositionSize(input = {}) {
   const {
     equity, availableCash = equity, entryPrice, stopPrice, conviction = "B",
@@ -107,8 +119,9 @@ function calculateWebhookPositionPreview(record, account) {
     conviction: payload.conviction,
     currentPositionQuantity: account.currentPositionQuantity || 0,
     hasExistingPosition: Boolean(account.hasExistingPosition),
+    positionProfitable: account.positionProfitable ?? null,
     currency: account.currency || "USD",
   };
 }
 
-module.exports = { calculatePositionSize, calculateWebhookPositionPreview, CONVICTION_MULTIPLIER };
+module.exports = { calculatePositionSize, calculateWebhookPositionPreview, inferPositionProfitable, CONVICTION_MULTIPLIER };

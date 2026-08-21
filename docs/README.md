@@ -40,7 +40,7 @@ TradingView → ngrok 고정 주소 → 로컬 수신기 → Discord
 4. 알림을 만들고 조건을 `Stock Trading Webhook One-shot Test` → `어떤 alert() 함수 호출`로 선택합니다.
 5. 웹훅 URL을 켜고 복사된 전체 URL을 붙여넣은 뒤 알림을 생성합니다.
 6. 다음 실시간 가격 업데이트에서 한 번만 발송됩니다.
-7. Discord의 해당 시장 `#*-관찰신호`에서 `TVTEST`, `CHECK`, `INFO_ONLY`, `주문 생성 안 됨`을 확인합니다.
+7. Discord의 해당 시장 `#*-전체신호`와 `#*-관찰신호`에서 `TVTEST`, `CHECK`, `INFO_ONLY`, `주문 생성 안 됨`을 확인합니다.
 8. TradingView 알림 로그의 `Webhook status`도 성공인지 확인한 뒤 테스트 알림과 지표를 삭제합니다.
 
 알림은 과거 봉이나 리플레이가 아니라 실시간 봉에서만 발생합니다. 응답이 없으면 `npm run start:all`이 계속 실행 중인지, 고정 ngrok URL이 저장됐는지, TradingView 2단계 인증과 알림 로그의 Webhook 상태를 확인합니다.

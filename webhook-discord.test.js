@@ -6,6 +6,7 @@ const {
   formatDailyJournal,
   formatOrderStatus,
   formatWebhookRecord,
+  targetSignalChannels,
 } = require("./webhook-discord");
 
 const base = {
@@ -25,7 +26,7 @@ const base = {
 
 const normal = formatWebhookRecord(base);
 assert.equal(normal.channel, "signal");
-assert.equal(normal.targetChannel, "국장-매매신호");
+assert.deepEqual(targetSignalChannels(base), ["국장-전체신호", "국장-진입신호"]);
 assert(normal.text.includes("💰 정석 진입 @SR↩"));
 assert(normal.text.includes("ENTRY_STANDARD"));
 assert(normal.text.includes("생성 안 됨"));
@@ -40,7 +41,7 @@ assert(normal.embed.fields.some((field) => field.name === "자동매매" && fiel
 assert.equal(normal.embed.footer.text, "Lazy Alpha");
 assert.equal(normal.embed.timestamp, undefined);
 
-const observation = formatWebhookRecord({
+const observationRecord = {
   ...base,
   payload: { ...base.payload, ticker: "NVDA", name: "NVIDIA", exchange: "NASDAQ", action: "CHECK" },
   risk: { verdict: "NO_ACTION", reason: "주문 대상이 아닌 신호" },
@@ -49,8 +50,10 @@ const observation = formatWebhookRecord({
     decision: "INFO_ONLY",
     signal: { signalCode: "SETUP_FORMING", modifiers: [] },
   },
-});
+};
+const observation = formatWebhookRecord(observationRecord);
 assert.equal(observation.targetChannel, "미국-관찰신호");
+assert.deepEqual(targetSignalChannels(observationRecord), ["미국-전체신호", "미국-관찰신호"]);
 assert(observation.text.includes("TradingView 관찰 신호"));
 assert.equal(observation.embed.color, 0xFEE75C);
 
@@ -58,7 +61,11 @@ const usTrade = formatWebhookRecord({
   ...base,
   payload: { ...base.payload, ticker: "NVDA", name: "NVIDIA", exchange: "NASDAQ" },
 });
-assert.equal(usTrade.targetChannel, "미국-매매신호");
+assert.deepEqual(targetSignalChannels({
+  ...base,
+  payload: { ...base.payload, ticker: "NVDA", name: "NVIDIA", exchange: "NASDAQ" },
+  orderAttempt: { status: "ACCEPTED" },
+}), ["미국-전체신호", "미국-진입신호", "미국-매매신호"]);
 assert(usTrade.embed.description.includes("NVIDIA (NVDA)"));
 
 const domesticObservation = formatWebhookRecord({
@@ -73,14 +80,23 @@ const dailyReview = formatWebhookRecord({
   ...base,
   risk: { verdict: "REVIEW_DAILY_CONFIRMATION", reason: "일봉 강세·정배열 미확정 — 주문 없이 검토" },
 });
-assert.equal(dailyReview.targetChannel, "국장-관찰신호");
-assert(dailyReview.text.includes("TradingView 관찰 신호"));
+assert.equal(dailyReview.targetChannel, "국장-진입신호");
+assert(dailyReview.text.includes("TradingView 진입 신호"));
 
 const pendingApproval = formatWebhookRecord({
   ...base,
   risk: { verdict: "BUY_PENDING_APPROVAL", reason: "사용자 BUY 승인 대기" },
 });
-assert.equal(pendingApproval.targetChannel, "국장-매매신호");
+assert.deepEqual(targetSignalChannels({
+  ...base,
+  risk: { verdict: "BUY_PENDING_APPROVAL" },
+}), ["국장-전체신호", "국장-진입신호"]);
+
+assert.deepEqual(targetSignalChannels({
+  ...base,
+  payload: { ...base.payload, action: "SELL" },
+  outcome: { ...base.outcome, decision: "PARTIAL_EXIT_CANDIDATE" },
+}), ["국장-전체신호", "국장-청산신호"]);
 
 const sized = formatWebhookRecord({
   ...base,
