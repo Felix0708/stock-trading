@@ -9,6 +9,7 @@ const {
   GatewayIntentBits,
 } = require("discord.js");
 const {
+  formatBrokerStartup,
   formatBuyApproval,
   formatDailyJournal,
   formatOrderStatus,
@@ -19,7 +20,15 @@ const { SignalReviewBatcher, buildSignalReviewTopic } = require("./signal-review
 const { TradeController } = require("./trade-controller");
 const { OrderTracker } = require("./order-tracker");
 const { KiwoomClient } = require("./kiwoom-client");
-const { submitPaperOrder, trackPaperOrder, submitPaperTestOrder, trackPaperTestOrder } = require("./paper-order-executor");
+const {
+  isUsRegularSession,
+  shouldDeferUsEntry,
+  submitPaperOrder,
+  trackPaperOrder,
+  submitPaperTestOrder,
+  trackPaperTestOrder,
+  usSessionClock,
+} = require("./paper-order-executor");
 const { calculatePositionSize, calculateWebhookPositionPreview, inferPositionProfitable } = require("./position-sizer");
 const { loadRecentResearch } = require("./recent-research");
 const { collectTelegramDay, previousDate } = require("./telegram-collector");
@@ -34,6 +43,7 @@ const {
 } = require("./investor-portfolio");
 const {
   extractRoundtableTopic,
+  isAccountExecutorRequest,
   isHelpRequest,
   isResetRequest,
   isRoundtableRequest,
@@ -99,6 +109,7 @@ const AI_SIGNAL_REVIEW_CHANNEL = process.env.AI_SIGNAL_REVIEW_CHANNEL || "종목
 const AI_SIGNAL_REVIEW_BATCH_MS = Number(process.env.AI_SIGNAL_REVIEW_BATCH_MS || 5_000);
 const AI_SIGNAL_REVIEW_MAX_BATCH = Number(process.env.AI_SIGNAL_REVIEW_MAX_BATCH || 10);
 const TRADING_MODE = process.env.TRADING_MODE || "SHADOW";
+const ACCOUNT_NEUTRAL_SIGNAL_SERVER = process.env.ACCOUNT_NEUTRAL_SIGNAL_SERVER === "true";
 const MAX_OPEN_POSITIONS = Number(process.env.MAX_OPEN_POSITIONS || 5);
 const TRADING_STATE_FILE = process.env.TRADING_STATE_FILE || "trading-state.json";
 const TRADING_DECISION_LOG_FILE = process.env.TRADING_DECISION_LOG_FILE || "trading-decisions.jsonl";
@@ -114,6 +125,7 @@ const PAPER_ORDER_TEST_ENABLED = process.env.PAPER_ORDER_TEST_ENABLED === "true"
 const PAPER_ORDER_TEST_SYMBOL = process.env.PAPER_ORDER_TEST_SYMBOL || "005930";
 const PAPER_ORDER_TEST_LOCK_FILE = path.resolve(ROOT, process.env.PAPER_ORDER_TEST_LOCK_FILE || ".paper-order-test-lock.json");
 const US_EXCHANGES = new Set(["NASDAQ", "NYSE", "AMEX", "NYSEARCA", "ARCA", "ND", "NY", "NA"]);
+const DEFERRED_US_ENTRY_MAX_AGE_MS = 5 * 24 * 60 * 60 * 1000;
 const DISCORD_IMAGE_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".webp", ".gif"]);
 const MAX_DISCORD_IMAGES = 4;
 const MAX_DISCORD_IMAGE_BYTES = 10 * 1024 * 1024;
@@ -197,7 +209,7 @@ function loadState() {
     myPortfolioMessageId: "", myPortfolioUpdatedAt: "",
     watchlist: {}, watchlistMessageId: "", watchlistMessageIds: [], watchlistSyncRuns: {},
     alertRegistry: {}, alertRegistryMessageIds: [], alertRegistrySyncRuns: {}, alertRegistryUpdatedAt: "",
-    dailyJournals: {}, journaledOrders: {}, buyApprovals: {}, scheduledPaperExits: {},
+    dailyJournals: {}, journaledOrders: {}, buyApprovals: {}, scheduledPaperExits: {}, deferredUsEntries: {},
   };
   try {
     const parsed = JSON.parse(fs.readFileSync(STATE_FILE, "utf8"));
@@ -230,6 +242,7 @@ function loadState() {
       journaledOrders: parsed.journaledOrders || {},
       buyApprovals: parsed.buyApprovals || {},
       scheduledPaperExits: parsed.scheduledPaperExits || {},
+      deferredUsEntries: parsed.deferredUsEntries || {},
     };
   } catch {
     throw new Error("state.json을 읽을 수 없습니다. 파일을 복구하거나 삭제한 뒤 다시 시작하세요.");
@@ -1236,13 +1249,22 @@ async function submitAndTrackOrder(record) {
       }
     }
   } catch (error) {
-    record.orderAttempt = { status: "ERROR", reason: error.message };
+    if (shouldDeferUsEntry(record, error)) {
+      queueDeferredUsEntry(record);
+      record.orderAttempt = { status: "DEFERRED", reason: "미국장 종료 — 다음 정규장 재검증 대기" };
+    } else {
+      record.orderAttempt = { status: "ERROR", reason: error.message };
+    }
     tradingController.reconcileOrder(record, { status: "REJECTED" });
+    record.risk.openCount = tradingController.status().openCount;
   }
   let tracking = null;
   if (record.orderAttempt?.status === "ACCEPTED") {
     const approvalChannel = findTextChannelByName(ORDER_APPROVAL_CHANNEL);
-    if (approvalChannel) await sendFormattedWebhook(approvalChannel, formatOrderStatus(record.orderAttempt));
+    if (approvalChannel) {
+      await sendFormattedWebhook(approvalChannel, formatOrderStatus(record.orderAttempt))
+        .catch((error) => console.error("키움 모의주문 접수 알림 실패:", error.message));
+    }
     tracking = record.payload?.paper_order_test === true
       ? trackPaperTestOrder(record.orderAttempt, { client: getDomesticKiwoomClient(), tracker: orderTracker })
       : trackPaperOrder(record.orderAttempt, {
@@ -1254,6 +1276,82 @@ async function submitAndTrackOrder(record) {
       .catch((error) => console.error("키움 모의주문 체결조회 실패:", error.message));
   }
   return record.orderAttempt;
+}
+
+function deferredUsEntryKey(payload) {
+  return `${String(payload?.exchange || "").toUpperCase()}:${String(payload?.ticker || "").toUpperCase()}`;
+}
+
+function queueDeferredUsEntry(record) {
+  const key = deferredUsEntryKey(record.payload);
+  const previous = state.deferredUsEntries[key];
+  const queuedRecord = JSON.parse(JSON.stringify(record));
+  delete queuedRecord.orderAttempt;
+  state.deferredUsEntries[key] = {
+    queuedAt: previous?.queuedAt || new Date().toISOString(),
+    lastAttemptMarketDate: previous?.lastAttemptMarketDate || "",
+    record: queuedRecord,
+  };
+  saveState();
+}
+
+function supersedeDeferredUsEntry(record) {
+  const exchange = String(record.payload?.exchange || "").toUpperCase();
+  if (!US_EXCHANGES.has(exchange) || !["BUY", "SELL"].includes(record.payload?.action)) return;
+  const key = deferredUsEntryKey(record.payload);
+  if (!state.deferredUsEntries[key]) return;
+  delete state.deferredUsEntries[key];
+  saveState();
+}
+
+async function notifyDeferredUsEntry(message) {
+  const channel = findTextChannelByName(ORDER_APPROVAL_CHANNEL);
+  if (channel) await channel.send({ content: message, allowedMentions: { parse: [] } });
+}
+
+async function checkDeferredUsEntries(now = new Date()) {
+  if (!isUsRegularSession(now)) return;
+  const marketDate = usSessionClock(now).date;
+  for (const [key, entry] of Object.entries(state.deferredUsEntries)) {
+    if (entry.lastAttemptMarketDate === marketDate) continue;
+    if (now.getTime() - new Date(entry.queuedAt).getTime() > DEFERRED_US_ENTRY_MAX_AGE_MS) {
+      delete state.deferredUsEntries[key];
+      saveState();
+      await notifyDeferredUsEntry(`⌛ 미국 모의 진입 만료 — ${entry.record.payload.name || entry.record.payload.ticker} (${entry.record.payload.ticker})`);
+      continue;
+    }
+
+    entry.lastAttemptMarketDate = marketDate;
+    saveState();
+    const record = entry.record;
+    try {
+      const exchange = { NASDAQ: "ND", ND: "ND", NYSE: "NY", NY: "NY", AMEX: "NA", NYSEARCA: "NA", ARCA: "NA", NA: "NA" }[
+        String(record.payload.exchange || "").toUpperCase()
+      ];
+      const quote = await getOverseasKiwoomClient().getUsQuote({ exchange, symbol: record.payload.ticker });
+      record.payload.price = quote.currentPrice;
+      if (quote.name) record.payload.name = quote.name;
+      usAccountCache = null;
+      record.positionPreview = await buildPositionPreview(record);
+      record.risk = tradingController.evaluate(record);
+      if (!["PAPER_ENTRY", "PAPER_ADD"].includes(record.risk.verdict)) {
+        delete state.deferredUsEntries[key];
+        saveState();
+        await notifyDeferredUsEntry(`🛑 미국 모의 진입 재검증 차단 — ${record.payload.name || record.payload.ticker} (${record.payload.ticker}) · ${record.risk.reason}`);
+        continue;
+      }
+
+      const order = await submitAndTrackOrder(record);
+      if (order?.status === "DEFERRED") continue;
+      delete state.deferredUsEntries[key];
+      saveState();
+      if (order?.status !== "ACCEPTED") {
+        await notifyDeferredUsEntry(`🛑 미국 모의 진입 재주문 실패 — ${record.payload.name || record.payload.ticker} (${record.payload.ticker}) · ${order?.reason || "주문 미생성"}`);
+      }
+    } catch (error) {
+      await notifyDeferredUsEntry(`⚠️ 미국 모의 진입 재검증 실패 — ${record.payload.name || record.payload.ticker} (${record.payload.ticker}) · 다음 정규장에 다시 확인 · ${error.message}`);
+    }
+  }
 }
 
 function updateScheduledPaperExitFromOrder(order) {
@@ -1320,8 +1418,10 @@ function startScheduledPaperExitScheduler() {
   const pending = Object.values(state.scheduledPaperExits).filter((entry) => entry.status === "SCHEDULED");
   if (pending.length) console.log(`키움 모의 예약 전량매도: ${pending.length}건`);
   void checkScheduledPaperExits().catch((error) => console.error("키움 모의 예약 매도 실패:", error.message));
+  void checkDeferredUsEntries().catch((error) => console.error("키움 미국 모의 진입 재검증 실패:", error.message));
   setInterval(() => {
     void checkScheduledPaperExits().catch((error) => console.error("키움 모의 예약 매도 실패:", error.message));
+    void checkDeferredUsEntries().catch((error) => console.error("키움 미국 모의 진입 재검증 실패:", error.message));
   }, 15_000);
 }
 
@@ -1351,11 +1451,14 @@ async function publishWebhookRecord(record, options = {}) {
     }
     return;
   }
+  supersedeDeferredUsEntry(record);
   await updateWatchlist(record);
-  record.positionPreview = await buildPositionPreview(record);
+  if (!ACCOUNT_NEUTRAL_SIGNAL_SERVER) record.positionPreview = await buildPositionPreview(record);
   record.risk = tradingController.evaluate(record);
-  if (record.risk.verdict === "BUY_PENDING_APPROVAL") await queueBuyApproval(record);
-  else await submitAndTrackOrder(record);
+  if (!ACCOUNT_NEUTRAL_SIGNAL_SERVER) {
+    if (record.risk.verdict === "BUY_PENDING_APPROVAL") await queueBuyApproval(record);
+    else await submitAndTrackOrder(record);
+  }
   const formatted = formatWebhookRecord(record);
   const channelNames = formatted.targetChannels || [formatted.targetChannel
     || (formatted.channel === "signal" ? WEBHOOK_SIGNAL_CHANNEL : WEBHOOK_SYSTEM_CHANNEL)];
@@ -1469,7 +1572,7 @@ async function syncMyPortfolioMessage() {
 }
 
 function startMyPortfolioScheduler() {
-  if (!KIWOOM_ENABLED) return;
+  if (ACCOUNT_NEUTRAL_SIGNAL_SERVER || !KIWOOM_ENABLED) return;
   console.log(`나의 포트폴리오 갱신: ${MY_PORTFOLIO_SYNC_MINUTES}분마다 #${MY_PORTFOLIO_CHANNEL}`);
   void syncMyPortfolioMessage().catch((error) => console.error("나의 포트폴리오 갱신 실패:", error.message));
   setInterval(() => {
@@ -1521,6 +1624,7 @@ async function buildPositionPreview(record) {
 function startTradingController() {
   tradingController = new TradeController({
     maxOpenPositions: MAX_OPEN_POSITIONS,
+    accountNeutral: ACCOUNT_NEUTRAL_SIGNAL_SERVER,
     buyApprovalRequired: BUY_APPROVAL_REQUIRED,
     earlyEntryApprovalEnabled: EARLY_ENTRY_APPROVAL_ENABLED,
     initialMode: TRADING_MODE,
@@ -1529,7 +1633,10 @@ function startTradingController() {
   });
   const status = tradingController.status();
   console.log(`자동매매 게이트: ${status.mode}, 최대 ${status.maxOpenPositions}종목, 실계좌 주문 차단`);
-  console.log(`키움 국내·미국 모의 자동주문: ${KIWOOM_ENABLED && KIWOOM_ENV === "mock" && status.mode === "PAPER_AUTO" ? "활성" : "비활성"}`);
+  console.log(`공통 신호 서버: ${ACCOUNT_NEUTRAL_SIGNAL_SERVER ? "계좌 중립 · 주문 실행기 분리" : "키움 계좌 결합"}`);
+  if (!ACCOUNT_NEUTRAL_SIGNAL_SERVER) {
+    console.log(`키움 국내·미국 모의 자동주문: ${KIWOOM_ENABLED && KIWOOM_ENV === "mock" && status.mode === "PAPER_AUTO" ? "활성" : "비활성"}`);
+  }
   console.log(`BUY 사용자 승인 시험: ${BUY_APPROVAL_REQUIRED ? `${BUY_APPROVAL_TTL_MINUTES}분 / #${ORDER_APPROVAL_CHANNEL}` : "비활성"}`);
   console.log(`일봉 초기 신호 소액 승인: ${EARLY_ENTRY_APPROVAL_ENABLED ? `${BUY_APPROVAL_TTL_MINUTES}분 / #${ORDER_APPROVAL_CHANNEL}` : "비활성"}`);
   console.log(`TradingView→키움 국내 모의주문 1회 테스트: ${PAPER_ORDER_TEST_ENABLED ? `${PAPER_ORDER_TEST_SYMBOL} 1주` : "비활성"}`);
@@ -1537,6 +1644,17 @@ function startTradingController() {
 
 function tradingStatusText() {
   const status = tradingController.status();
+  if (ACCOUNT_NEUTRAL_SIGNAL_SERVER) {
+    return [
+      "🧭 **공통 신호 게이트 상태**",
+      `모드: \`${status.mode}\``,
+      `신규 진입 신호: ${status.halted ? "중지" : "허용"}`,
+      "계좌 판단: 각 사용자의 계좌 주문 실행기에서 현금·보유량·수량 재계산",
+      "BUY: 사용자 승인 후 계좌별 모의주문",
+      "SELL: 계좌 주문 실행기가 자동 처리",
+      `실제 주문: ${status.liveOrdersEnabled ? "활성" : "🔒 차단"}`,
+    ].join("\n");
+  }
   const positions = status.positions.length
     ? status.positions.map((position) => `${position.ticker} ${position.name || ""} @ ${position.entrySignalPrice}`).join("\n")
     : "없음";
@@ -1546,6 +1664,7 @@ function tradingStatusText() {
     `신규 진입: ${status.halted ? "중지" : "허용"}`,
     `모의 보유: ${status.openCount}/${status.maxOpenPositions}`,
     `미완료 주문: ${orderTracker.pending().length}건`,
+    `미국장 종료 재검증 대기: ${Object.keys(state.deferredUsEntries).length}건`,
     `키움 모의 자동주문: ${KIWOOM_ENABLED && KIWOOM_ENV === "mock" && status.mode === "PAPER_AUTO" ? "활성" : "비활성"}`,
     `BUY 승인 시험: ${BUY_APPROVAL_REQUIRED ? `활성 (${BUY_APPROVAL_TTL_MINUTES}분)` : "비활성"}`,
     `일봉 초기 신호 소액 승인: ${EARLY_ENTRY_APPROVAL_ENABLED ? `활성 (${BUY_APPROVAL_TTL_MINUTES}분)` : "비활성"}`,
@@ -1556,6 +1675,19 @@ function tradingStatusText() {
 }
 
 function tradingHelpText() {
+  if (ACCOUNT_NEUTRAL_SIGNAL_SERVER) {
+    return [
+      "🧾 **공통 신호 서버 명령어**",
+      "`!trade status` 공통 신호 게이트 상태",
+      "`!trade shadow` 판단·기록만",
+      "`!trade paper` 계좌 실행기로 모의 매매의도 전달",
+      "`!trade halt` 신규 진입 신호 중지",
+      "`!trade resume` 신규 진입 신호 재개",
+      "`!trade off` 매매 판단 중지",
+      "계좌별 상태·최근 주문은 각 사용자 시스템 채널에서 `계좌 상태 보여줘`, `계좌 최근 주문 보여줘`",
+      "실계좌 주문은 지원하지 않습니다.",
+    ].join("\n");
+  }
   return [
     "🧾 **자동매매 명령어**",
     "`!trade status` 현재 상태",
@@ -1628,10 +1760,18 @@ async function handleTradingCommand(message, content) {
     return;
   }
   if (command === "orders" || command === "주문") {
+    if (ACCOUNT_NEUTRAL_SIGNAL_SERVER) {
+      await message.reply("최근 주문은 각 사용자의 #시스템상태 채널에서 `계좌 최근 주문 보여줘`라고 요청해 주세요.");
+      return;
+    }
     await message.reply(tradingOrdersText());
     return;
   }
   if (command.startsWith("size ") || command.startsWith("수량 ")) {
+    if (ACCOUNT_NEUTRAL_SIGNAL_SERVER) {
+      await message.reply("주문수량은 각 계좌 주문 실행기가 자신의 현금·보유량·종목 비중으로 계산합니다.");
+      return;
+    }
     try {
       await message.reply(await tradingSizeText(command));
     } catch (error) {
@@ -1663,7 +1803,20 @@ async function handleBuyApprovalCommand(message, content) {
     await message.reply("현재 BUY 승인 기능이 비활성 상태입니다.");
     return;
   }
-  let { ticker } = parseBuyApprovalCommand(content);
+  const command = parseBuyApprovalCommand(content);
+  if (command.ambiguous) {
+    await message.reply("주문 뜻이 애매합니다. `사줘`, `키움만`, `한투만`, `안 사` 중 하나로 다시 말해 주세요.");
+    return;
+  }
+  if (command.action === "CANCEL") {
+    await message.reply("이전 키움 단독 승인기는 취소 문장을 주문으로 처리하지 않습니다.");
+    return;
+  }
+  if (!command.brokers.includes("KIWOOM")) {
+    await message.reply("이전 키움 단독 승인기에서는 `키움만`만 처리할 수 있습니다.");
+    return;
+  }
+  let { ticker } = command;
   if (!ticker && message.reference?.messageId) {
     try {
       const referenced = await message.channel.messages.fetch(message.reference.messageId);
@@ -1707,6 +1860,7 @@ async function handleBuyApprovalCommand(message, content) {
 }
 
 async function startOrderStatusWatcher() {
+  if (ACCOUNT_NEUTRAL_SIGNAL_SERVER) return;
   const expired = orderTracker.expirePreviousDayOrders();
   if (expired.length) console.log(`거래일이 지난 미완료 주문 ${expired.length}건을 만료 처리했습니다.`);
   let revision = orderTracker.snapshot().revision;
@@ -1744,6 +1898,17 @@ async function startOrderStatusWatcher() {
   });
 }
 
+async function notifySignalServerStartup() {
+  const channel = findTextChannelByName(WEBHOOK_SYSTEM_CHANNEL);
+  const botTag = clients.get("druckenmiller")?.user?.tag;
+  if (!channel || !botTag) return;
+  await sendChunks(channel, formatBrokerStartup(
+    "공통 신호 서버",
+    botTag,
+    `TradingView 웹훅 ${WEBHOOK_ENABLED ? "수신" : "비활성"} · 계좌 중립 신호 전달`,
+  ));
+}
+
 async function runSignalReviewBatch(records) {
   const channel = findTextChannelByName(AI_SIGNAL_REVIEW_CHANNEL);
   if (!channel) throw new Error(`Discord 채널을 찾지 못했습니다: #${AI_SIGNAL_REVIEW_CHANNEL}`);
@@ -1775,11 +1940,11 @@ async function startWebhookReceiver() {
     token,
     logFile: path.resolve(ROOT, WEBHOOK_LOG_FILE),
     onProcessed: publishWebhookRecord,
-    ordersEnabled: KIWOOM_ENABLED && KIWOOM_ENV === "mock",
+    ordersEnabled: !ACCOUNT_NEUTRAL_SIGNAL_SERVER && KIWOOM_ENABLED && KIWOOM_ENV === "mock",
   });
   await webhookService.listen(WEBHOOK_PORT, WEBHOOK_HOST);
   await replayUndeliveredWebhooks();
-  console.log(`웹훅 수신기: http://${WEBHOOK_HOST}:${WEBHOOK_PORT}/webhook/<secret> (${KIWOOM_ENABLED && KIWOOM_ENV === "mock" ? "모의주문 연결" : "주문 차단"})`);
+  console.log(`웹훅 수신기: http://${WEBHOOK_HOST}:${WEBHOOK_PORT}/webhook/<secret> (${!ACCOUNT_NEUTRAL_SIGNAL_SERVER && KIWOOM_ENABLED && KIWOOM_ENV === "mock" ? "모의주문 연결" : "계좌 중립 · 주문 분리"})`);
 }
 
 async function checkScheduledBriefing(now = new Date(), forceTime = "") {
@@ -2056,7 +2221,8 @@ function conversationHelpText() {
     "- `반도체 같이 토론해줘`: 다섯 관점으로 토론",
     "- `대화 새로 시작`: 이 채널의 AI 대화 기억 초기화",
     "- `도움말 보여줘`: 이 안내 다시 보기",
-    "- `매매 상태 보여줘` / `최근 주문 보여줘`: 조회만 하는 매매 정보",
+    "- `매매 상태 보여줘`: 공통 신호 게이트 상태",
+    "- `계좌 상태 보여줘` / `계좌 최근 주문 보여줘`: 사용자별 계좌 실행기 정보",
     "주문·매도·위험설정 변경은 오작동 방지를 위해 기존 `!trade` 명령을 사용합니다.",
   ].join("\n");
 }
@@ -2079,6 +2245,7 @@ async function handleMessage(persona, client, message, edited = false) {
   botRelayCount.set(message.channel.id, 0);
   const content = message.content.trim();
   if (!content) return;
+  if (isAccountExecutorRequest(content)) return;
   if (isStopRequest(content)) {
     if (persona.id === PERSONAS[0].id) {
       stopConversation(message.channel.id);
@@ -2120,7 +2287,7 @@ async function handleMessage(persona, client, message, edited = false) {
   }
 
   if (parseBuyApprovalCommand(content).matched) {
-    if (persona.id === PERSONAS[0].id) await handleBuyApprovalCommand(message, content);
+    if (!ACCOUNT_NEUTRAL_SIGNAL_SERVER && persona.id === PERSONAS[0].id) await handleBuyApprovalCommand(message, content);
     return;
   }
 
@@ -2289,6 +2456,7 @@ async function main() {
   startScheduledPaperExitScheduler();
   startSignalReviewBatcher();
   await startWebhookReceiver();
+  await notifySignalServerStartup();
   startTelegramScheduler();
   startInvestorPortfolioScheduler();
   startBriefingScheduler();

@@ -122,4 +122,14 @@ approvalEntry.buyApproved = true;
 assert.equal(approvalPaper.evaluate(approvalEntry).verdict, "PAPER_ENTRY");
 assert.equal(approvalPaper.status().openCount, 1);
 
+const signalServer = new TradeController({ initialMode: "PAPER_AUTO", accountNeutral: true });
+const neutralEntry = entry(13);
+neutralEntry.positionPreview = { blocked: true, reason: "특정 계좌 현금 부족" };
+assert.equal(signalServer.evaluate(neutralEntry).verdict, "PAPER_ENTRY");
+const neutralAdd = { ...entry(14), outcome: { decision: "ADD_CANDIDATE" } };
+assert.equal(signalServer.evaluate(neutralAdd).verdict, "PAPER_ADD");
+const neutralExit = { ...entry(15), payload: { ...entry(15).payload, action: "SELL" }, outcome: { decision: "EXIT_CANDIDATE" } };
+assert.equal(signalServer.evaluate(neutralExit).verdict, "PAPER_EXIT");
+assert.equal(signalServer.status().openCount, 0);
+
 console.log("trade-controller test OK");

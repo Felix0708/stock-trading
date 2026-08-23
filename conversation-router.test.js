@@ -4,6 +4,7 @@ const assert = require("node:assert/strict");
 const {
   extractRoundtableTopic,
   isHelpRequest,
+  isAccountExecutorRequest,
   isResetRequest,
   isRoundtableRequest,
   isStopRequest,
@@ -38,6 +39,10 @@ assert.equal(isRoundtableRequest("반도체 종목 같이 토론해줘"), true);
 assert.equal(extractRoundtableTopic("반도체 종목 같이 토론해줘"), "반도체 종목");
 assert.equal(isResetRequest("대화 새로 시작"), true);
 assert.equal(isHelpRequest("도움말 보여줘"), true);
+assert.equal(isAccountExecutorRequest("계좌 상태 보여줘"), true);
+assert.equal(isAccountExecutorRequest("계좌 상태"), true);
+assert.equal(isAccountExecutorRequest("사용자A 계좌 상태"), true);
+assert.equal(isAccountExecutorRequest("최근 주문 보여줘"), false);
 assert.equal(naturalTradeCommand("매매 상태 보여줘"), "!trade status");
 assert.equal(naturalTradeCommand("최근 주문 보여줘"), "!trade orders");
 assert.equal(naturalTradeCommand("매매 명령어 보여줘"), "!trade help");

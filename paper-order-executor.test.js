@@ -6,6 +6,7 @@ const os = require("node:os");
 const path = require("node:path");
 const { OrderTracker } = require("./order-tracker");
 const {
+  isUsMarketClosedError, isUsRegularSession, shouldDeferUsEntry,
   partialExitQuantity, partialExitRatio,
   submitPaperOrder, trackPaperOrder, submitPaperTestOrder, trackPaperTestOrder,
 } = require("./paper-order-executor");
@@ -32,6 +33,17 @@ const record = {
 };
 
 (async () => {
+  assert.equal(isUsMarketClosedError(new Error("키움 모의투자 요청 실패: [20000](RC4058:모의투자 장종료)")), true);
+  assert.equal(isUsMarketClosedError(new Error("키움 모의투자 요청 실패: 주문가능금액 부족")), false);
+  assert.equal(isUsRegularSession(new Date("2026-08-24T13:31:00.000Z")), true);
+  assert.equal(isUsRegularSession(new Date("2026-08-22T13:31:00.000Z")), false);
+  assert.equal(isUsRegularSession(new Date("2026-08-24T20:00:00.000Z")), false);
+  assert.equal(shouldDeferUsEntry({
+    payload: { exchange: "NASDAQ", action: "BUY" }, risk: { verdict: "PAPER_ENTRY" },
+  }, new Error("[20000](RC4058:모의투자 장종료)")), true);
+  assert.equal(shouldDeferUsEntry({
+    payload: { exchange: "NASDAQ", action: "SELL" }, risk: { verdict: "PAPER_EXIT" },
+  }, new Error("[20000](RC4058:모의투자 장종료)")), false);
   assert.equal(partialExitQuantity(8, 0.25), 2);
   assert.equal(partialExitQuantity(1, 0.25), 0);
   assert.equal(partialExitRatio({ outcome: { signal: { signalCode: "TAKE_PROFIT", tpLevel: 2 } } }, {}), 0.5);

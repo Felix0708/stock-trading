@@ -1,5 +1,7 @@
 "use strict";
 
+const { encodeSignalEnvelope } = require("./discord-signal-envelope");
+
 const DECISION_LABELS = {
   ENTRY_CANDIDATE: "진입 검토",
   ADD_CANDIDATE: "추가매수 검토",
@@ -52,7 +54,7 @@ function targetSignalChannels(record) {
   return [
     `${market}-전체신호`,
     `${market}-${kind}신호`,
-    ...(record.orderAttempt?.status === "ACCEPTED" ? [`${market}-매매신호`] : []),
+    ...(encodeSignalEnvelope(record) ? [`${market}-매매신호`] : []),
   ];
 }
 
@@ -110,7 +112,7 @@ function signalEmbed(record, identity, orderLine) {
       `${signalPrice(payload.price, payload.exchange)} · SL ${signalPrice(payload.sl, payload.exchange)} · R/R ${display(payload.rr)}`,
     ].join("\n"), 1024),
     fields,
-    footer: { text: "Lazy Alpha" },
+    footer: { text: encodeSignalEnvelope(record) || "Lazy Alpha" },
     ...(record.receivedAt ? { timestamp: record.receivedAt } : {}),
   };
 }
@@ -142,10 +144,11 @@ function formatWebhookRecord(record) {
   const signal = outcome.signal || {};
   const risk = record.risk || {};
   const identity = `${display(payload.name)} (${display(payload.ticker)})`;
+  const brokerLabel = record.orderAttempt?.brokerLabel || "키움 모의계좌";
   const orderLine = !record.orderAttempt
     ? "**주문**: 🔒 생성 안 됨"
     : record.orderAttempt.status === "ACCEPTED"
-      ? `**주문**: 📨 키움 모의계좌 ${display(record.orderAttempt.side)} ${display(record.orderAttempt.orderQuantity)}주 접수 · 끝 4자리 ${String(record.orderAttempt.orderNo).slice(-4)}`
+      ? `**주문**: 📨 ${brokerLabel} ${display(record.orderAttempt.side)} ${display(record.orderAttempt.orderQuantity)}주 접수 · 끝 4자리 ${String(record.orderAttempt.orderNo).slice(-4)}`
       : `**주문**: 🛑 ${display(record.orderAttempt.status)} — ${display(record.orderAttempt.reason)}`;
 
   if (!record.validation?.ok || outcome.decision === "REJECTED_INVALID" || outcome.decision === "BLOCKED") {
@@ -203,6 +206,7 @@ function formatWebhookRecord(record) {
 function formatOrderStatus(order) {
   const [icon, label, color] = ORDER_STATUS[order.status] || ["ℹ️", display(order.status), 0x5865F2];
   const identity = order.name ? `${order.name} (${display(order.symbol)})` : display(order.symbol);
+  const brokerLabel = order.brokerLabel || "키움 모의계좌";
   return {
     channel: "system",
     embed: {
@@ -214,11 +218,11 @@ function formatOrderStatus(order) {
         ...(order.fillPrice ? [{ name: "체결가", value: display(order.fillPrice), inline: true }] : []),
         { name: "주문번호", value: `끝 4자리 ${String(order.orderNo || "").slice(-4) || "-"}`, inline: true },
       ],
-      footer: { text: "키움 모의계좌" },
+      footer: { text: brokerLabel },
       ...(order.updatedAt ? { timestamp: order.updatedAt } : {}),
     },
     text: [
-      `${icon} **키움 모의주문 상태**`,
+      `${icon} **${brokerLabel} 주문 상태**`,
       `**종목**: ${identity} / ${display(order.side)}`,
       `**상태**: \`${display(order.status)}\``,
       `**수량**: 주문 ${display(order.orderQuantity)} / 체결 ${display(order.filledQuantity)} / 잔량 ${display(order.remainingQuantity)}`,
@@ -249,20 +253,25 @@ function formatBuyApproval(record, approval, ttlMinutes) {
   };
 }
 
-function formatDailyJournal(date, entries) {
+function formatDailyJournal(date, entries, brokerLabel = "키움 모의계좌") {
   return {
     channel: "system",
     embed: {
       color: 0x5865F2,
       title: `📘 ${date} 모의매매 일지`,
       description: clip(entries.join("\n") || "체결 내역 없음", 4096),
-      footer: { text: "키움 모의계좌 체결 기준" },
+      footer: { text: `${brokerLabel} 체결 기준` },
     },
     text: `${date} 모의매매 일지`,
   };
 }
 
+function formatBrokerStartup(service, botTag, detail) {
+  return `✅ ${service} 연결 · ${botTag}\n${detail} · 실계좌 차단`;
+}
+
 module.exports = {
+  formatBrokerStartup,
   formatBuyApproval,
   formatDailyJournal,
   formatOrderStatus,

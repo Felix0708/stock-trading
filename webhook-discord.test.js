@@ -2,6 +2,7 @@
 
 const assert = require("node:assert/strict");
 const {
+  formatBrokerStartup,
   formatBuyApproval,
   formatDailyJournal,
   formatOrderStatus,
@@ -26,7 +27,7 @@ const base = {
 
 const normal = formatWebhookRecord(base);
 assert.equal(normal.channel, "signal");
-assert.deepEqual(targetSignalChannels(base), ["국장-전체신호", "국장-진입신호"]);
+assert.deepEqual(targetSignalChannels(base), ["국장-전체신호", "국장-진입신호", "국장-매매신호"]);
 assert(normal.text.includes("💰 정석 진입 @SR↩"));
 assert(normal.text.includes("ENTRY_STANDARD"));
 assert(normal.text.includes("생성 안 됨"));
@@ -38,7 +39,7 @@ assert(normal.embed.description.includes("삼성전자 (005930)"));
 assert(normal.embed.description.includes("80,000원 · SL 77,500원 · R/R 2.2"));
 assert(normal.embed.fields.some((field) => field.name === "AI 평가" && field.value === "상승 추세"));
 assert(normal.embed.fields.some((field) => field.name === "자동매매" && field.value.includes("PAPER_ENTRY")));
-assert.equal(normal.embed.footer.text, "Lazy Alpha");
+assert(normal.embed.footer.text.startsWith("LAZY_SIGNAL_V1:"));
 assert.equal(normal.embed.timestamp, undefined);
 
 const observationRecord = {
@@ -64,7 +65,7 @@ const usTrade = formatWebhookRecord({
 assert.deepEqual(targetSignalChannels({
   ...base,
   payload: { ...base.payload, ticker: "NVDA", name: "NVIDIA", exchange: "NASDAQ" },
-  orderAttempt: { status: "ACCEPTED" },
+  orderAttempt: { status: "ERROR", reason: "키움 주문 실패" },
 }), ["미국-전체신호", "미국-진입신호", "미국-매매신호"]);
 assert(usTrade.embed.description.includes("NVIDIA (NVDA)"));
 
@@ -96,7 +97,7 @@ assert.deepEqual(targetSignalChannels({
   ...base,
   payload: { ...base.payload, action: "SELL" },
   outcome: { ...base.outcome, decision: "PARTIAL_EXIT_CANDIDATE" },
-}), ["국장-전체신호", "국장-청산신호"]);
+}), ["국장-전체신호", "국장-청산신호", "국장-매매신호"]);
 
 const sized = formatWebhookRecord({
   ...base,
@@ -162,6 +163,12 @@ assert(order.text.includes("PARTIALLY_FILLED"));
 assert(order.text.includes("0282"));
 assert.equal(order.embed.title, "⏳ BUY · 부분 체결");
 assert(order.embed.description.includes("Apple Inc. (AAPL)"));
+const kisOrder = formatOrderStatus({
+  orderNo: "5678", symbol: "AAPL", name: "Apple Inc.", side: "BUY", status: "ACCEPTED",
+  orderQuantity: 1, filledQuantity: 0, remainingQuantity: 1, brokerLabel: "한투 모의계좌",
+});
+assert(kisOrder.text.includes("한투 모의계좌 주문 상태"));
+assert.equal(kisOrder.embed.footer.text, "한투 모의계좌");
 
 const approval = formatBuyApproval(base, {
   ticker: "005930", name: "삼성전자",
@@ -173,5 +180,10 @@ assert(approval.embed.fields.some((field) => field.name === "승인" && field.va
 const journal = formatDailyJournal("2026-08-21", ["- 09:10 · **BUY** · 삼성전자 (005930) · 1주 @ 80,000원"]);
 assert.equal(journal.embed.title, "📘 2026-08-21 모의매매 일지");
 assert(journal.embed.description.includes("삼성전자 (005930)"));
+assert.equal(formatDailyJournal("2026-08-21", [], "한투 모의계좌").embed.footer.text, "한투 모의계좌 체결 기준");
+assert.equal(
+  formatBrokerStartup("공통 신호 서버", "드러켄밀러#2229", "TradingView 웹훅 수신 · 계좌 중립 신호 전달"),
+  "✅ 공통 신호 서버 연결 · 드러켄밀러#2229\nTradingView 웹훅 수신 · 계좌 중립 신호 전달 · 실계좌 차단",
+);
 
 console.log("webhook-discord test OK");

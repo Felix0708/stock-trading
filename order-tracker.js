@@ -22,7 +22,7 @@ class OrderTracker {
     if (!fs.existsSync(this.file)) return { revision: 0, orders: {} };
     const state = JSON.parse(fs.readFileSync(this.file, "utf8"));
     if (!Number.isInteger(state.revision) || !state.orders || typeof state.orders !== "object") {
-      throw new Error("kiwoom-orders.json 형식이 올바르지 않습니다.");
+      throw new Error("주문 상태 파일 형식이 올바르지 않습니다.");
     }
     return state;
   }

@@ -19,6 +19,7 @@ class TradeController {
     this.maxOpenPositions = options.maxOpenPositions ?? 5;
     this.buyApprovalRequired = Boolean(options.buyApprovalRequired);
     this.earlyEntryApprovalEnabled = Boolean(options.earlyEntryApprovalEnabled);
+    this.accountNeutral = Boolean(options.accountNeutral);
     this.stateFile = options.stateFile || null;
     this.decisionLogFile = options.decisionLogFile || null;
     if (!Number.isInteger(this.maxOpenPositions) || this.maxOpenPositions < 1) {
@@ -80,6 +81,14 @@ class TradeController {
     if (!record.validation?.ok || ["BLOCKED", "REJECTED_INVALID"].includes(decision)) {
       verdict = "BLOCKED_INVALID_SIGNAL";
       reason = "명세 또는 신호 검증 실패";
+    } else if (this.accountNeutral && ENTRY_DECISIONS.has(decision)) {
+      ({ verdict, reason } = this.evaluateAccountNeutralEntry(record));
+    } else if (this.accountNeutral && FULL_EXIT_DECISIONS.has(decision)) {
+      verdict = this.state.mode === "OFF" ? "BLOCKED_MODE_OFF" : this.state.mode === "PAPER_AUTO" ? "PAPER_EXIT" : "SHADOW_EXIT";
+      reason = this.state.mode === "OFF" ? "매매 모드 OFF" : "계좌별 보유량 재검증 대상";
+    } else if (this.accountNeutral && decision === "PARTIAL_EXIT_CANDIDATE") {
+      verdict = this.state.mode === "OFF" ? "BLOCKED_MODE_OFF" : this.state.mode === "PAPER_AUTO" ? "PAPER_PARTIAL_EXIT" : "SHADOW_PARTIAL_EXIT";
+      reason = this.state.mode === "OFF" ? "매매 모드 OFF" : "계좌별 보유량·부분청산 비율 재검증 대상";
     } else if (ENTRY_DECISIONS.has(decision) && record.positionPreview?.blocked) {
       verdict = "BLOCKED_POSITION_SIZE";
       reason = record.positionPreview.reason || "주문 수량 계산 차단";
@@ -153,23 +162,8 @@ class TradeController {
   evaluateEntry(record, key, existing) {
     const payload = record.payload;
     const decision = record.outcome.decision;
-    if (this.state.mode === "OFF") return { verdict: "BLOCKED_MODE_OFF", reason: "매매 모드 OFF" };
-    if (this.state.halted) return { verdict: "BLOCKED_HALTED", reason: "신규 진입 중지 상태" };
-    if (payload.conviction === "D") return { verdict: "BLOCKED_CONVICTION_D", reason: "Webhook v6.2 conviction D 매수 차단" };
-    if (!Number.isFinite(payload.sl) || payload.sl <= 0 || payload.sl >= payload.price) {
-      return { verdict: "BLOCKED_INVALID_STOP", reason: "유효한 손절가가 없어 자동 진입 차단" };
-    }
-    if (!["BULL", "MIXED", "BEAR"].includes(payload.daily_trend)
-        || typeof payload.daily_ema_aligned !== "boolean"
-        || typeof payload.daily_above_200ma !== "boolean") {
-      return { verdict: "BLOCKED_DAILY_DATA", reason: "일봉 필터 데이터 누락 또는 형식 오류" };
-    }
-    if (payload.daily_trend === "BEAR") {
-      return { verdict: "BLOCKED_DAILY_BEAR", reason: "일봉 하락 추세 — BUY 차단" };
-    }
-    if (!payload.daily_above_200ma) {
-      return { verdict: "BLOCKED_DAILY_200MA", reason: "일봉 200일선 아래 — BUY 차단" };
-    }
+    const blocked = this.validateEntry(record);
+    if (blocked) return blocked;
     if (existing?.pendingOrder) return { verdict: "BLOCKED_PENDING_ORDER", reason: "이전 진입 주문 체결 확인 중" };
     if ((existing || record.positionPreview?.hasExistingPosition) && record.positionPreview?.positionProfitable !== true) {
       return record.positionPreview?.positionProfitable === false
@@ -243,7 +237,35 @@ class TradeController {
     };
     return {
       verdict: this.state.mode === "PAPER_AUTO" ? "PAPER_ENTRY" : "SHADOW_ENTRY",
-      reason: this.state.mode === "PAPER_AUTO" ? "키움 모의 진입 주문 대기" : "모의 포지션 슬롯 생성 — 주문 없음",
+      reason: this.state.mode === "PAPER_AUTO" ? "계좌별 모의 진입 주문 대상" : "모의 포지션 슬롯 생성 — 주문 없음",
+    };
+  }
+
+  validateEntry(record) {
+    const payload = record.payload;
+    if (this.state.mode === "OFF") return { verdict: "BLOCKED_MODE_OFF", reason: "매매 모드 OFF" };
+    if (this.state.halted) return { verdict: "BLOCKED_HALTED", reason: "신규 진입 중지 상태" };
+    if (payload.conviction === "D") return { verdict: "BLOCKED_CONVICTION_D", reason: "Webhook v6.2 conviction D 매수 차단" };
+    if (!Number.isFinite(payload.sl) || payload.sl <= 0 || payload.sl >= payload.price) {
+      return { verdict: "BLOCKED_INVALID_STOP", reason: "유효한 손절가가 없어 자동 진입 차단" };
+    }
+    if (!["BULL", "MIXED", "BEAR"].includes(payload.daily_trend)
+        || typeof payload.daily_ema_aligned !== "boolean"
+        || typeof payload.daily_above_200ma !== "boolean") {
+      return { verdict: "BLOCKED_DAILY_DATA", reason: "일봉 필터 데이터 누락 또는 형식 오류" };
+    }
+    if (payload.daily_trend === "BEAR") return { verdict: "BLOCKED_DAILY_BEAR", reason: "일봉 하락 추세 — BUY 차단" };
+    if (!payload.daily_above_200ma) return { verdict: "BLOCKED_DAILY_200MA", reason: "일봉 200일선 아래 — BUY 차단" };
+    return null;
+  }
+
+  evaluateAccountNeutralEntry(record) {
+    const blocked = this.validateEntry(record);
+    if (blocked) return blocked;
+    const add = record.outcome.decision === "ADD_CANDIDATE";
+    return {
+      verdict: this.state.mode === "PAPER_AUTO" ? (add ? "PAPER_ADD" : "PAPER_ENTRY") : (add ? "SHADOW_ADD" : "SHADOW_ENTRY"),
+      reason: "계좌별 현금·보유량·비중 재검증 대상",
     };
   }
 

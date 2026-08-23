@@ -37,6 +37,14 @@ function isHelpRequest(content) {
   return ["도움말", "도움말보여줘", "사용법", "사용법알려줘", "명령어", "명령어알려줘"].includes(normalize(content));
 }
 
+function isAccountExecutorRequest(content) {
+  const text = normalize(content);
+  return text.startsWith("!account")
+    || text.startsWith("!계좌")
+    || /^(?:[가-힣a-z0-9_-]+)?계좌(?:명령어|도움말|상태|최근주문|주문내역)(?:보여줘|알려줘|확인)?$/.test(text)
+    || ["주문실행기상태보여줘", "주문실행기상태확인"].includes(text);
+}
+
 function naturalTradeCommand(content) {
   const text = normalize(content);
   if (["매매상태", "자동매매상태", "매매상태보여줘", "매매상태알려줘", "자동매매상태보여줘"].includes(text)) return "!trade status";
@@ -71,6 +79,7 @@ function pickResponder({ content, fixedPersonaId = "", lastPersonaId = "", perso
 
 module.exports = {
   extractRoundtableTopic,
+  isAccountExecutorRequest,
   isHelpRequest,
   isResetRequest,
   isRoundtableRequest,

@@ -2,7 +2,8 @@ node_modules/
 .DS_Store
 .env
 .env.*
-!.env.example
+!.env.signal.example
+!.env.account.example
 state.json*
 .codex-chat/
 .omo/
@@ -14,7 +15,10 @@ webhook-events.jsonl.*
 trading-state.json
 trading-decisions.jsonl
 kiwoom-orders.json
+kis-orders.json
+kis-signal-receipts.json
 .paper-order-test-lock.json
 runtime.log
+.runtime/
 docs/tradingview-webhook-v6.2.md
 npm-debug.log*

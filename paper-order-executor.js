@@ -13,6 +13,41 @@ const US_EXCHANGE = {
   AMEX: "NA", NYSEARCA: "NA", ARCA: "NA", NA: "NA",
 };
 
+function isUsMarketClosedError(error) {
+  return /RC4058|모의투자 장종료/.test(String(error?.message || error || ""));
+}
+
+function usSessionClock(value = new Date()) {
+  const parts = Object.fromEntries(new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/New_York",
+    weekday: "short",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(value).filter((part) => part.type !== "literal").map((part) => [part.type, part.value]));
+  return {
+    date: `${parts.year}-${parts.month}-${parts.day}`,
+    weekday: parts.weekday,
+    minutes: Number(parts.hour) * 60 + Number(parts.minute),
+  };
+}
+
+function isUsRegularSession(value = new Date()) {
+  const { weekday, minutes } = usSessionClock(value);
+  return !["Sat", "Sun"].includes(weekday) && minutes >= 9 * 60 + 30 && minutes < 16 * 60;
+}
+
+function shouldDeferUsEntry(record, error) {
+  const exchange = String(record?.payload?.exchange || "").toUpperCase();
+  return record?.payload?.action === "BUY"
+    && ["PAPER_ENTRY", "PAPER_ADD"].includes(record?.risk?.verdict)
+    && Boolean(US_EXCHANGE[exchange])
+    && isUsMarketClosedError(error);
+}
+
 function partialExitRatio(record, options) {
   const code = record.outcome?.signal?.signalCode;
   const level = record.outcome?.signal?.tpLevel;
@@ -34,7 +69,7 @@ async function submitPaperOrder(record, options) {
   const exit = risk?.verdict === "PAPER_EXIT";
   const partialExit = risk?.verdict === "PAPER_PARTIAL_EXIT";
   if (!entry && !exit && !partialExit) return null;
-  if (!options.enabled) return blocked("키움 모의 자동주문 비활성");
+  if (!options.enabled) return blocked(`${options.brokerLabel || "키움"} 모의 자동주문 비활성`);
   if (options.environment !== "mock") return blocked("실계좌 주문 차단");
   const side = entry ? "BUY" : "SELL";
 
@@ -58,7 +93,7 @@ async function submitPaperOrder(record, options) {
     if (!kiwoomExchange) return blocked(`지원하지 않는 거래소: ${exchange || "없음"}`);
     if (entry) quantity = positionPreview?.quantity;
     else {
-      const tradable = (await client.getUsBalance()).holdings.find((item) => item.code === payload.ticker)?.tradableQuantity;
+      const tradable = (await client.getUsBalance({ exchange: kiwoomExchange })).holdings.find((item) => item.code === payload.ticker)?.tradableQuantity;
       quantity = partialExit ? partialExitQuantity(tradable, partialExitRatio(record, options)) : tradable;
     }
     if (!Number.isInteger(quantity) || quantity < 1) return blocked("주문 가능한 미국주식 수량 없음");
@@ -70,6 +105,7 @@ async function submitPaperOrder(record, options) {
   }
   return options.tracker.record({
     ...order, orderQuantity: quantity, filledQuantity: 0, remainingQuantity: quantity,
+    brokerLabel: options.brokerLabel || "키움 모의계좌",
     source: record.source || "TRADINGVIEW", market: exchange, name: payload.name,
     signalType: payload.type, signalPrice: payload.price, stopPrice: payload.sl,
     conviction: payload.conviction, requestId: record.requestId,
@@ -128,10 +164,14 @@ async function trackPaperTestOrder(order, options) {
 }
 
 module.exports = {
+  isUsMarketClosedError,
+  isUsRegularSession,
   partialExitQuantity,
   partialExitRatio,
+  shouldDeferUsEntry,
   submitPaperOrder,
   trackPaperOrder,
   submitPaperTestOrder,
   trackPaperTestOrder,
+  usSessionClock,
 };
