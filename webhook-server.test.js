@@ -20,7 +20,7 @@ async function run() {
 
     const health = await fetch(`${origin}/health`);
     assert.equal(health.status, 200);
-    assert.equal((await health.json()).orders_enabled, false);
+    assert.deepEqual(await health.json(), { ok: true, queue_size: 0, role: "signal_server" });
 
     const hidden = await fetch(`${origin}/webhook/wrong-token`, { method: "POST", body: "{}" });
     assert.equal(hidden.status, 404);
@@ -34,7 +34,7 @@ async function run() {
       body: JSON.stringify(sample),
     })));
     assert(responses.every((response) => response.status === 200));
-    assert((await responses[0].json()).orders_enabled === false);
+    assert.deepEqual(Object.keys(await responses[0].json()).sort(), ["ok", "queued", "request_id"]);
 
     await service.queue.whenIdle();
     assert.equal(processed.length, 10);

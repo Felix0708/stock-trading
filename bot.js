@@ -1940,7 +1940,6 @@ async function startWebhookReceiver() {
     token,
     logFile: path.resolve(ROOT, WEBHOOK_LOG_FILE),
     onProcessed: publishWebhookRecord,
-    ordersEnabled: !ACCOUNT_NEUTRAL_SIGNAL_SERVER && KIWOOM_ENABLED && KIWOOM_ENV === "mock",
   });
   await webhookService.listen(WEBHOOK_PORT, WEBHOOK_HOST);
   await replayUndeliveredWebhooks();

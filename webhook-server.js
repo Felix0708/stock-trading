@@ -83,7 +83,6 @@ function createWebhookService(options = {}) {
   const stateMachine = options.stateMachine || new SignalStateMachine();
   const logFile = options.logFile || null;
   const onProcessed = options.onProcessed || (() => {});
-  const ordersEnabled = options.ordersEnabled === true;
   const webhookPath = `/webhook/${encodeURIComponent(token)}`;
 
   const queue = createAsyncQueue(async (event) => {
@@ -114,7 +113,7 @@ function createWebhookService(options = {}) {
   const server = http.createServer((request, response) => {
     const url = new URL(request.url, "http://localhost");
     if (request.method === "GET" && url.pathname === "/health") {
-      sendJson(response, 200, { ok: true, queue_size: queue.size, orders_enabled: ordersEnabled });
+      sendJson(response, 200, { ok: true, queue_size: queue.size, role: "signal_server" });
       return;
     }
     if (request.method !== "POST" || !secureEqual(url.pathname, webhookPath)) {
@@ -155,7 +154,7 @@ function createWebhookService(options = {}) {
       const requestId = crypto.randomUUID();
       const receivedAt = new Date().toISOString();
       queue.enqueue({ requestId, receivedAt, payload });
-      sendJson(response, 200, { ok: true, queued: true, request_id: requestId, orders_enabled: ordersEnabled });
+      sendJson(response, 200, { ok: true, queued: true, request_id: requestId });
     });
   });
 
