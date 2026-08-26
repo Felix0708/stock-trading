@@ -1,7 +1,7 @@
 "use strict";
 
 const assert = require("node:assert/strict");
-const { KisClient, MOCK_BASE_URL } = require("./kis-client");
+const { KisClient, LIVE_BASE_URL, MOCK_BASE_URL } = require("./kis-client");
 
 const calls = [];
 let activeRequests = 0;
@@ -26,7 +26,19 @@ async function fakeFetch(url, options) {
 }
 
 (async () => {
-  assert.throws(() => new KisClient({ appKey: "a", appSecret: "b", accountNo: "12345678", environment: "live" }), /모의투자/);
+  const liveCalls = [];
+  const liveClient = new KisClient({
+    appKey: "a", appSecret: "b", accountNo: "12345678", environment: "live", requestIntervalMs: 0,
+    fetchImpl: async (url, options) => {
+      liveCalls.push({ url, options });
+      if (url.endsWith("/oauth2/tokenP")) return new Response(JSON.stringify({ access_token: "token", expires_in: 86400 }));
+      return new Response(JSON.stringify({ rt_cd: "0", output: { ODNO: "9012" } }));
+    },
+  });
+  await liveClient.placeDomesticMarketOrder({ side: "BUY", symbol: "005930", quantity: 1 });
+  await liveClient.placeUsLimitOrder({ side: "BUY", exchange: "ND", symbol: "AAPL", quantity: 1, price: 250 });
+  assert(liveCalls.every((call) => call.url.startsWith(LIVE_BASE_URL)));
+  assert.deepEqual(liveCalls.filter((call) => !call.url.endsWith("tokenP")).map((call) => call.options.headers.tr_id), ["TTTC0012U", "TTTT1002U"]);
   assert.throws(() => new KisClient({ appKey: "a", appSecret: "b", accountNo: "123", environment: "mock" }), /8자리/);
   const client = new KisClient({ appKey: "a", appSecret: "b", accountNo: "12345678", productCode: "01", fetchImpl: fakeFetch, requestIntervalMs: 0 });
   assert.equal((await client.getDomesticBalance()).holdings[0].name, "삼성전자");
@@ -42,5 +54,17 @@ async function fakeFetch(url, options) {
   assert.deepEqual(calls.filter((call) => !call.url.endsWith("tokenP")).map((call) => call.options.headers.tr_id), [
     "VTTC8434R", "VTTC8908R", "VTTC0012U", "VTTS3012R", "VTTS3012R", "VTTS3012R", "VTTS3012R", "VTTS3012R", "VTTS3007R", "VTTT1001U",
   ]);
+  const sessionBodies = [];
+  const sessionClient = new KisClient({
+    appKey: "a", appSecret: "b", accountNo: "12345678", requestIntervalMs: 0,
+    fetchImpl: async (url, options) => {
+      if (url.endsWith("/oauth2/tokenP")) return new Response(JSON.stringify({ access_token: "token", expires_in: 86400 }));
+      sessionBodies.push(JSON.parse(options.body));
+      return new Response(JSON.stringify({ rt_cd: "0", output: { ODNO: "1" } }));
+    },
+  });
+  await sessionClient.placeDomesticMarketOrder({ side: "SELL", symbol: "005930", quantity: 1, session: "PRE" });
+  await sessionClient.placeDomesticMarketOrder({ side: "BUY", symbol: "005930", quantity: 1, price: 81000, session: "AFTER_SINGLE" });
+  assert.deepEqual(sessionBodies.map((body) => [body.ORD_DVSN, body.ORD_UNPR]), [["05", "0"], ["07", "81000"]]);
   console.log("kis-client test OK");
 })().catch((error) => { console.error(error); process.exitCode = 1; });

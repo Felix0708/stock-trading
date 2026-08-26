@@ -1,7 +1,7 @@
 "use strict";
 
 const assert = require("node:assert/strict");
-const { KiwoomClient, MOCK_BASE_URL } = require("./kiwoom-client");
+const { KiwoomClient, LIVE_BASE_URL, MOCK_BASE_URL } = require("./kiwoom-client");
 
 const calls = [];
 async function fakeFetch(url, options) {
@@ -133,7 +133,19 @@ async function fakeFetch(url, options) {
 
 (async () => {
   assert.throws(() => new KiwoomClient(), /App Key/);
-  assert.throws(() => new KiwoomClient({ appKey: "a", secretKey: "b", environment: "live" }), /모의투자/);
+  const liveCalls = [];
+  const liveClient = new KiwoomClient({
+    appKey: "live-key", secretKey: "live-secret", environment: "live",
+    fetchImpl: async (url, options) => {
+      liveCalls.push({ url, options });
+      return url.endsWith("/oauth2/token")
+        ? new Response(JSON.stringify({ expires_dt: "20260810010000", token: "live-token", return_code: 0 }))
+        : new Response(JSON.stringify({ acctNo: "1234567890", return_code: 0 }));
+    },
+  });
+  await liveClient.getDomesticAccountNumber();
+  assert.equal(liveCalls[0].url, `${LIVE_BASE_URL}/oauth2/token`);
+  assert.equal(liveCalls[1].url, `${LIVE_BASE_URL}/api/dostk/acnt`);
 
   const client = new KiwoomClient({ appKey: "app-key", secretKey: "secret-key", fetchImpl: fakeFetch });
   assert.equal(await client.getDomesticAccountNumber(), "1234567890");
@@ -252,6 +264,18 @@ async function fakeFetch(url, options) {
   assert.equal(calls[17].options.headers["api-id"], "ka20001");
   assert.deepEqual(JSON.parse(calls[17].options.body), { mrkt_tp: "1", inds_cd: "101" });
   assert.equal(calls[18].options.headers["api-id"], "ka10051");
+  const sessionBodies = [];
+  const sessionClient = new KiwoomClient({
+    appKey: "app-key", secretKey: "secret-key",
+    fetchImpl: async (url, options) => {
+      if (url.endsWith("/oauth2/token")) return new Response(JSON.stringify({ token: "token", expires_dt: "20991231235959", return_code: 0 }));
+      sessionBodies.push(JSON.parse(options.body));
+      return new Response(JSON.stringify({ ord_no: "1", return_code: 0 }));
+    },
+  });
+  await sessionClient.placeDomesticMarketOrder({ side: "SELL", symbol: "005930", quantity: 1, session: "PRE" });
+  await sessionClient.placeDomesticMarketOrder({ side: "BUY", symbol: "005930", quantity: 1, price: 81000, session: "AFTER_SINGLE" });
+  assert.deepEqual(sessionBodies.map((body) => [body.trde_tp, body.ord_uv]), [["61", ""], ["62", "81000"]]);
   console.log("kiwoom-client test OK");
 })().catch((error) => {
   console.error(error);

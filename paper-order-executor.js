@@ -14,7 +14,33 @@ const US_EXCHANGE = {
 };
 
 function isUsMarketClosedError(error) {
-  return /RC4058|모의투자 장종료/.test(String(error?.message || error || ""));
+  return /RC4058|장\s*종료/.test(String(error?.message || error || ""));
+}
+
+function domesticSessionClock(value = new Date()) {
+  const parts = Object.fromEntries(new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Seoul", weekday: "short", year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+  }).formatToParts(value).filter((part) => part.type !== "literal").map((part) => [part.type, part.value]));
+  return { date: `${parts.year}-${parts.month}-${parts.day}`, weekday: parts.weekday, minutes: Number(parts.hour) * 60 + Number(parts.minute) };
+}
+
+function domesticSession(value = new Date()) {
+  const { weekday, minutes } = domesticSessionClock(value);
+  if (["Sat", "Sun"].includes(weekday)) return "CLOSED";
+  if (minutes >= 8 * 60 + 30 && minutes < 8 * 60 + 40) return "PRE";
+  if (minutes >= 9 * 60 && minutes < 15 * 60 + 30) return "REGULAR";
+  if (minutes >= 15 * 60 + 40 && minutes < 16 * 60) return "AFTER_CLOSE";
+  if (minutes >= 16 * 60 && minutes < 18 * 60) return "AFTER_SINGLE";
+  return "CLOSED";
+}
+
+function isDomesticOrderSession(value = new Date()) {
+  return domesticSession(value) !== "CLOSED";
+}
+
+function isDomesticBuySession(value = new Date()) {
+  return ["REGULAR", "AFTER_CLOSE", "AFTER_SINGLE"].includes(domesticSession(value));
 }
 
 function usSessionClock(value = new Date()) {
@@ -36,16 +62,55 @@ function usSessionClock(value = new Date()) {
 }
 
 function isUsRegularSession(value = new Date()) {
-  const { weekday, minutes } = usSessionClock(value);
-  return !["Sat", "Sun"].includes(weekday) && minutes >= 9 * 60 + 30 && minutes < 16 * 60;
+  return usSession(value) === "REGULAR";
 }
 
-function shouldDeferUsEntry(record, error) {
+function usSession(value = new Date()) {
+  const { weekday, minutes } = usSessionClock(value);
+  if (["Sat", "Sun"].includes(weekday)) return "CLOSED";
+  if (minutes >= 4 * 60 && minutes < 9 * 60 + 30) return "PRE";
+  if (minutes >= 9 * 60 + 30 && minutes < 16 * 60) return "REGULAR";
+  if (minutes >= 16 * 60 && minutes < 20 * 60) return "AFTER";
+  return "CLOSED";
+}
+
+function isUsOrderSession(value = new Date()) {
+  return ["PRE", "REGULAR", "AFTER"].includes(usSession(value));
+}
+
+function isUsBuySession(value = new Date()) {
+  return ["REGULAR", "AFTER"].includes(usSession(value));
+}
+
+function isUsEntry(record) {
   const exchange = String(record?.payload?.exchange || "").toUpperCase();
   return record?.payload?.action === "BUY"
     && ["PAPER_ENTRY", "PAPER_ADD"].includes(record?.risk?.verdict)
-    && Boolean(US_EXCHANGE[exchange])
-    && isUsMarketClosedError(error);
+    && Boolean(US_EXCHANGE[exchange]);
+}
+
+function shouldDeferUsEntry(record, error) {
+  return isUsEntry(record) && isUsMarketClosedError(error);
+}
+
+function shouldDelayUsEntry(record, value = new Date()) {
+  return isUsEntry(record) && !isUsBuySession(value);
+}
+
+function isDomesticEntry(record) {
+  return record?.payload?.exchange === "KRX"
+    && record?.payload?.action === "BUY"
+    && ["PAPER_ENTRY", "PAPER_ADD"].includes(record?.risk?.verdict);
+}
+
+function shouldDeferEntry(record, error) {
+  return (isUsEntry(record) || isDomesticEntry(record)) && isUsMarketClosedError(error);
+}
+
+function shouldDelayEntry(record, value = new Date()) {
+  if (isUsEntry(record)) return !isUsBuySession(value);
+  if (isDomesticEntry(record)) return !isDomesticBuySession(value);
+  return false;
 }
 
 function partialExitRatio(record, options) {
@@ -70,7 +135,7 @@ async function submitPaperOrder(record, options) {
   const partialExit = risk?.verdict === "PAPER_PARTIAL_EXIT";
   if (!entry && !exit && !partialExit) return null;
   if (!options.enabled) return blocked(`${options.brokerLabel || "키움"} 모의 자동주문 비활성`);
-  if (options.environment !== "mock") return blocked("실계좌 주문 차단");
+  if (!["mock", "live"].includes(options.environment)) return blocked("지원하지 않는 계좌 환경");
   const side = entry ? "BUY" : "SELL";
 
   const exchange = String(payload.exchange || "").toUpperCase();
@@ -86,7 +151,10 @@ async function submitPaperOrder(record, options) {
       quantity = partialExit ? partialExitQuantity(tradable, partialExitRatio(record, options)) : tradable;
     }
     if (!Number.isInteger(quantity) || quantity < 1) return blocked("주문 가능한 국내주식 수량 없음");
-    order = await client.placeDomesticMarketOrder({ side, symbol: payload.ticker, quantity });
+    order = await client.placeDomesticMarketOrder({
+      side, symbol: payload.ticker, quantity, price: payload.price,
+      session: domesticSession(options.now || new Date()),
+    });
   } else {
     client = options.overseasClient;
     const kiwoomExchange = US_EXCHANGE[exchange];
@@ -164,14 +232,24 @@ async function trackPaperTestOrder(order, options) {
 }
 
 module.exports = {
+  domesticSession,
+  domesticSessionClock,
+  isDomesticBuySession,
+  isDomesticOrderSession,
+  isUsBuySession,
   isUsMarketClosedError,
+  isUsOrderSession,
   isUsRegularSession,
   partialExitQuantity,
   partialExitRatio,
   shouldDeferUsEntry,
+  shouldDeferEntry,
+  shouldDelayEntry,
+  shouldDelayUsEntry,
   submitPaperOrder,
   trackPaperOrder,
   submitPaperTestOrder,
   trackPaperTestOrder,
   usSessionClock,
+  usSession,
 };

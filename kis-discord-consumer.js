@@ -2,14 +2,25 @@
 
 const fs = require("node:fs");
 const { Client, GatewayIntentBits } = require("discord.js");
+const { syncAccountPortfolio } = require("./account-portfolio");
 const { parseBuyApprovalCommand } = require("./buy-approval");
-const { decodeSignalEnvelope } = require("./discord-signal-envelope");
+const { decodeSignalEmbed } = require("./discord-signal-envelope");
 const { KiwoomClient } = require("./kiwoom-client");
 const { KisClient } = require("./kis-client");
+const { enrichInstrumentNames, formatInstrumentLabel } = require("./investor-portfolio");
 const { OrderTracker } = require("./order-tracker");
-const { submitPaperOrder, trackPaperOrder } = require("./paper-order-executor");
+const {
+  domesticSession,
+  domesticSessionClock,
+  shouldDeferEntry,
+  shouldDelayEntry,
+  submitPaperOrder,
+  trackPaperOrder,
+  usSession,
+  usSessionClock,
+} = require("./paper-order-executor");
 const { calculateWebhookPositionPreview, inferPositionProfitable } = require("./position-sizer");
-const { formatBrokerStartup, formatOrderStatus } = require("./webhook-discord");
+const { formatBrokerStartup, formatDeferredBuy, formatExecutorError, formatOrderStatus } = require("./webhook-discord");
 
 function shouldConsumeMessage(message, config) {
   return message?.author?.bot === true
@@ -18,12 +29,14 @@ function shouldConsumeMessage(message, config) {
 }
 
 class SignalReceiptStore {
-  constructor(file) {
+  constructor(file, defaultAutoTrading = false) {
     this.file = file;
     this.state = file && fs.existsSync(file)
       ? JSON.parse(fs.readFileSync(file, "utf8"))
       : { requestIds: [], messageIds: [], pending: {} };
     this.state.pending ||= {};
+    this.state.deferred ||= {};
+    this.state.autoTrading ??= defaultAutoTrading;
   }
 
   claim(requestId, messageId) {
@@ -55,6 +68,39 @@ class SignalReceiptStore {
     this.write();
   }
 
+  putDeferred(brokerId, record, ttlMs) {
+    const key = `${brokerId}:${record.requestId}`;
+    this.state.deferred[key] = {
+      key, brokerId, record, queuedAt: Date.now(), expiresAt: Date.now() + ttlMs, lastAttemptMarketDate: "",
+    };
+    this.write();
+    return this.state.deferred[key];
+  }
+
+  listDeferred() {
+    return Object.values(this.state.deferred);
+  }
+
+  markDeferredAttempt(key, marketDate) {
+    if (!this.state.deferred[key]) return;
+    this.state.deferred[key].lastAttemptMarketDate = marketDate;
+    this.write();
+  }
+
+  removeDeferred(key) {
+    delete this.state.deferred[key];
+    this.write();
+  }
+
+  autoTrading() {
+    return this.state.autoTrading === true;
+  }
+
+  setAutoTrading(enabled) {
+    this.state.autoTrading = enabled;
+    this.write();
+  }
+
   write() {
     if (!this.file) return;
     const temporary = `${this.file}.tmp`;
@@ -73,13 +119,41 @@ function enabledBrokerIds(env = process.env) {
   return [env.EXECUTOR_KIWOOM_ENABLED === "true" ? "KIWOOM" : "", env.EXECUTOR_KIS_ENABLED !== "false" ? "KIS" : ""].filter(Boolean);
 }
 
+function brokerEnvironments(brokerIds, env = process.env) {
+  const environments = Object.fromEntries(brokerIds.map((id) => [id, env[`${id}_ENV`] || "mock"]));
+  if (Object.values(environments).some((environment) => !["mock", "live"].includes(environment))) throw new Error("계좌 환경은 mock 또는 live여야 합니다.");
+  if (Object.values(environments).includes("live") && env.ACCOUNT_LIVE_TRADING !== "true") throw new Error("실계좌는 ACCOUNT_LIVE_TRADING=true로 명시적으로 잠금을 해제해야 합니다.");
+  return environments;
+}
+
+function accountPortfolioSyncMinutes(env = process.env) {
+  const minutes = Number(env.ACCOUNT_PORTFOLIO_SYNC_MINUTES || 1440);
+  if (!Number.isInteger(minutes) || minutes < 1 || minutes > 1440) throw new Error("ACCOUNT_PORTFOLIO_SYNC_MINUTES는 1~1440 범위여야 합니다.");
+  return minutes;
+}
+
 function accountCommand(content, executorName = "") {
   const text = String(content || "").trim().toLowerCase().replace(/\s+/g, " ");
   if (["!account", "!account help", "!계좌", "!계좌 도움말"].includes(text)) return "HELP";
   if (["!account status", "!계좌 상태", "주문 실행기 상태 보여줘", "주문 실행기 상태 확인"].includes(text)) return "STATUS";
   if (["!account orders", "!계좌 주문"].includes(text)) return "ORDERS";
+  const bangAuto = text.match(/^!(?:account|계좌)\s+(?:auto|자동매매)\s+(on|off|status|켜|꺼|상태)$/);
+  if (bangAuto) {
+    if (["on", "켜"].includes(bangAuto[1])) return "AUTO_ON";
+    if (["off", "꺼"].includes(bangAuto[1])) return "AUTO_OFF";
+    return "AUTO_STATUS";
+  }
 
   const compact = text.replace(/\s+/g, "");
+  const auto = compact.match(/^(.+?)?자동매매(켜|켜줘|시작|시작해|꺼|꺼줘|중지|중지해|상태)(?:보여줘|알려줘|확인)?$/);
+  if (auto) {
+    const requestedName = auto[1] || "";
+    const ownName = String(executorName || "").toLowerCase().replace(/\s+/g, "").replace(/계좌$/, "");
+    if (requestedName && !["내", "현재"].includes(requestedName) && ownName && requestedName !== ownName) return "";
+    if (["켜", "켜줘", "시작", "시작해"].includes(auto[2])) return "AUTO_ON";
+    if (["꺼", "꺼줘", "중지", "중지해"].includes(auto[2])) return "AUTO_OFF";
+    return "AUTO_STATUS";
+  }
   const match = compact.match(/^(.+?)?계좌(명령어|도움말|상태|최근주문|주문내역)(?:보여줘|알려줘|확인)?$/);
   if (!match) return "";
   const requestedName = match[1] || "";
@@ -146,12 +220,14 @@ function enforceOwnAccountRules(record, account, preview) {
   return preview;
 }
 
-function holdingLines(account) {
-  const rows = [
-    ...account.domesticHoldings.map((item) => `${item.name || item.code} (${item.code}) · ${item.quantity}주`),
-    ...account.usHoldings.map((item) => `${item.name || item.code} (${item.code}) · ${item.quantity}주`),
-  ];
-  return rows.length ? rows.join("\n") : "보유 종목 없음";
+async function holdingLines(account) {
+  const rows = await enrichInstrumentNames([
+    ...account.domesticHoldings.map((item) => ({ ...item, exchange: "KRX", ticker: item.code })),
+    ...account.usHoldings.map((item) => ({ ...item, exchange: item.exchange, ticker: item.code })),
+  ]);
+  return rows.length
+    ? rows.map((item) => `${formatInstrumentLabel(item)} · ${item.quantity}주`).join("\n")
+    : "보유 종목 없음";
 }
 
 function approvalText(record, previews) {
@@ -160,7 +236,7 @@ function approvalText(record, previews) {
     : `**${label}**: ${preview.quantity}주 · 예상 ${preview.currency === "KRW" ? `${Math.round(preview.positionValue).toLocaleString("ko-KR")}원` : `$${preview.positionValue.toLocaleString("en-US", { maximumFractionDigits: 2 })}`}`);
   return [
     "⏳ **BUY 승인 대기**",
-    `**종목**: ${record.payload.name} (${record.payload.ticker})`,
+    `**종목**: ${formatInstrumentLabel(record.payload)}`,
     ...lines,
     "`사줘`·`둘다` / `키움만` / `한투만` / `안 사`",
   ].join("\n");
@@ -169,14 +245,16 @@ function approvalText(record, previews) {
 async function start() {
   const brokerIds = enabledBrokerIds();
   if (!brokerIds.length) throw new Error("ACCOUNT_EXECUTOR_ENABLED=true와 사용할 증권사 설정이 필요합니다.");
-  if (brokerIds.includes("KIS") && (process.env.KIS_ENV || "mock") !== "mock") throw new Error("한투 실행기는 모의투자만 허용합니다.");
-  if (brokerIds.includes("KIWOOM") && (process.env.KIWOOM_ENV || "mock") !== "mock") throw new Error("키움 실행기는 모의투자만 허용합니다.");
+  const environments = brokerEnvironments(brokerIds);
   const sourceChannelIds = csv(process.env.ACCOUNT_SOURCE_CHANNEL_IDS || process.env.KIS_SOURCE_CHANNEL_IDS);
   const sourceBotIds = csv(process.env.ACCOUNT_SOURCE_BOT_IDS || process.env.KIS_SOURCE_BOT_IDS);
   if (!sourceChannelIds.size || !sourceBotIds.size) throw new Error("신뢰할 Discord 원본 채널 ID와 봇 ID가 필요합니다.");
   const executorName = process.env.ACCOUNT_EXECUTOR_NAME || "기본 사용자";
   const accountLabel = executorName.endsWith("계좌") ? executorName : `${executorName} 계좌`;
-  const receipts = new SignalReceiptStore(process.env.ACCOUNT_SIGNAL_RECEIPT_FILE || process.env.KIS_SIGNAL_RECEIPT_FILE || "account-signal-receipts.json");
+  const receipts = new SignalReceiptStore(
+    process.env.ACCOUNT_SIGNAL_RECEIPT_FILE || process.env.KIS_SIGNAL_RECEIPT_FILE || "account-signal-receipts.json",
+    process.env.ACCOUNT_AUTO_TRADING === "true",
+  );
   const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent] });
   const trusted = { sourceChannelIds, sourceBotIds };
   const targetGuildId = process.env.ACCOUNT_TARGET_GUILD_ID || process.env.KIS_TARGET_GUILD_ID;
@@ -192,12 +270,14 @@ async function start() {
   const ownerId = process.env.EXECUTOR_OWNER_ID || process.env.DISCORD_OWNER_ID;
   if (!ownerId) throw new Error("EXECUTOR_OWNER_ID 또는 DISCORD_OWNER_ID가 필요합니다.");
   const approvalTtlMs = Number(process.env.BUY_APPROVAL_TTL_MINUTES || 30) * 60_000;
+  const deferredTtlMs = 5 * 24 * 60 * 60_000;
+  const portfolioSyncMinutes = accountPortfolioSyncMinutes();
   const brokers = [];
   if (brokerIds.includes("KIWOOM")) {
     brokers.push({
-      id: "KIWOOM", label: "키움",
-      domesticClient: new KiwoomClient({ appKey: process.env.KIWOOM_DOMESTIC_APP_KEY, secretKey: process.env.KIWOOM_DOMESTIC_SECRET_KEY, environment: "mock", timeoutMs: Number(process.env.KIWOOM_TIMEOUT_MS || 5_000) }),
-      overseasClient: new KiwoomClient({ appKey: process.env.KIWOOM_OVERSEAS_APP_KEY, secretKey: process.env.KIWOOM_OVERSEAS_SECRET_KEY, environment: "mock", timeoutMs: Number(process.env.KIWOOM_TIMEOUT_MS || 5_000) }),
+      id: "KIWOOM", label: "키움", environment: environments.KIWOOM,
+      domesticClient: new KiwoomClient({ appKey: process.env.KIWOOM_DOMESTIC_APP_KEY, secretKey: process.env.KIWOOM_DOMESTIC_SECRET_KEY, environment: environments.KIWOOM, timeoutMs: Number(process.env.KIWOOM_TIMEOUT_MS || 5_000) }),
+      overseasClient: new KiwoomClient({ appKey: process.env.KIWOOM_OVERSEAS_APP_KEY, secretKey: process.env.KIWOOM_OVERSEAS_SECRET_KEY, environment: environments.KIWOOM, timeoutMs: Number(process.env.KIWOOM_TIMEOUT_MS || 5_000) }),
       tracker: new OrderTracker(process.env.KIWOOM_ORDER_STATE_FILE || "kiwoom-orders.json"),
     });
   }
@@ -207,10 +287,10 @@ async function start() {
       appKey: process.env.KOREA_INVESTMENT_APP_KEY,
       appSecret: process.env.KOREA_INVESTMENT_APP_SECRET,
       ...account,
-      environment: process.env.KIS_ENV || "mock",
+      environment: environments.KIS,
       timeoutMs: Number(process.env.KIS_TIMEOUT_MS || 5_000),
     });
-    brokers.push({ id: "KIS", label: "한투", domesticClient: kis, overseasClient: kis, tracker: new OrderTracker(process.env.KIS_ORDER_STATE_FILE || "kis-orders.json") });
+    brokers.push({ id: "KIS", label: "한투", environment: environments.KIS, domesticClient: kis, overseasClient: kis, tracker: new OrderTracker(process.env.KIS_ORDER_STATE_FILE || "kis-orders.json") });
   }
   let queue = Promise.resolve();
 
@@ -227,6 +307,21 @@ async function start() {
     await channel.send(message.embed ? { content: message.text, embeds: [message.embed] } : { content: message.text || String(message) });
   }
 
+  const brokerAccountLabel = (broker) => `${broker.label} ${broker.environment === "live" ? "실계좌" : "모의계좌"}`;
+  const accountSummary = () => brokers.map(brokerAccountLabel).join(" + ");
+
+  async function reportError(title, error, record) {
+    try {
+      await send(channels.system, formatExecutorError(title, error, record));
+    } catch (reportingError) {
+      console.error(`${title}: ${error.message}; Discord 오류: ${reportingError.message}`);
+    }
+  }
+
+  async function syncPortfolio() {
+    return syncAccountPortfolio(await targetChannel(channels.portfolio), brokers);
+  }
+
   async function previewFor(broker, record) {
     const ownAccount = await accountContext(broker, record, maxOpenPositions);
     const preview = enforceOwnAccountRules(record, ownAccount, calculateWebhookPositionPreview(record, ownAccount));
@@ -236,24 +331,88 @@ async function start() {
   async function execute(broker, record) {
     record.positionPreview = (await previewFor(broker, record)).preview;
     const order = await submitPaperOrder(record, {
-      enabled: true, environment: "mock",
+      enabled: true, environment: broker.environment,
       domesticClient: broker.domesticClient, overseasClient: broker.overseasClient,
-      tracker: broker.tracker, brokerLabel: `${broker.label} 모의계좌`,
+      tracker: broker.tracker, brokerLabel: brokerAccountLabel(broker),
       partialExit1Ratio: Number(process.env.PARTIAL_EXIT_1_RATIO || 0.25),
       partialExit2Ratio: Number(process.env.PARTIAL_EXIT_2_RATIO || 0.5),
     });
     if (!order || order.status === "BLOCKED") {
-      await send(channels.order, { text: `🛑 **${broker.label} 모의주문 차단**\n**종목**: ${record.payload.name} (${record.payload.ticker})\n**사유**: ${order?.reason || record.positionPreview?.reason || "주문 조건 불충족"}` });
+      await send(channels.order, { text: `🛑 **${brokerAccountLabel(broker)} 주문 차단**\n**종목**: ${formatInstrumentLabel(record.payload)}\n**사유**: ${order?.reason || record.positionPreview?.reason || "주문 조건 불충족"}` });
       return null;
     }
     await send(channels.order, formatOrderStatus(order));
     const final = await trackPaperOrder(order, { domesticClient: broker.domesticClient, overseasClient: broker.overseasClient, tracker: broker.tracker, attempts: 5, delayMs: 2_000 });
     if (final.status !== order.status || final.filledQuantity !== order.filledQuantity) await send(channels.execution, formatOrderStatus(final));
     if (["FILLED", "PARTIALLY_FILLED"].includes(final.status)) {
-      await send(channels.journal, { text: `📘 **${broker.label} 모의매매 기록**\n${final.side} · ${final.name || final.symbol} (${final.symbol}) · ${final.filledQuantity}주 @ ${final.fillPrice || "확인 중"}` });
-      await send(channels.portfolio, { text: `📚 **${broker.label} 모의 포트폴리오**\n${holdingLines(await accountContext(broker, record, maxOpenPositions))}` });
+      await send(channels.journal, { text: `📘 **${brokerAccountLabel(broker)} 매매 기록**\n${final.side} · ${formatInstrumentLabel(record.payload)} · ${final.filledQuantity}주 @ ${final.fillPrice || "확인 중"}` });
+      await syncPortfolio().catch((error) => reportError("포트폴리오 주문 후 갱신 실패", error));
     }
     return final;
+  }
+
+  async function executeOrDefer(broker, record, { retry = false } = {}) {
+    if (!retry && shouldDelayEntry(record)) {
+      receipts.putDeferred(broker.id, record, deferredTtlMs);
+      await send(channels.order, formatDeferredBuy(record, broker.label, broker.environment));
+      return null;
+    }
+    try {
+      return await execute(broker, record);
+    } catch (error) {
+      if (shouldDeferEntry(record, error)) {
+        if (!retry) {
+          receipts.putDeferred(broker.id, record, deferredTtlMs);
+          await send(channels.order, formatDeferredBuy(record, broker.label, broker.environment));
+        }
+        return null;
+      }
+      const action = record.payload.action === "BUY" ? "매수" : "매도";
+      await reportError(`${broker.label} 자동 ${action} 실패`, error, record);
+      return null;
+    }
+  }
+
+  async function retryDeferred(now = new Date()) {
+    for (const deferred of receipts.listDeferred()) {
+      if (deferred.expiresAt <= now.getTime()) {
+        receipts.removeDeferred(deferred.key);
+        await send(channels.order, { text: `⌛ **매수 예약 만료**\n${formatInstrumentLabel(deferred.record.payload)}` });
+        continue;
+      }
+      const record = structuredClone(deferred.record);
+      if (shouldDelayEntry(record, now)) continue;
+      const domestic = record.payload.exchange === "KRX";
+      const clock = domestic ? domesticSessionClock(now) : usSessionClock(now);
+      const attemptKey = `${clock.date}:${domestic ? domesticSession(now) : usSession(now)}`;
+      if (deferred.lastAttemptMarketDate === attemptKey) continue;
+      receipts.markDeferredAttempt(deferred.key, attemptKey);
+      const broker = brokers.find((item) => item.id === deferred.brokerId);
+      if (!broker) {
+        receipts.removeDeferred(deferred.key);
+        continue;
+      }
+      try {
+        const quoteClient = domestic
+          ? broker.domesticClient
+          : broker.overseasClient.getUsQuote ? broker.overseasClient : brokers.find((item) => item.overseasClient.getUsQuote)?.overseasClient;
+        if (domestic && quoteClient?.getDomesticQuote) {
+          const quote = await quoteClient.getDomesticQuote({ symbol: record.payload.ticker });
+          record.payload.price = quote.currentPrice;
+          if (quote.name) record.payload.name = quote.name;
+        } else if (quoteClient) {
+          const quote = await quoteClient.getUsQuote({ exchange: signalExchange(record.payload.exchange), symbol: record.payload.ticker });
+          record.payload.price = quote.currentPrice;
+          if (quote.name) record.payload.name = quote.name;
+        }
+        await execute(broker, record);
+        receipts.removeDeferred(deferred.key);
+      } catch (error) {
+        if (shouldDeferEntry(record, error)) continue;
+        receipts.removeDeferred(deferred.key);
+        await reportError(`${broker.label} 예약 매수 재시도 실패`, error, record);
+      }
+    }
   }
 
   async function processApproval(message) {
@@ -274,7 +433,7 @@ async function start() {
     }
     if (command.action === "CANCEL") {
       receipts.removePending(pending.key);
-      await message.reply(`취소했습니다: ${pending.record.payload.name} (${pending.record.payload.ticker})`);
+      await message.reply(`취소했습니다: ${formatInstrumentLabel(pending.record.payload)}`);
       return true;
     }
     const selected = brokers.filter((broker) => command.brokers.includes(broker.id));
@@ -285,9 +444,9 @@ async function start() {
     receipts.removePending(pending.key);
     for (const broker of selected) {
       try {
-        await execute(broker, structuredClone(pending.record));
+        await executeOrDefer(broker, structuredClone(pending.record));
       } catch (error) {
-        await send(channels.system, { text: `🛑 **${broker.label} 승인 주문 실패**\n${error.message}` });
+        await reportError(`${broker.label} 승인 주문 실패`, error, pending.record);
       }
     }
     return true;
@@ -295,31 +454,35 @@ async function start() {
 
   async function processMessage(message) {
     if (!shouldConsumeMessage(message, trusted)) return;
-    const footer = message.embeds?.[0]?.footer?.text;
-    const record = decodeSignalEnvelope(footer);
+    const record = decodeSignalEmbed(message.embeds?.[0]);
     if (!record) return;
     if (Date.now() - new Date(record.receivedAt).getTime() > maxAgeMs) return;
     if (!receipts.claim(record.requestId, message.id)) return;
 
     try {
       record.source = "DISCORD_SIGNAL";
+      [record.payload] = await enrichInstrumentNames([record.payload]);
       const entry = ["PAPER_ENTRY", "PAPER_ADD"].includes(record.risk?.verdict) && record.payload.action === "BUY";
-      if (entry) {
+      if (entry && (!receipts.autoTrading() || brokers.some((broker) => broker.environment === "live"))) {
         const previews = Object.fromEntries(await Promise.all(brokers.map(async (broker) => [broker.id, await previewFor(broker, structuredClone(record))])));
         const channel = await targetChannel(channels.order);
         const approval = await channel.send(approvalText(record, previews));
         receipts.putPending(record, approval.id, approvalTtlMs);
         return;
       }
+      if (!entry && !receipts.autoTrading()) {
+        await send(channels.order, { text: `⏸️ **${accountLabel} 자동매매 OFF**\n**종목**: ${formatInstrumentLabel(record.payload)}\n신호는 수신했지만 주문하지 않았습니다.` });
+        return;
+      }
       for (const broker of brokers) {
         try {
-          await execute(broker, structuredClone(record));
+          await executeOrDefer(broker, structuredClone(record));
         } catch (error) {
-          await send(channels.system, { text: `🛑 **${broker.label} 자동 청산 실패**\n${error.message}` });
+          await reportError(`${broker.label} 자동 주문 실패`, error, record);
         }
       }
     } catch (error) {
-      await send(channels.system, { text: `🛑 **${accountLabel} 주문 실행기 처리 실패**\n${error.message}\n\`request_id: ${record.requestId}\`` });
+      await reportError(`${accountLabel} 주문 실행기 처리 실패`, error, record);
     }
   }
 
@@ -329,12 +492,15 @@ async function start() {
     const command = accountCommand(message.content, executorName);
     if (!command) return false;
     if (command === "HELP") {
-      await message.reply(["🧾 **계좌 주문 실행기 명령어**", "`계좌 상태 보여줘`", "`계좌 최근 주문 보여줘`", "BUY 승인: `사줘`·`둘다` / `키움만` / `한투만` / `안 사`"].join("\n"));
+      await message.reply(["🧾 **계좌 주문 실행기 명령어**", "`!account status`", "`!account orders`", "`!account auto on` / `!account auto off` / `!account auto status`", "수동 BUY 승인: `사줘`·`둘다` / `키움만` / `한투만` / `안 사`"].join("\n"));
     } else if (command === "STATUS") {
-      await message.reply([`🧭 **${accountLabel} 주문 실행기 상태**`, `증권사: ${brokers.map((broker) => `${broker.label} 모의`).join(" + ")}`, `신뢰 채널: ${sourceChannelIds.size}개`, "BUY: 사용자 승인 후 주문", "SELL: 신호 수신 시 자동 처리", "실계좌: 🔒 차단"].join("\n"));
+      await message.reply([`🧭 **${accountLabel} 주문 실행기 상태**`, `증권사: ${accountSummary()}`, `신뢰 채널: ${sourceChannelIds.size}개`, `자동매매: ${receipts.autoTrading() ? "ON" : "OFF"}`, `실계좌: ${brokers.some((broker) => broker.environment === "live") ? "활성 · BUY는 승인 후 주문" : "지원 · 현재 잠금"}`].join("\n"));
+    } else if (["AUTO_ON", "AUTO_OFF", "AUTO_STATUS"].includes(command)) {
+      if (command !== "AUTO_STATUS") receipts.setAutoTrading(command === "AUTO_ON");
+      await message.reply(`🤖 **${accountLabel} 자동매매 ${receipts.autoTrading() ? "ON" : "OFF"}**\n${receipts.autoTrading() ? "계좌별로 다시 계산하며, 실계좌 BUY는 항상 사용자 승인 후 주문합니다." : "신호는 수신하지만 자동 주문하지 않습니다."}\n실계좌 기능은 지원하며 현재 계좌 설정의 잠금 상태를 따릅니다.`);
     } else {
       const orders = brokers.flatMap((broker) => broker.tracker.list().slice(0, 5).map((order) => `${broker.label} · ${order.name || order.symbol} (${order.symbol}) · ${order.side} · ${order.status}`)).slice(0, 10);
-      await message.reply(["📋 **계좌별 최근 모의주문**", ...(orders.length ? orders : ["저장된 주문 없음"])].join("\n"));
+      await message.reply(["📋 **계좌별 최근 주문**", ...(orders.length ? orders : ["저장된 주문 없음"])].join("\n"));
     }
     return true;
   }
@@ -344,31 +510,39 @@ async function start() {
       if (await processOwnerCommand(message)) return;
       if (await processApproval(message)) return;
       await processMessage(message);
-    }).catch((error) => console.error(error));
+    }).catch((error) => reportError("Discord 메시지 처리 실패", error));
   });
   client.once("clientReady", async () => {
     console.log([
       `\n✅ ${accountLabel} 주문 실행기 준비 완료`,
       `Discord: ${client.user.tag}`,
-      `계좌: ${brokers.map((broker) => `${broker.label} 모의`).join(" + ")} · 실계좌 주문 차단`,
+      `계좌: ${accountSummary()} · 실계좌 기능 지원`,
       `수신: 매매신호 채널 ${sourceChannelIds.size}개`,
-      "처리: 공통 신호 → 계좌별 수량 계산 → BUY 승인 → 모의주문",
+      `처리: 공통 신호 → 계좌별 수량 계산 → ${receipts.autoTrading() ? "자동 주문" : "BUY 승인"}`,
     ].join("\n"));
     await send(channels.system, { text: formatBrokerStartup(
       `${accountLabel} 주문 실행기`,
       client.user.tag,
-      `${brokers.map((broker) => `${broker.label} 모의`).join(" + ")} · 신뢰 채널 ${sourceChannelIds.size}개 · BUY 승인 후 계좌별 주문`,
+      `${accountSummary()} · 신뢰 채널 ${sourceChannelIds.size}개 · 자동매매 ${receipts.autoTrading() ? "ON" : "OFF"}`,
+      brokers.some((broker) => broker.environment === "live") ? "실계좌 활성 · BUY 승인 필수" : "실계좌 지원 · 현재 잠금",
     ) });
+    await syncPortfolio().catch((error) => reportError("포트폴리오 시작 갱신 실패", error));
+    setInterval(() => {
+      queue = queue.then(() => syncPortfolio()).catch((error) => reportError("포트폴리오 일일 갱신 실패", error));
+    }, portfolioSyncMinutes * 60_000).unref();
     for (const channelId of sourceChannelIds) {
       const channel = await client.channels.fetch(channelId);
       if (!channel?.isTextBased()) continue;
       const recent = [...(await channel.messages.fetch({ limit: 50 })).values()].reverse();
       for (const message of recent) queue = queue.then(() => processMessage(message));
     }
+    setInterval(() => {
+      queue = queue.then(() => retryDeferred()).catch((error) => reportError("미국 예약 주문 재시도 실패", error));
+    }, 15_000).unref();
   });
   await client.login(process.env.ACCOUNT_DISCORD_TOKEN || process.env.KIS_DISCORD_TOKEN || process.env.DISCORD_TOKEN_DRUCKENMILLER);
 }
 
 if (require.main === module) start().catch((error) => { console.error(error); process.exitCode = 1; });
 
-module.exports = { SignalReceiptStore, accountCommand, accountContext, enabledBrokerIds, enforceOwnAccountRules, shouldConsumeMessage, signalExchange, start };
+module.exports = { SignalReceiptStore, accountCommand, accountContext, accountPortfolioSyncMinutes, brokerEnvironments, enabledBrokerIds, enforceOwnAccountRules, shouldConsumeMessage, signalExchange, start };

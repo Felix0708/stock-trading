@@ -1,6 +1,7 @@
 "use strict";
 
 const MOCK_BASE_URL = "https://mockapi.kiwoom.com";
+const LIVE_BASE_URL = "https://api.kiwoom.com";
 
 function toNumber(value, field) {
   const number = Number(String(value ?? "0").replaceAll(",", ""));
@@ -18,12 +19,14 @@ class KiwoomClient {
   #appKey;
   #secretKey;
   #fetch;
+  #baseUrl;
+  #environmentLabel;
   #timeoutMs;
   #token = null;
   #expiresDt = null;
 
   constructor({ appKey, secretKey, environment = "mock", fetchImpl = fetch, timeoutMs = 5000 } = {}) {
-    if (environment !== "mock") throw new Error("현재는 키움 모의투자 환경만 지원합니다.");
+    if (!["mock", "live"].includes(environment)) throw new Error("KIWOOM_ENV는 mock 또는 live여야 합니다.");
     if (!appKey || !secretKey) throw new Error("키움 App Key와 App Secret이 필요합니다.");
     if (!Number.isInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > 30000) {
       throw new Error("KIWOOM_TIMEOUT_MS는 1000~30000 범위여야 합니다.");
@@ -31,6 +34,8 @@ class KiwoomClient {
     this.#appKey = appKey;
     this.#secretKey = secretKey;
     this.#fetch = fetchImpl;
+    this.#baseUrl = environment === "live" ? LIVE_BASE_URL : MOCK_BASE_URL;
+    this.#environmentLabel = environment === "live" ? "실계좌" : "모의투자";
     this.#timeoutMs = timeoutMs;
   }
 
@@ -41,14 +46,14 @@ class KiwoomClient {
 
     let response;
     try {
-      response = await this.#fetch(`${MOCK_BASE_URL}${path}`, {
+      response = await this.#fetch(`${this.#baseUrl}${path}`, {
         method: "POST",
         headers,
         body: JSON.stringify(body),
         signal: AbortSignal.timeout(this.#timeoutMs),
       });
     } catch (error) {
-      throw new Error(`키움 모의투자 통신 실패: ${error.message}`);
+      throw new Error(`키움 ${this.#environmentLabel} 통신 실패: ${error.message}`);
     }
 
     const text = await response.text();
@@ -56,10 +61,10 @@ class KiwoomClient {
     try {
       data = text ? JSON.parse(text) : {};
     } catch {
-      throw new Error(`키움 모의투자 응답이 JSON이 아닙니다. (HTTP ${response.status})`);
+      throw new Error(`키움 ${this.#environmentLabel} 응답이 JSON이 아닙니다. (HTTP ${response.status})`);
     }
     if (!response.ok || data.return_code !== 0) {
-      throw new Error(`키움 모의투자 요청 실패: ${data.return_msg || `HTTP ${response.status}`}`);
+      throw new Error(`키움 ${this.#environmentLabel} 요청 실패: ${data.return_msg || `HTTP ${response.status}`}`);
     }
     return data;
   }
@@ -186,12 +191,15 @@ class KiwoomClient {
     return { date, markets };
   }
 
-  async placeDomesticMarketOrder({ side, symbol, quantity } = {}) {
+  async placeDomesticMarketOrder({ side, symbol, quantity, price, session = "REGULAR" } = {}) {
     side = String(side || "").toUpperCase();
     symbol = String(symbol || "");
     if (!["BUY", "SELL"].includes(side)) throw new Error("국내주식 주문 side는 BUY 또는 SELL이어야 합니다.");
     if (!/^\d{6}$/.test(symbol)) throw new Error("국내주식 종목코드는 6자리 숫자여야 합니다.");
     if (!Number.isInteger(quantity) || quantity < 1) throw new Error("국내주식 주문수량은 1 이상의 정수여야 합니다.");
+    const orderType = { PRE: "61", REGULAR: "3", AFTER_CLOSE: "81", AFTER_SINGLE: "62" }[session];
+    if (!orderType) throw new Error("국내주식 주문 가능 시간이 아닙니다.");
+    if (session === "AFTER_SINGLE" && (!Number.isFinite(price) || price <= 0)) throw new Error("시간외 단일가 주문 가격이 필요합니다.");
 
     const data = await this.post("/api/dostk/ordr", {
       apiId: side === "BUY" ? "kt10000" : "kt10001",
@@ -200,8 +208,8 @@ class KiwoomClient {
         dmst_stex_tp: "KRX",
         stk_cd: symbol,
         ord_qty: String(quantity),
-        ord_uv: "",
-        trde_tp: "3",
+        ord_uv: session === "AFTER_SINGLE" ? String(price) : "",
+        trde_tp: orderType,
         cond_uv: "",
       },
     });
@@ -391,4 +399,4 @@ class KiwoomClient {
   }
 }
 
-module.exports = { KiwoomClient, MOCK_BASE_URL };
+module.exports = { KiwoomClient, LIVE_BASE_URL, MOCK_BASE_URL };
