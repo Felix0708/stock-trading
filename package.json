@@ -21,7 +21,7 @@
     "test:signal-review": "node signal-review.test.js",
     "test:trade-controller": "node trade-controller.test.js",
     "test:kiwoom-client": "node kiwoom-client.test.js",
-    "kiwoom:check": "node --env-file=${ACCOUNT_EXECUTOR_ENV_FILE:-.env.account} kiwoom-check.js",
+    "kiwoom:check": "node --env-file=${SIGNAL_ENV_FILE:-.env.signal} --env-file=${ACCOUNT_EXECUTOR_ENV_FILE:-.env.account} kiwoom-check.js",
     "kiwoom:smoke-order": "node --env-file=${ACCOUNT_EXECUTOR_ENV_FILE:-.env.account} kiwoom-order-smoke.js",
     "kis:check": "node --env-file=${ACCOUNT_EXECUTOR_ENV_FILE:-.env.account} kis-check.js",
     "telegram:login": "node --env-file=${SIGNAL_ENV_FILE:-.env.signal} telegram-collector.js login",
