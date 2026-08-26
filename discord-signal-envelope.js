@@ -9,7 +9,7 @@ const ALLOWED_VERDICTS = new Set(["PAPER_ENTRY", "PAPER_ADD", "PAPER_PARTIAL_EXI
 const PAYLOAD_FIELDS = [
   "ticker", "name", "exchange", "timeframe", "action", "type", "price", "sl", "rr", "conviction",
   "daily_above_200ma", "daily_trend", "daily_ema_aligned", "daily_setup_stage",
-  "atr_multiple", "atr_dot", "atr_dot_threshold", "sb_z_score",
+  "atr_multiple", "atr_dot", "atr_dot_threshold", "sb_z_score", "paper_order_test",
 ];
 
 function checksum(value) {

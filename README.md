@@ -89,7 +89,7 @@ ngrok에는 Discord 봇이나 주문 코드가 없고 외부 요청을 로컬 �
 | `npm run start:signal` | 공통 신호 서버 실행 |
 | `npm run start:tunnel` | ngrok 고정 터널 실행 및 웹훅 URL 복사 |
 | `npm run start:executor` | `.env.account` 사용자별 키움·한투 계좌 실행기 실행 |
-| `npm run test:webhook-live` | 주문 없는 테스트 신호를 로컬 수신기와 Discord로 전송 |
+| `npm run test:webhook-live` | 주문 없는 테스트 신호를 수신기·Discord·계좌 실행기로 전송 |
 | `npm run self-test` | 전체 코드 자체 점검 |
 | `npm run kiwoom:check` | 키움 모의투자 인증·계좌 연결 확인(주문 없음) |
 | `CONFIRM_MOCK_ORDER=AAPL-1-USD npm run kiwoom:smoke-order` | 영업일에 해외 모의계좌 AAPL 1주 `$1` 지정가 접수·취소 시험 |
@@ -298,7 +298,7 @@ ngrok 무료 계정에 배정된 개발 주소는 재실행해도 유지됩니�
 npm run test:webhook-live
 ```
 
-이 테스트는 TradingView를 거치지 않고 로컬 수신기와 Discord 연결만 확인합니다. `INFO_ONLY`, `주문 생성 없음`으로 처리되는 것이 정상입니다.
+이 테스트는 TradingView를 거치지 않고 로컬 수신기, Discord, 계좌 실행기 연결을 확인합니다. 실제 종목 형식의 진입 신호지만 `paper_order_test=true` 안전장치가 계좌 실행기에서 주문 생성을 차단합니다.
 
 고정 공개 주소까지 확인하려면 다음처럼 실행합니다.
 

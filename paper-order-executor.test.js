@@ -55,8 +55,10 @@ const record = {
   assert.equal(isDomesticOrderSession(new Date("2026-08-23T23:35:00.000Z")), true);
   assert.equal(isDomesticBuySession(new Date("2026-08-23T23:35:00.000Z")), false);
   assert.equal(shouldDelayUsEntry({ payload: { exchange: "NASDAQ", action: "BUY" }, risk: { verdict: "PAPER_ENTRY" } }, new Date("2026-08-24T12:00:00.000Z")), true);
+  assert.equal(shouldDelayUsEntry({ payload: { exchange: "NASDAQ", action: "BUY", paper_order_test: true }, risk: { verdict: "PAPER_ENTRY" } }, new Date("2026-08-24T12:00:00.000Z")), false);
   assert.equal(shouldDelayUsEntry({ payload: { exchange: "NASDAQ", action: "BUY" }, risk: { verdict: "PAPER_ENTRY" } }, new Date("2026-08-24T20:00:00.000Z")), false);
   assert.equal(shouldDelayEntry({ payload: { exchange: "KRX", action: "BUY" }, risk: { verdict: "PAPER_ENTRY" } }, new Date("2026-08-23T23:35:00.000Z")), true);
+  assert.equal(shouldDelayEntry(record, new Date("2026-08-23T23:35:00.000Z")), false);
   assert.equal(shouldDelayEntry({ payload: { exchange: "KRX", action: "SELL" }, risk: { verdict: "PAPER_EXIT" } }, new Date("2026-08-23T23:35:00.000Z")), false);
   assert.equal(shouldDeferUsEntry({
     payload: { exchange: "NASDAQ", action: "BUY" }, risk: { verdict: "PAPER_ENTRY" },

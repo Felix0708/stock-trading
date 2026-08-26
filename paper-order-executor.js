@@ -84,7 +84,8 @@ function isUsBuySession(value = new Date()) {
 
 function isUsEntry(record) {
   const exchange = String(record?.payload?.exchange || "").toUpperCase();
-  return record?.payload?.action === "BUY"
+  return record?.payload?.paper_order_test !== true
+    && record?.payload?.action === "BUY"
     && ["PAPER_ENTRY", "PAPER_ADD"].includes(record?.risk?.verdict)
     && Boolean(US_EXCHANGE[exchange]);
 }
@@ -98,7 +99,8 @@ function shouldDelayUsEntry(record, value = new Date()) {
 }
 
 function isDomesticEntry(record) {
-  return record?.payload?.exchange === "KRX"
+  return record?.payload?.paper_order_test !== true
+    && record?.payload?.exchange === "KRX"
     && record?.payload?.action === "BUY"
     && ["PAPER_ENTRY", "PAPER_ADD"].includes(record?.risk?.verdict);
 }

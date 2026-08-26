@@ -9,7 +9,7 @@ const record = {
   payload: {
     ticker: "005930", name: "삼성전자", exchange: "KRX", timeframe: "240",
     action: "BUY", type: "정석 진입", price: 80000, sl: 77500, rr: 2.2,
-    conviction: "A", raw_debug_payload: "x".repeat(10_000),
+    conviction: "A", paper_order_test: true, raw_debug_payload: "x".repeat(10_000),
   },
   outcome: { decision: "ENTRY_CANDIDATE", signal: { signalCode: "ENTRY_STANDARD" } },
   risk: { verdict: "PAPER_ENTRY", reason: "모의 진입" },

@@ -9,16 +9,9 @@ async function main() {
   const firstJson = specification.match(/```json\s*([\s\S]*?)```/);
   const payload = {
     ...JSON.parse(firstJson[1]),
-    ticker: "TEST",
-    name: "Discord 연동 테스트",
-    exchange: "SIMULATOR",
-    timeframe: "240",
-    action: "CHECK",
-    type: "🏗 셋업 형성 중",
-    price: 100,
-    sl: null,
-    rr: null,
-    desc: "주문과 포지션을 만들지 않는 로컬 연동 테스트",
+    name: "자동매매 종단간 테스트 (Apple)",
+    desc: "계좌 실행기까지 도달하지만 주문은 만들지 않는 연동 테스트",
+    paper_order_test: true,
   };
   const token = loadOrCreateWebhookToken(path.join(__dirname, ".webhook-token"));
   const host = process.env.WEBHOOK_HOST || "127.0.0.1";
@@ -31,7 +24,7 @@ async function main() {
   });
   const result = await response.json();
   if (!response.ok) throw new Error(`테스트 웹훅 실패: HTTP ${response.status}`);
-  console.log(`테스트 웹훅 전송 완료: HTTP ${response.status}, request_id=${result.request_id}`);
+  console.log(`주문 없는 종단간 테스트 완료: HTTP ${response.status}, request_id=${result.request_id}`);
 }
 
 main().catch((error) => {

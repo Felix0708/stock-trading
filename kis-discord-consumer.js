@@ -330,6 +330,10 @@ async function start() {
 
   async function execute(broker, record) {
     record.positionPreview = (await previewFor(broker, record)).preview;
+    if (record.payload?.paper_order_test === true) {
+      await send(channels.order, { text: `✅ **${brokerAccountLabel(broker)} 자동매매 연동 테스트 통과**\n**종목**: ${formatInstrumentLabel(record.payload)}\n계좌 조회 정상 · 주문 생성 없음` });
+      return null;
+    }
     const order = await submitPaperOrder(record, {
       enabled: true, environment: broker.environment,
       domesticClient: broker.domesticClient, overseasClient: broker.overseasClient,
