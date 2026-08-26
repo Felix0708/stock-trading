@@ -1,7 +1,7 @@
 "use strict";
 
 const assert = require("node:assert/strict");
-const { accountCommand, accountPortfolioSyncMinutes, brokerEnvironments, enabledBrokerIds, enforceOwnAccountRules, shouldConsumeMessage, SignalReceiptStore } = require("./kis-discord-consumer");
+const { accountCommand, accountContext, accountPortfolioSyncMinutes, brokerEnvironments, enabledBrokerIds, enforceOwnAccountRules, reconcilePendingBrokerOrders, shouldConsumeMessage, SignalReceiptStore } = require("./kis-discord-consumer");
 
 assert.deepEqual(enabledBrokerIds({ ACCOUNT_EXECUTOR_ENABLED: "true", EXECUTOR_KIWOOM_ENABLED: "true", EXECUTOR_KIS_ENABLED: "true" }), ["KIWOOM", "KIS"]);
 assert.deepEqual(enabledBrokerIds({ ACCOUNT_EXECUTOR_ENABLED: "true", EXECUTOR_KIWOOM_ENABLED: "true", EXECUTOR_KIS_ENABLED: "false" }), ["KIWOOM"]);
@@ -71,4 +71,23 @@ assert.equal(
   true,
 );
 
-console.log("kis-discord-consumer test OK");
+(async () => {
+  const context = await accountContext({
+    getDomesticBalance: async () => ({ estimatedAssets: 0, totalEvaluation: 0, holdings: [] }),
+    getUsBalances: async () => [{ holdings: [{ code: "SE", quantity: 63, evaluationAmount: 7625.52 }] }],
+    getUsCash: async () => ({ usd: 92294.675 }),
+  }, { payload: { exchange: "NYSE", ticker: "SE", price: 121.18 } }, 5);
+  assert.equal(context.portfolioPositionRatio, 100);
+
+  const changes = await reconcilePendingBrokerOrders({
+    tracker: {
+      pending: () => [{ orderNo: "1903", market: "NYSE", exchange: "NY", symbol: "SE", status: "ACCEPTED", filledQuantity: 0, remainingQuantity: 63 }],
+      record: (order) => order,
+    },
+    overseasClient: { getUsOrderExecutions: async () => [{ orderNo: "1903", status: "FILLED", filledQuantity: 63, remainingQuantity: 0, fillPrice: 120.95 }] },
+  });
+  assert.equal(changes.length, 1);
+  assert.equal(changes[0].current.status, "FILLED");
+  assert.equal(changes[0].previous.status, "ACCEPTED");
+  console.log("kis-discord-consumer test OK");
+})().catch((error) => { console.error(error); process.exitCode = 1; });

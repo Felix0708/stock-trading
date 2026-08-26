@@ -10,7 +10,7 @@ const {
   isUsBuySession, isUsMarketClosedError, isUsOrderSession, isUsRegularSession,
   shouldDeferEntry, shouldDeferUsEntry, shouldDelayEntry, shouldDelayUsEntry, usSession,
   partialExitQuantity, partialExitRatio,
-  submitPaperOrder, trackPaperOrder, submitPaperTestOrder, trackPaperTestOrder,
+  refreshPaperOrder, submitPaperOrder, trackPaperOrder, submitPaperTestOrder, trackPaperTestOrder,
 } = require("./paper-order-executor");
 
 const directory = fs.mkdtempSync(path.join(os.tmpdir(), "paper-order-test-"));
@@ -85,11 +85,14 @@ const record = {
   const autoRecord = {
     payload: { ticker: "AAPL", exchange: "NASDAQ", action: "BUY", price: 250 },
     risk: { verdict: "PAPER_ADD" },
-    positionPreview: { quantity: 4 },
+    positionPreview: {
+      quantity: 4, positionValue: 1000, projectedPositionRatio: 12.5,
+      positionLimitRatio: 0.2, equity: 8000, currentPositionValue: 0, currency: "USD",
+    },
   };
   const overseasClient = {
     placeUsLimitOrder: async ({ side, exchange, symbol, quantity, price }) => ({
-      status: "ACCEPTED", orderNo: "282", side, exchange, symbol, orderQuantity: quantity, price,
+      status: "ACCEPTED", orderNo: "000000282", side, exchange, symbol, orderQuantity: quantity, price,
     }),
     getUsOrderExecutions: async () => [{
       status: "FILLED", orderNo: "282", side: "BUY", symbol: "AAPL",
@@ -101,6 +104,12 @@ const record = {
   });
   assert.equal(auto.orderQuantity, 4);
   assert.equal(auto.exchange, "ND");
+  assert.equal(auto.plannedInvestment, 1000);
+  assert.equal(auto.projectedPositionRatio, 12.5);
+  assert.equal(auto.accountEquity, 8000);
+  assert.equal((await refreshPaperOrder(auto, {
+    domesticClient: options.client, overseasClient, tracker: autoTracker,
+  })).status, "FILLED");
   assert.equal((await trackPaperOrder(auto, {
     domesticClient: options.client, overseasClient, tracker: autoTracker, attempts: 1, delayMs: 0,
   })).status, "FILLED");

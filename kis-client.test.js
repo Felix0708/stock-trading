@@ -1,6 +1,9 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
 const { KisClient, LIVE_BASE_URL, MOCK_BASE_URL } = require("./kis-client");
 
 const calls = [];
@@ -91,5 +94,34 @@ async function fakeFetch(url, options) {
   assert.equal((await refreshClient.getUsCash({ exchange: "ND", symbol: "AAPL", price: 250 })).usd, 100000);
   assert.equal(authCount, 2);
   assert.deepEqual(refreshedHeaders, ["Bearer token-1", "Bearer token-2"]);
+
+  let limitedRequestCount = 0;
+  const limitedClient = new KisClient({
+    appKey: "a", appSecret: "b", accountNo: "12345678", requestIntervalMs: 0, rateLimitWaitMs: 0,
+    fetchImpl: async (url) => {
+      if (url.endsWith("/oauth2/tokenP")) return new Response(JSON.stringify({ access_token: "token", expires_in: 86400 }));
+      limitedRequestCount += 1;
+      return new Response(JSON.stringify(limitedRequestCount === 1
+        ? { rt_cd: "1", msg_cd: "EGW00201", msg1: "초당 거래건수를 초과하였습니다." }
+        : { rt_cd: "0", output: { ovrs_ord_psbl_amt: "100000" } }));
+    },
+  });
+  assert.equal((await limitedClient.getUsCash({ exchange: "ND", symbol: "AAPL", price: 250 })).usd, 100000);
+  assert.equal(limitedRequestCount, 2);
+
+  const tokenDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "kis-token-cache-"));
+  try {
+    const tokenCacheFile = path.join(tokenDirectory, "token.json");
+    let cachedAuthCount = 0;
+    const cachedFetch = async () => {
+      cachedAuthCount += 1;
+      return new Response(JSON.stringify({ access_token: "cached-token", expires_in: 86400 }));
+    };
+    await new KisClient({ appKey: "cached-app", appSecret: "cached-secret", accountNo: "12345678", fetchImpl: cachedFetch, tokenCacheFile }).accessToken();
+    assert.equal(await new KisClient({ appKey: "cached-app", appSecret: "cached-secret", accountNo: "12345678", fetchImpl: cachedFetch, tokenCacheFile }).accessToken(), "cached-token");
+    assert.equal(cachedAuthCount, 1);
+  } finally {
+    fs.rmSync(tokenDirectory, { recursive: true, force: true });
+  }
   console.log("kis-client test OK");
 })().catch((error) => { console.error(error); process.exitCode = 1; });

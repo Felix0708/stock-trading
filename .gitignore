@@ -15,6 +15,8 @@ webhook-events.jsonl.*
 trading-state.json
 trading-decisions.jsonl
 kiwoom-orders.json
+.kiwoom-token-*.json
+.kis-token-*.json
 kis-orders.json
 kis-signal-receipts.json
 .paper-order-test-lock.json

@@ -180,20 +180,32 @@ async function submitPaperOrder(record, options) {
     signalType: payload.type, signalPrice: payload.price, stopPrice: payload.sl,
     conviction: payload.conviction, requestId: record.requestId,
     partialExitRatio: partialExit ? partialExitRatio(record, options) : null,
+    plannedInvestment: positionPreview?.positionValue,
+    projectedPositionRatio: positionPreview?.projectedPositionRatio,
+    positionLimitRatio: positionPreview?.positionLimitRatio,
+    accountEquity: positionPreview?.equity,
+    preTradePositionValue: positionPreview?.currentPositionValue,
+    currency: positionPreview?.currency || (exchange === "KRX" ? "KRW" : "USD"),
   });
 }
 
-async function trackPaperOrder(order, options) {
+async function refreshPaperOrder(order, options) {
   const client = order.market === "KRX" ? options.domesticClient : options.overseasClient;
   const query = order.market === "KRX"
     ? () => client.getDomesticOrderExecutions({ symbol: order.symbol })
     : () => client.getUsOrderExecutions({ exchange: order.exchange, symbol: order.symbol });
+  const normalizedOrderNo = String(order.orderNo).replace(/^0+(?=\d)/, "");
+  const current = (await query()).find((item) => String(item.orderNo).replace(/^0+(?=\d)/, "") === normalizedOrderNo);
+  if (!current) return order;
+  const changed = ["status", "filledQuantity", "remainingQuantity", "fillPrice"]
+    .some((key) => current[key] !== undefined && current[key] !== order[key]);
+  return changed ? options.tracker.record({ ...order, ...current, orderNo: order.orderNo }) : order;
+}
+
+async function trackPaperOrder(order, options) {
   for (let attempt = 0; attempt < (options.attempts ?? 15); attempt += 1) {
-    const current = (await query()).find((item) => item.orderNo === order.orderNo);
-    if (current) {
-      const saved = options.tracker.record({ ...order, ...current });
-      if (["FILLED", "CANCELLED", "REJECTED"].includes(saved.status)) return saved;
-    }
+    order = await refreshPaperOrder(order, options);
+    if (["FILLED", "CANCELLED", "REJECTED"].includes(order.status)) return order;
     await delay(options.delayMs ?? 1000);
   }
   return order;
@@ -244,6 +256,7 @@ module.exports = {
   isUsRegularSession,
   partialExitQuantity,
   partialExitRatio,
+  refreshPaperOrder,
   shouldDeferUsEntry,
   shouldDeferEntry,
   shouldDelayEntry,

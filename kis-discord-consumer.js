@@ -12,6 +12,7 @@ const { OrderTracker } = require("./order-tracker");
 const {
   domesticSession,
   domesticSessionClock,
+  refreshPaperOrder,
   shouldDeferEntry,
   shouldDelayEntry,
   submitPaperOrder,
@@ -20,7 +21,7 @@ const {
   usSessionClock,
 } = require("./paper-order-executor");
 const { calculateWebhookPositionPreview, inferPositionProfitable } = require("./position-sizer");
-const { formatBrokerStartup, formatDeferredBuy, formatExecutorError, formatOrderStatus } = require("./webhook-discord");
+const { formatBrokerStartup, formatDeferredBuy, formatExecutorError, formatOrderStatus, formatTradeJournal } = require("./webhook-discord");
 
 function shouldConsumeMessage(message, config) {
   return message?.author?.bot === true
@@ -203,11 +204,17 @@ async function accountContext(clients, record, maxOpenPositions) {
     : (await overseasClient.getUsCash({ exchange: market, symbol: record.payload.ticker, price: record.payload.price })).usd;
   const evaluation = holdings.reduce((sum, holding) => sum + holding.evaluationAmount, 0);
   const equity = market === "KRX" ? domestic.estimatedAssets || domestic.totalEvaluation : cash + evaluation;
+  const currentPositionValue = current.reduce((sum, holding) => sum + holding.evaluationAmount, 0);
+  const brokerRatios = current.map((holding) => Number(holding.positionRatio)).filter(Number.isFinite);
+  const portfolioEquity = market === "KRX" ? domestic.estimatedAssets || domestic.totalEvaluation || evaluation : evaluation;
   return {
     equity, availableCash: cash, currency: market === "KRX" ? "KRW" : "USD",
     openPositions: domestic.holdings.length + usHoldings.length,
     maxOpenPositions,
-    currentPositionValue: current.reduce((sum, holding) => sum + holding.evaluationAmount, 0),
+    currentPositionValue,
+    portfolioPositionRatio: brokerRatios.length
+      ? brokerRatios.reduce((sum, ratio) => sum + ratio, 0)
+      : portfolioEquity > 0 ? currentPositionValue / portfolioEquity * 100 : 0,
     currentPositionQuantity: current.reduce((sum, holding) => sum + holding.quantity, 0),
     hasExistingPosition: current.length > 0,
     positionProfitable: inferPositionProfitable(current, null, record.payload.price),
@@ -225,6 +232,17 @@ function enforceOwnAccountRules(record, account, preview) {
     return { ...preview, blocked: true, quantity: 0, reason: "해당 계좌에 수익 중인 기존 포지션이 없어 추가매수 차단" };
   }
   return preview;
+}
+
+async function reconcilePendingBrokerOrders(broker) {
+  const changes = [];
+  for (const previous of broker.tracker.pending()) {
+    const current = await refreshPaperOrder(previous, broker);
+    if (["status", "filledQuantity", "remainingQuantity", "fillPrice"].some((key) => current[key] !== previous[key])) {
+      changes.push({ previous, current });
+    }
+  }
+  return changes;
 }
 
 async function holdingLines(account) {
@@ -311,7 +329,15 @@ async function start() {
 
   async function send(channelName, message) {
     const channel = await targetChannel(channelName);
-    await channel.send(message.embed ? { content: message.text, embeds: [message.embed] } : { content: message.text || String(message) });
+    return channel.send(message.embed ? { content: message.text, embeds: [message.embed] } : { content: message.text || String(message) });
+  }
+
+  async function updateOrderCard(order) {
+    if (!order.statusMessageId) return;
+    const channel = await targetChannel(channels.order);
+    const message = await channel.messages.fetch(order.statusMessageId);
+    const formatted = formatOrderStatus(order);
+    await message.edit({ content: formatted.text, embeds: [formatted.embed] });
   }
 
   const brokerAccountLabel = (broker) => `${broker.label} ${broker.environment === "live" ? "실계좌" : "모의계좌"}`;
@@ -335,13 +361,26 @@ async function start() {
     return { label: broker.label, preview };
   }
 
+  async function withPortfolioMetrics(broker, order) {
+    const account = await accountContext(broker, { payload: {
+      exchange: order.market, ticker: order.symbol, price: order.fillPrice || order.signalPrice,
+    } }, maxOpenPositions);
+    return broker.tracker.record({
+      ...order,
+      accountEquity: account.equity,
+      positionValueAfterFill: account.currentPositionValue,
+      positionRatio: account.portfolioPositionRatio,
+      currency: account.currency,
+    });
+  }
+
   async function execute(broker, record) {
     record.positionPreview = (await previewFor(broker, record)).preview;
     if (record.payload?.paper_order_test === true) {
       await send(channels.order, { text: `✅ **${brokerAccountLabel(broker)} 자동매매 연동 테스트 통과**\n**종목**: ${formatInstrumentLabel(record.payload)}\n계좌 조회 정상 · 주문 생성 없음` });
       return null;
     }
-    const order = await submitPaperOrder(record, {
+    let order = await submitPaperOrder(record, {
       enabled: true, environment: broker.environment,
       domesticClient: broker.domesticClient, overseasClient: broker.overseasClient,
       tracker: broker.tracker, brokerLabel: brokerAccountLabel(broker),
@@ -352,14 +391,55 @@ async function start() {
       await send(channels.order, { text: `🛑 **${brokerAccountLabel(broker)} 주문 차단**\n**종목**: ${formatInstrumentLabel(record.payload)}\n**사유**: ${order?.reason || record.positionPreview?.reason || "주문 조건 불충족"}` });
       return null;
     }
-    await send(channels.order, formatOrderStatus(order));
-    const final = await trackPaperOrder(order, { domesticClient: broker.domesticClient, overseasClient: broker.overseasClient, tracker: broker.tracker, attempts: 5, delayMs: 2_000 });
-    if (final.status !== order.status || final.filledQuantity !== order.filledQuantity) await send(channels.execution, formatOrderStatus(final));
+    const statusMessage = await send(channels.order, formatOrderStatus(order));
+    order = broker.tracker.record({ ...order, statusMessageId: statusMessage.id });
+    let final = await trackPaperOrder(order, { domesticClient: broker.domesticClient, overseasClient: broker.overseasClient, tracker: broker.tracker, attempts: 5, delayMs: 2_000 });
+    if (final.status !== order.status || final.filledQuantity !== order.filledQuantity) {
+      if (final.filledQuantity > order.filledQuantity) {
+        final = await withPortfolioMetrics(broker, final).catch(async (error) => {
+          await reportError(`${broker.label} 체결 비중 조회 실패`, error, record);
+          return final;
+        });
+      }
+      await updateOrderCard(final).catch((error) => reportError(`${broker.label} 주문 상태 카드 갱신 실패`, error, record));
+      await send(channels.execution, formatOrderStatus(final));
+    }
     if (["FILLED", "PARTIALLY_FILLED"].includes(final.status)) {
-      await send(channels.journal, { text: `📘 **${brokerAccountLabel(broker)} 매매 기록**\n${final.side} · ${formatInstrumentLabel(record.payload)} · ${final.filledQuantity}주 @ ${final.fillPrice || "확인 중"}` });
+      await send(channels.journal, formatTradeJournal(final));
       await syncPortfolio().catch((error) => reportError("포트폴리오 주문 후 갱신 실패", error));
     }
     return final;
+  }
+
+  async function reconcileOrders() {
+    let portfolioChanged = false;
+    for (const broker of brokers) {
+      let changes;
+      try {
+        changes = await reconcilePendingBrokerOrders(broker);
+      } catch (error) {
+        await reportError(`${broker.label} 미완료 주문 체결 조회 실패`, error);
+        continue;
+      }
+      for (const { previous, current } of changes) {
+        let reported = current;
+        if (current.filledQuantity > previous.filledQuantity) {
+          try {
+            reported = await withPortfolioMetrics(broker, current);
+          } catch (error) {
+            await reportError(`${broker.label} 체결 비중 조회 실패`, error, { payload: current });
+          }
+        }
+        await updateOrderCard(reported).catch((error) => reportError(`${broker.label} 주문 상태 카드 갱신 실패`, error));
+        await send(channels.execution, formatOrderStatus(reported));
+        if (current.filledQuantity > previous.filledQuantity) {
+          await send(channels.journal, formatTradeJournal(reported));
+          portfolioChanged = true;
+        }
+      }
+    }
+    if (portfolioChanged) await syncPortfolio().catch((error) => reportError("포트폴리오 체결 후 갱신 실패", error));
+    return portfolioChanged;
   }
 
   async function executeOrDefer(broker, record, { retry = false } = {}) {
@@ -535,7 +615,11 @@ async function start() {
       `${accountSummary()} · 신뢰 채널 ${sourceChannelIds.size}개 · 자동매매 ${receipts.autoTrading() ? "ON" : "OFF"}`,
       brokers.some((broker) => broker.environment === "live") ? "실계좌 활성 · BUY 승인 필수" : "실계좌 지원 · 현재 잠금",
     ) });
-    await syncPortfolio().catch((error) => reportError("포트폴리오 시작 갱신 실패", error));
+    const reconciled = await reconcileOrders().catch(async (error) => {
+      await reportError("미완료 주문 시작 조회 실패", error);
+      return false;
+    });
+    if (!reconciled) await syncPortfolio().catch((error) => reportError("포트폴리오 시작 갱신 실패", error));
     setInterval(() => {
       queue = queue.then(() => syncPortfolio()).catch((error) => reportError("포트폴리오 일일 갱신 실패", error));
     }, portfolioSyncMinutes * 60_000).unref();
@@ -548,10 +632,13 @@ async function start() {
     setInterval(() => {
       queue = queue.then(() => retryDeferred()).catch((error) => reportError("미국 예약 주문 재시도 실패", error));
     }, 15_000).unref();
+    setInterval(() => {
+      queue = queue.then(() => reconcileOrders()).catch((error) => reportError("미완료 주문 체결 조회 실패", error));
+    }, 30_000).unref();
   });
   await client.login(process.env.ACCOUNT_DISCORD_TOKEN || process.env.KIS_DISCORD_TOKEN || process.env.DISCORD_TOKEN_DRUCKENMILLER);
 }
 
 if (require.main === module) start().catch((error) => { console.error(error); process.exitCode = 1; });
 
-module.exports = { SignalReceiptStore, accountCommand, accountContext, accountPortfolioSyncMinutes, brokerEnvironments, enabledBrokerIds, enforceOwnAccountRules, shouldConsumeMessage, signalExchange, start };
+module.exports = { SignalReceiptStore, accountCommand, accountContext, accountPortfolioSyncMinutes, brokerEnvironments, enabledBrokerIds, enforceOwnAccountRules, reconcilePendingBrokerOrders, shouldConsumeMessage, signalExchange, start };

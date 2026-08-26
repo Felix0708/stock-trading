@@ -1,5 +1,9 @@
 "use strict";
 
+const crypto = require("node:crypto");
+const fs = require("node:fs");
+const path = require("node:path");
+
 const MOCK_BASE_URL = "https://mockapi.kiwoom.com";
 const LIVE_BASE_URL = "https://api.kiwoom.com";
 
@@ -15,6 +19,11 @@ function toOptionalNumber(value, field, absolute = false) {
   return absolute ? Math.abs(number) : number;
 }
 
+function tokenExpiry(expiresDt) {
+  const match = String(expiresDt || "").match(/^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})$/);
+  return match ? Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]), Number(match[4]) - 9, Number(match[5]), Number(match[6])) : 0;
+}
+
 class KiwoomClient {
   #appKey;
   #secretKey;
@@ -22,10 +31,11 @@ class KiwoomClient {
   #baseUrl;
   #environmentLabel;
   #timeoutMs;
+  #tokenCacheFile;
   #token = null;
   #expiresDt = null;
 
-  constructor({ appKey, secretKey, environment = "mock", fetchImpl = fetch, timeoutMs = 5000 } = {}) {
+  constructor({ appKey, secretKey, environment = "mock", fetchImpl = fetch, timeoutMs = 5000, tokenCacheFile } = {}) {
     if (!["mock", "live"].includes(environment)) throw new Error("KIWOOM_ENV는 mock 또는 live여야 합니다.");
     if (!appKey || !secretKey) throw new Error("키움 App Key와 App Secret이 필요합니다.");
     if (!Number.isInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > 30000) {
@@ -37,6 +47,10 @@ class KiwoomClient {
     this.#baseUrl = environment === "live" ? LIVE_BASE_URL : MOCK_BASE_URL;
     this.#environmentLabel = environment === "live" ? "실계좌" : "모의투자";
     this.#timeoutMs = timeoutMs;
+    const cacheKey = crypto.createHash("sha256").update(`${this.#baseUrl}:${appKey}`).digest("hex").slice(0, 12);
+    this.#tokenCacheFile = tokenCacheFile === undefined && fetchImpl === fetch
+      ? path.join(process.cwd(), `.kiwoom-token-${cacheKey}.json`)
+      : tokenCacheFile || "";
   }
 
   async post(path, { apiId, body = {}, authorization = false, retryAuthorization = true } = {}) {
@@ -66,6 +80,7 @@ class KiwoomClient {
     if (authorization && retryAuthorization && Number(data.return_code) === 8005) {
       this.#token = null;
       this.#expiresDt = null;
+      if (this.#tokenCacheFile) fs.rmSync(this.#tokenCacheFile, { force: true });
       await this.authenticate();
       return this.post(path, { apiId, body, authorization, retryAuthorization: false });
     }
@@ -86,10 +101,22 @@ class KiwoomClient {
     if (!data.token || !data.expires_dt) throw new Error("키움 토큰 응답에 필수값이 없습니다.");
     this.#token = data.token;
     this.#expiresDt = data.expires_dt;
+    if (this.#tokenCacheFile) {
+      const temporary = `${this.#tokenCacheFile}.tmp`;
+      fs.writeFileSync(temporary, `${JSON.stringify({ token: this.#token, expiresDt: this.#expiresDt })}\n`, { mode: 0o600 });
+      fs.renameSync(temporary, this.#tokenCacheFile);
+    }
     return { expiresDt: this.#expiresDt, tokenType: data.token_type || "bearer" };
   }
 
   async getAccessToken() {
+    if (!this.#token && this.#tokenCacheFile && fs.existsSync(this.#tokenCacheFile)) {
+      const cached = JSON.parse(fs.readFileSync(this.#tokenCacheFile, "utf8"));
+      if (typeof cached.token === "string" && tokenExpiry(cached.expiresDt) > Date.now() + 60_000) {
+        this.#token = cached.token;
+        this.#expiresDt = cached.expiresDt;
+      }
+    }
     if (!this.#token) await this.authenticate();
     return this.#token;
   }

@@ -206,6 +206,17 @@ function formatOrderStatus(order) {
   const [icon, label, color] = ORDER_STATUS[order.status] || ["ℹ️", display(order.status), 0x5865F2];
   const identity = order.name ? `${order.name} (${display(order.symbol)})` : display(order.symbol);
   const brokerLabel = order.brokerLabel || "키움 모의계좌";
+  const currency = order.currency || (DOMESTIC_EXCHANGES.has(order.market) ? "KRW" : "USD");
+  const fillPrice = Number(order.fillPrice);
+  const filledValue = Number.isFinite(fillPrice) && fillPrice > 0 && order.filledQuantity > 0
+    ? fillPrice * order.filledQuantity : null;
+  const positionRatio = Number.isFinite(order.positionRatio) ? order.positionRatio : null;
+  const plannedLine = Number.isFinite(order.plannedInvestment)
+    ? `예상 투입 ${money(order.plannedInvestment, currency)}${Number.isFinite(order.projectedPositionRatio) ? ` · 주문 후 예상 비중 ${order.projectedPositionRatio.toFixed(2)}% / 최대 ${(order.positionLimitRatio ?? 0.2) * 100}%` : ""}`
+    : null;
+  const filledLine = filledValue
+    ? `실제 투입 ${money(filledValue, currency)}${Number.isFinite(positionRatio) ? ` · 포트폴리오 비중 ${positionRatio.toFixed(2)}%` : ""}`
+    : null;
   return {
     channel: "system",
     embed: {
@@ -214,7 +225,8 @@ function formatOrderStatus(order) {
       description: `**${identity}**`,
       fields: [
         { name: "수량", value: `주문 ${display(order.orderQuantity)}주 · 체결 ${display(order.filledQuantity)}주 · 잔량 ${display(order.remainingQuantity)}주` },
-        ...(order.fillPrice ? [{ name: "체결가", value: display(order.fillPrice), inline: true }] : []),
+        ...(fillPrice > 0 ? [{ name: "체결가", value: money(fillPrice, currency), inline: true }] : []),
+        ...(filledLine ? [{ name: "실제 투입·비중", value: filledLine, inline: false }] : plannedLine ? [{ name: "예상 투입·비중", value: plannedLine, inline: false }] : []),
         { name: "주문번호", value: `끝 4자리 ${String(order.orderNo || "").slice(-4) || "-"}`, inline: true },
       ],
       footer: { text: brokerLabel },
@@ -225,9 +237,27 @@ function formatOrderStatus(order) {
       `**종목**: ${identity} / ${display(order.side)}`,
       `**상태**: \`${display(order.status)}\``,
       `**수량**: 주문 ${display(order.orderQuantity)} / 체결 ${display(order.filledQuantity)} / 잔량 ${display(order.remainingQuantity)}`,
-      order.fillPrice ? `**체결가**: ${display(order.fillPrice)}` : null,
+      fillPrice > 0 ? `**체결가**: ${money(fillPrice, currency)}` : null,
+      filledLine ? `**실제 투입**: ${money(filledValue, currency)}${Number.isFinite(positionRatio) ? ` / **포트폴리오 비중**: ${positionRatio.toFixed(2)}%` : ""}` : null,
+      !filledLine && plannedLine ? `**예상 투입**: ${money(order.plannedInvestment, currency)}${Number.isFinite(order.projectedPositionRatio) ? ` / **주문 후 예상 비중**: ${order.projectedPositionRatio.toFixed(2)}% / 최대 ${(order.positionLimitRatio ?? 0.2) * 100}%` : ""}` : null,
       `**주문번호**: 끝 4자리 ${String(order.orderNo || "").slice(-4) || "-"}`,
     ].filter(Boolean).join("\n"),
+  };
+}
+
+function formatTradeJournal(order) {
+  const formatted = formatOrderStatus(order);
+  const brokerLabel = order.brokerLabel || "키움 모의계좌";
+  return {
+    ...formatted,
+    channel: "journal",
+    text: formatted.text.replace(`${brokerLabel} 주문 상태`, `${brokerLabel} 매매 기록`),
+    embed: {
+      ...formatted.embed,
+      color: 0x5865F2,
+      title: `📘 ${display(order.side)} · 매매 기록`,
+      footer: { text: `${brokerLabel} 체결 기준` },
+    },
   };
 }
 
@@ -304,6 +334,7 @@ module.exports = {
   formatDeferredBuy,
   formatExecutorError,
   formatOrderStatus,
+  formatTradeJournal,
   formatWebhookRecord,
   positionPreviewLines,
   targetSignalChannel,

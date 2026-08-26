@@ -9,6 +9,7 @@ const {
   formatDeferredBuy,
   formatExecutorError,
   formatOrderStatus,
+  formatTradeJournal,
   formatWebhookRecord,
   targetSignalChannels,
 } = require("./webhook-discord");
@@ -182,6 +183,31 @@ const kisOrder = formatOrderStatus({
 });
 assert(kisOrder.text.includes("한투 모의계좌 주문 상태"));
 assert.equal(kisOrder.embed.footer.text, "한투 모의계좌");
+const acceptedSizing = formatOrderStatus({
+  orderNo: "1903", symbol: "SE", side: "BUY", status: "ACCEPTED", market: "NYSE",
+  orderQuantity: 63, filledQuantity: 0, remainingQuantity: 63,
+  plannedInvestment: 7634.655, projectedPositionRatio: 7.634655, positionLimitRatio: 0.2, currency: "USD",
+});
+assert(acceptedSizing.text.includes("**예상 투입**: $7,634.66"));
+assert(acceptedSizing.text.includes("**주문 후 예상 비중**: 7.63% / 최대 20%"));
+const filledSizing = formatOrderStatus({
+  orderNo: "1903", symbol: "SE", side: "BUY", status: "FILLED", market: "NYSE",
+  orderQuantity: 63, filledQuantity: 63, remainingQuantity: 0, fillPrice: 120.95,
+  positionRatio: 7.62, currency: "USD",
+});
+assert(filledSizing.text.includes("**체결가**: $120.95"));
+assert(filledSizing.text.includes("**실제 투입**: $7,619.85"));
+assert(filledSizing.text.includes("**포트폴리오 비중**: 7.62%"));
+assert(filledSizing.embed.fields.some((field) => field.name === "실제 투입·비중" && field.value.includes("7.62%")));
+const tradeJournal = formatTradeJournal({
+  orderNo: "9346", symbol: "SE", name: "SEA(ADR)", side: "BUY", status: "FILLED", market: "NYSE",
+  orderQuantity: 63, filledQuantity: 63, remainingQuantity: 0, fillPrice: 121.18,
+  positionRatio: 100, currency: "USD", brokerLabel: "한투 모의계좌",
+});
+assert.equal(tradeJournal.embed.title, "📘 BUY · 매매 기록");
+assert(tradeJournal.text.includes("**실제 투입**: $7,634.34"));
+assert(tradeJournal.text.includes("**포트폴리오 비중**: 100.00%"));
+assert.equal(tradeJournal.embed.footer.text, "한투 모의계좌 체결 기준");
 
 const approval = formatBuyApproval(base, {
   ticker: "005930", name: "삼성전자",

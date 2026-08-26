@@ -1,6 +1,9 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
 const { KiwoomClient, LIVE_BASE_URL, MOCK_BASE_URL } = require("./kiwoom-client");
 
 const calls = [];
@@ -297,6 +300,21 @@ async function fakeFetch(url, options) {
   assert.equal(await refreshClient.getDomesticAccountNumber(), "1234567890");
   assert.equal(authCount, 2);
   assert.deepEqual(refreshedHeaders, ["Bearer token-1", "Bearer token-2"]);
+
+  const tokenDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "kiwoom-token-cache-"));
+  try {
+    const tokenCacheFile = path.join(tokenDirectory, "token.json");
+    let cachedAuthCount = 0;
+    const cachedFetch = async () => {
+      cachedAuthCount += 1;
+      return new Response(JSON.stringify({ token: "cached-token", expires_dt: "20991231235959", return_code: 0 }));
+    };
+    await new KiwoomClient({ appKey: "cached-app", secretKey: "cached-secret", fetchImpl: cachedFetch, tokenCacheFile }).getAccessToken();
+    assert.equal(await new KiwoomClient({ appKey: "cached-app", secretKey: "cached-secret", fetchImpl: cachedFetch, tokenCacheFile }).getAccessToken(), "cached-token");
+    assert.equal(cachedAuthCount, 1);
+  } finally {
+    fs.rmSync(tokenDirectory, { recursive: true, force: true });
+  }
   console.log("kiwoom-client test OK");
 })().catch((error) => {
   console.error(error);

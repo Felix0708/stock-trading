@@ -1,5 +1,9 @@
 "use strict";
 
+const crypto = require("node:crypto");
+const fs = require("node:fs");
+const path = require("node:path");
+
 const MOCK_BASE_URL = "https://openapivts.koreainvestment.com:29443";
 const LIVE_BASE_URL = "https://openapi.koreainvestment.com:9443";
 const US_EXCHANGE = { ND: "NASD", NASDAQ: "NASD", NASD: "NASD", NY: "NYSE", NYSE: "NYSE", NA: "AMEX", AMEX: "AMEX", ARCA: "AMEX", NYSEARCA: "AMEX" };
@@ -35,13 +39,25 @@ class KisClient {
     this.fetch = options.fetchImpl || fetch;
     this.timeoutMs = options.timeoutMs || 5_000;
     this.requestIntervalMs = options.requestIntervalMs ?? 1_100;
+    this.rateLimitWaitMs = options.rateLimitWaitMs ?? 61_000;
     this.requestQueue = Promise.resolve();
     this.lastRequestAt = 0;
     this.token = null;
     this.tokenExpiresAt = 0;
+    const cacheKey = crypto.createHash("sha256").update(`${this.baseUrl}:${this.appKey}`).digest("hex").slice(0, 12);
+    this.tokenCacheFile = options.tokenCacheFile === undefined && this.fetch === fetch
+      ? path.join(process.cwd(), `.kis-token-${cacheKey}.json`)
+      : options.tokenCacheFile || "";
   }
 
   async accessToken() {
+    if (!this.token && this.tokenCacheFile && fs.existsSync(this.tokenCacheFile)) {
+      const cached = JSON.parse(fs.readFileSync(this.tokenCacheFile, "utf8"));
+      if (typeof cached.token === "string" && Number(cached.expiresAt) > Date.now() + 60_000) {
+        this.token = cached.token;
+        this.tokenExpiresAt = Number(cached.expiresAt);
+      }
+    }
     if (this.token && Date.now() < this.tokenExpiresAt) return this.token;
     const response = await this.fetch(`${this.baseUrl}/oauth2/tokenP`, {
       method: "POST",
@@ -53,6 +69,11 @@ class KisClient {
     if (!response.ok || !result.access_token) throw new Error(`한투 ${this.environment === "live" ? "실계좌" : "모의"} 인증 실패: ${result.error_description || result.msg1 || response.status}`);
     this.token = result.access_token;
     this.tokenExpiresAt = Date.now() + Math.max(60, number(result.expires_in) - 60) * 1_000;
+    if (this.tokenCacheFile) {
+      const temporary = `${this.tokenCacheFile}.tmp`;
+      fs.writeFileSync(temporary, `${JSON.stringify({ token: this.token, expiresAt: this.tokenExpiresAt })}\n`, { mode: 0o600 });
+      fs.renameSync(temporary, this.tokenCacheFile);
+    }
     return this.token;
   }
 
@@ -61,7 +82,9 @@ class KisClient {
     if (!trId || (!sharedTrId && (this.environment === "mock" ? !trId.startsWith("V") : trId.startsWith("V")))) throw new Error(`한투 ${this.environment === "live" ? "실계좌" : "모의"} TR ID가 올바르지 않습니다.`);
     const queued = this.requestQueue.then(async () => {
       const query = params ? `?${new URLSearchParams(params)}` : "";
-      for (let attempt = 0; attempt < 2; attempt += 1) {
+      let authorizationRetried = false;
+      let rateLimitRetried = false;
+      for (let attempt = 0; attempt < 3; attempt += 1) {
         const token = await this.accessToken();
         const waitMs = this.requestIntervalMs - (Date.now() - this.lastRequestAt);
         if (waitMs > 0) await new Promise((resolve) => setTimeout(resolve, waitMs));
@@ -80,9 +103,16 @@ class KisClient {
           signal: AbortSignal.timeout(this.timeoutMs),
         });
         const result = await response.json();
-        if (attempt === 0 && result.msg_cd === "EGW00123") {
+        if (!authorizationRetried && result.msg_cd === "EGW00123") {
+          authorizationRetried = true;
           this.token = null;
           this.tokenExpiresAt = 0;
+          if (this.tokenCacheFile) fs.rmSync(this.tokenCacheFile, { force: true });
+          continue;
+        }
+        if (!rateLimitRetried && result.msg_cd === "EGW00201") {
+          rateLimitRetried = true;
+          await new Promise((resolve) => setTimeout(resolve, this.rateLimitWaitMs));
           continue;
         }
         if (!response.ok || result.rt_cd !== "0") throw new Error(`한투 ${this.environment === "live" ? "실계좌" : "모의"} API 실패 [${trId}]: ${result.msg1 || response.status}`);
