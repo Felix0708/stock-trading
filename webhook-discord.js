@@ -212,10 +212,10 @@ function formatOrderStatus(order) {
     ? fillPrice * order.filledQuantity : null;
   const positionRatio = Number.isFinite(order.positionRatio) ? order.positionRatio : null;
   const plannedLine = Number.isFinite(order.plannedInvestment)
-    ? `예상 투입 ${money(order.plannedInvestment, currency)}${Number.isFinite(order.projectedPositionRatio) ? ` · 주문 후 예상 비중 ${order.projectedPositionRatio.toFixed(2)}% / 최대 ${(order.positionLimitRatio ?? 0.2) * 100}%` : ""}`
+    ? `예상 투입 ${money(order.plannedInvestment, currency)}${Number.isFinite(order.projectedPositionRatio) ? ` · 주문 후 예상 계좌 비중 ${order.projectedPositionRatio.toFixed(2)}% / 최대 ${(order.positionLimitRatio ?? 0.2) * 100}%` : ""}`
     : null;
   const filledLine = filledValue
-    ? `실제 투입 ${money(filledValue, currency)}${Number.isFinite(positionRatio) ? ` · 포트폴리오 비중 ${positionRatio.toFixed(2)}%` : ""}`
+    ? `실제 투입 ${money(filledValue, currency)}${Number.isFinite(positionRatio) ? ` · 체결 후 계좌 비중 ${positionRatio.toFixed(2)}%` : ""}`
     : null;
   return {
     channel: "system",
@@ -238,8 +238,8 @@ function formatOrderStatus(order) {
       `**상태**: \`${display(order.status)}\``,
       `**수량**: 주문 ${display(order.orderQuantity)} / 체결 ${display(order.filledQuantity)} / 잔량 ${display(order.remainingQuantity)}`,
       fillPrice > 0 ? `**체결가**: ${money(fillPrice, currency)}` : null,
-      filledLine ? `**실제 투입**: ${money(filledValue, currency)}${Number.isFinite(positionRatio) ? ` / **포트폴리오 비중**: ${positionRatio.toFixed(2)}%` : ""}` : null,
-      !filledLine && plannedLine ? `**예상 투입**: ${money(order.plannedInvestment, currency)}${Number.isFinite(order.projectedPositionRatio) ? ` / **주문 후 예상 비중**: ${order.projectedPositionRatio.toFixed(2)}% / 최대 ${(order.positionLimitRatio ?? 0.2) * 100}%` : ""}` : null,
+      filledLine ? `**실제 투입**: ${money(filledValue, currency)}${Number.isFinite(positionRatio) ? ` / **체결 후 계좌 비중**: ${positionRatio.toFixed(2)}%` : ""}` : null,
+      !filledLine && plannedLine ? `**예상 투입**: ${money(order.plannedInvestment, currency)}${Number.isFinite(order.projectedPositionRatio) ? ` / **주문 후 예상 계좌 비중**: ${order.projectedPositionRatio.toFixed(2)}% / 최대 ${(order.positionLimitRatio ?? 0.2) * 100}%` : ""}` : null,
       `**주문번호**: 끝 4자리 ${String(order.orderNo || "").slice(-4) || "-"}`,
     ].filter(Boolean).join("\n"),
   };

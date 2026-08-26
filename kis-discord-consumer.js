@@ -205,16 +205,12 @@ async function accountContext(clients, record, maxOpenPositions) {
   const evaluation = holdings.reduce((sum, holding) => sum + holding.evaluationAmount, 0);
   const equity = market === "KRX" ? domestic.estimatedAssets || domestic.totalEvaluation : cash + evaluation;
   const currentPositionValue = current.reduce((sum, holding) => sum + holding.evaluationAmount, 0);
-  const brokerRatios = current.map((holding) => Number(holding.positionRatio)).filter(Number.isFinite);
-  const portfolioEquity = market === "KRX" ? domestic.estimatedAssets || domestic.totalEvaluation || evaluation : evaluation;
   return {
     equity, availableCash: cash, currency: market === "KRX" ? "KRW" : "USD",
     openPositions: domestic.holdings.length + usHoldings.length,
     maxOpenPositions,
     currentPositionValue,
-    portfolioPositionRatio: brokerRatios.length
-      ? brokerRatios.reduce((sum, ratio) => sum + ratio, 0)
-      : portfolioEquity > 0 ? currentPositionValue / portfolioEquity * 100 : 0,
+    accountPositionRatio: equity > 0 ? currentPositionValue / equity * 100 : 0,
     currentPositionQuantity: current.reduce((sum, holding) => sum + holding.quantity, 0),
     hasExistingPosition: current.length > 0,
     positionProfitable: inferPositionProfitable(current, null, record.payload.price),
@@ -258,7 +254,7 @@ async function holdingLines(account) {
 function approvalText(record, previews) {
   const lines = Object.values(previews).map(({ label, preview }) => preview.blocked
     ? `**${label}**: 불가 · ${preview.reason}`
-    : `**${label}**: ${preview.quantity}주 · 예상 ${preview.currency === "KRW" ? `${Math.round(preview.positionValue).toLocaleString("ko-KR")}원` : `$${preview.positionValue.toLocaleString("en-US", { maximumFractionDigits: 2 })}`}`);
+    : `**${label}**: ${preview.quantity}주 · 예상 ${preview.currency === "KRW" ? `${Math.round(preview.positionValue).toLocaleString("ko-KR")}원` : `$${preview.positionValue.toLocaleString("en-US", { maximumFractionDigits: 2 })}`} · 주문 후 계좌 비중 ${preview.projectedPositionRatio.toFixed(2)}% / 최대 ${preview.positionLimitRatio * 100}%`);
   return [
     "⏳ **BUY 승인 대기**",
     `**종목**: ${formatInstrumentLabel(record.payload)}`,
@@ -369,7 +365,7 @@ async function start() {
       ...order,
       accountEquity: account.equity,
       positionValueAfterFill: account.currentPositionValue,
-      positionRatio: account.portfolioPositionRatio,
+      positionRatio: account.accountPositionRatio,
       currency: account.currency,
     });
   }
@@ -641,4 +637,4 @@ async function start() {
 
 if (require.main === module) start().catch((error) => { console.error(error); process.exitCode = 1; });
 
-module.exports = { SignalReceiptStore, accountCommand, accountContext, accountPortfolioSyncMinutes, brokerEnvironments, enabledBrokerIds, enforceOwnAccountRules, reconcilePendingBrokerOrders, shouldConsumeMessage, signalExchange, start };
+module.exports = { SignalReceiptStore, accountCommand, accountContext, accountPortfolioSyncMinutes, approvalText, brokerEnvironments, enabledBrokerIds, enforceOwnAccountRules, reconcilePendingBrokerOrders, shouldConsumeMessage, signalExchange, start };

@@ -5,12 +5,19 @@ const { enrichInstrumentNames, formatMyPortfolioMessage } = require("./investor-
 async function brokerPortfolio(broker) {
   const domesticClient = broker.domesticClient || broker;
   const overseasClient = broker.overseasClient || broker;
-  const [domestic, usBalances, usCash] = await Promise.all([
+  const [domestic, usBalances] = await Promise.all([
     domesticClient.getDomesticBalance(),
     overseasClient.getUsBalances ? overseasClient.getUsBalances() : overseasClient.getUsBalance().then((balance) => [balance]),
-    broker.id === "KIWOOM" && overseasClient.getUsCash ? overseasClient.getUsCash() : { usd: 0 },
   ]);
   const usHoldings = [...new Map(usBalances.flatMap((balance) => balance.holdings).map((holding) => [holding.code, holding])).values()];
+  const firstUsHolding = usHoldings[0];
+  const usCash = firstUsHolding && overseasClient.getUsCash
+    ? await overseasClient.getUsCash({
+      exchange: firstUsHolding.exchange,
+      symbol: firstUsHolding.code,
+      price: firstUsHolding.currentPrice || firstUsHolding.price,
+    })
+    : { usd: 0 };
   const [domesticHoldings, overseasHoldings] = await Promise.all([
     enrichInstrumentNames(domestic.holdings.map((holding) => ({ ...holding, exchange: "KRX", ticker: holding.code }))),
     enrichInstrumentNames(usHoldings.map((holding) => ({ ...holding, exchange: holding.exchange || "NASDAQ", ticker: holding.code }))),

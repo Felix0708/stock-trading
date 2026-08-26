@@ -27,5 +27,16 @@ const emptyBroker = (id, label) => ({
   assert.equal(result.id, "portfolio-1");
   assert.match(editedPayload.embeds[0].description, /키움 모의계좌/);
   assert.match(editedPayload.embeds[0].description, /한투 실계좌/);
+
+  const kisHoldingBroker = emptyBroker("KIS", "한투");
+  kisHoldingBroker.overseasClient.getUsBalances = async () => [{ holdings: [{
+    code: "SE", name: "Sea Limited", koreanName: "씨", englishName: "Sea Limited", exchange: "ND",
+    quantity: 63, currentPrice: 120, evaluationAmount: 800,
+  }] }];
+  let cashQuery;
+  kisHoldingBroker.overseasClient.getUsCash = async (query) => { cashQuery = query; return { usd: 9200 }; };
+  await syncAccountPortfolio(channel, [kisHoldingBroker], "2026-08-26T00:00:00.000Z");
+  assert.deepEqual(cashQuery, { exchange: "ND", symbol: "SE", price: 120 });
+  assert.match(editedPayload.embeds[0].description, /63주 · \$800 · 8\.0%/);
   console.log("account portfolio test OK");
 })().catch((error) => { console.error(error); process.exitCode = 1; });

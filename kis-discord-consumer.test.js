@@ -1,7 +1,7 @@
 "use strict";
 
 const assert = require("node:assert/strict");
-const { accountCommand, accountContext, accountPortfolioSyncMinutes, brokerEnvironments, enabledBrokerIds, enforceOwnAccountRules, reconcilePendingBrokerOrders, shouldConsumeMessage, SignalReceiptStore } = require("./kis-discord-consumer");
+const { accountCommand, accountContext, accountPortfolioSyncMinutes, approvalText, brokerEnvironments, enabledBrokerIds, enforceOwnAccountRules, reconcilePendingBrokerOrders, shouldConsumeMessage, SignalReceiptStore } = require("./kis-discord-consumer");
 
 assert.deepEqual(enabledBrokerIds({ ACCOUNT_EXECUTOR_ENABLED: "true", EXECUTOR_KIWOOM_ENABLED: "true", EXECUTOR_KIS_ENABLED: "true" }), ["KIWOOM", "KIS"]);
 assert.deepEqual(enabledBrokerIds({ ACCOUNT_EXECUTOR_ENABLED: "true", EXECUTOR_KIWOOM_ENABLED: "true", EXECUTOR_KIS_ENABLED: "false" }), ["KIWOOM"]);
@@ -77,7 +77,12 @@ assert.equal(
     getUsBalances: async () => [{ holdings: [{ code: "SE", quantity: 63, evaluationAmount: 7625.52 }] }],
     getUsCash: async () => ({ usd: 92294.675 }),
   }, { payload: { exchange: "NYSE", ticker: "SE", price: 121.18 } }, 5);
-  assert.equal(context.portfolioPositionRatio, 100);
+  assert.equal(context.accountPositionRatio, 7625.52 / (92294.675 + 7625.52) * 100);
+
+  const approval = approvalText({ payload: { ticker: "SE", name: "Sea Limited" } }, {
+    KIS: { label: "한투", preview: { blocked: false, quantity: 63, currency: "USD", positionValue: 7634.655, projectedPositionRatio: 7.64, positionLimitRatio: 0.2 } },
+  });
+  assert.match(approval, /주문 후 계좌 비중 7\.64% \/ 최대 20%/);
 
   const changes = await reconcilePendingBrokerOrders({
     tracker: {

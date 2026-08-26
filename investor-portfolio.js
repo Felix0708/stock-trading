@@ -305,9 +305,7 @@ function holdingLines(account, currency) {
   if (!holdings.length) return ["- 보유 종목 없음"];
   return holdings.map((holding) => {
     const code = String(holding.code || "").replace(/^A(?=\d{6}$)/, "");
-    const ratio = Number.isFinite(holding.positionRatio)
-      ? holding.positionRatio
-      : account.equity > 0 ? holding.evaluationAmount / account.equity * 100 : 0;
+    const ratio = account.equity > 0 ? holding.evaluationAmount / account.equity * 100 : 0;
     return `**${formatInstrumentLabel({ ...holding, ticker: code })}**\n${holding.quantity}주 · ${money(holding.evaluationAmount, currency)} · ${ratio.toFixed(1)}%`;
   });
 }
@@ -333,7 +331,7 @@ function formatMyPortfolioMessage({ accounts, domestic, overseas, environment, u
       color: 0x2f9e74,
       title: "나의 포트폴리오",
       description: clipDescription(description),
-      footer: { text: `연결된 ${labels} ${accountKind} 기준 · ${String(updatedAt || "").slice(0, 16).replace("T", " ")} UTC` },
+      footer: { text: `비중은 현금 포함 국내·미국 계좌별 기준 · 연결된 ${labels} ${accountKind} · ${String(updatedAt || "").slice(0, 16).replace("T", " ")} UTC` },
     }],
     allowedMentions: { parse: [] },
   };
