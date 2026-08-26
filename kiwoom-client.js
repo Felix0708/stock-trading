@@ -53,7 +53,7 @@ class KiwoomClient {
       : tokenCacheFile || "";
   }
 
-  async post(path, { apiId, body = {}, authorization = false, retryAuthorization = true } = {}) {
+  async post(path, { apiId, body = {}, authorization = false, retryAuthorization = true, retryRateLimit = true } = {}) {
     const headers = { "content-type": "application/json;charset=UTF-8" };
     if (apiId) headers["api-id"] = apiId;
     if (authorization) headers.authorization = `Bearer ${await this.getAccessToken()}`;
@@ -83,6 +83,10 @@ class KiwoomClient {
       if (this.#tokenCacheFile) fs.rmSync(this.#tokenCacheFile, { force: true });
       await this.authenticate();
       return this.post(path, { apiId, body, authorization, retryAuthorization: false });
+    }
+    if (authorization && retryRateLimit && Number(data.return_code) === 1700) {
+      await new Promise((resolve) => setTimeout(resolve, 1100));
+      return this.post(path, { apiId, body, authorization, retryAuthorization, retryRateLimit: false });
     }
     if (!response.ok || data.return_code !== 0) {
       throw new Error(`키움 ${this.#environmentLabel} 요청 실패: ${data.return_msg || `HTTP ${response.status}`}`);

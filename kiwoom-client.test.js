@@ -301,6 +301,24 @@ async function fakeFetch(url, options) {
   assert.equal(authCount, 2);
   assert.deepEqual(refreshedHeaders, ["Bearer token-1", "Bearer token-2"]);
 
+  let rateLimitedCount = 0;
+  const rateLimitedClient = new KiwoomClient({
+    appKey: "app-key", secretKey: "secret-key",
+    fetchImpl: async (url) => {
+      if (url.endsWith("/oauth2/token")) {
+        return new Response(JSON.stringify({ token: "token", expires_dt: "20991231235959", return_code: 0 }));
+      }
+      rateLimitedCount += 1;
+      return new Response(JSON.stringify(rateLimitedCount === 1
+        ? { return_code: 1700, return_msg: "허용된 API 요청 개수를 초과하였습니다" }
+        : { crnc_code: "USD", tot_evlt_amt: "0", tot_pl_amt: "0", result_list: [], return_code: 0 }));
+    },
+  });
+  assert.deepEqual(await rateLimitedClient.getUsBalance(), {
+    currency: "USD", totalEvaluation: 0, totalProfitLoss: 0, holdings: [],
+  });
+  assert.equal(rateLimitedCount, 2);
+
   const tokenDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "kiwoom-token-cache-"));
   try {
     const tokenCacheFile = path.join(tokenDirectory, "token.json");
