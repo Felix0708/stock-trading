@@ -57,29 +57,38 @@ class KisClient {
   }
 
   async request(path, { method = "GET", trId, params, body } = {}) {
-    if (!trId || (this.environment === "mock" ? !trId.startsWith("V") : trId.startsWith("V"))) throw new Error(`한투 ${this.environment === "live" ? "실계좌" : "모의"} TR ID가 올바르지 않습니다.`);
+    const sharedTrId = trId === "HHDFS00000300";
+    if (!trId || (!sharedTrId && (this.environment === "mock" ? !trId.startsWith("V") : trId.startsWith("V")))) throw new Error(`한투 ${this.environment === "live" ? "실계좌" : "모의"} TR ID가 올바르지 않습니다.`);
     const queued = this.requestQueue.then(async () => {
-      const token = await this.accessToken();
-      const waitMs = this.requestIntervalMs - (Date.now() - this.lastRequestAt);
-      if (waitMs > 0) await new Promise((resolve) => setTimeout(resolve, waitMs));
-      this.lastRequestAt = Date.now();
       const query = params ? `?${new URLSearchParams(params)}` : "";
-      const response = await this.fetch(`${this.baseUrl}${path}${query}`, {
-        method,
-        headers: {
-          authorization: `Bearer ${token}`,
-          appkey: this.appKey,
-          appsecret: this.appSecret,
-          tr_id: trId,
-          custtype: "P",
-          ...(body ? { "content-type": "application/json" } : {}),
-        },
-        ...(body ? { body: JSON.stringify(body) } : {}),
-        signal: AbortSignal.timeout(this.timeoutMs),
-      });
-      const result = await response.json();
-      if (!response.ok || result.rt_cd !== "0") throw new Error(`한투 ${this.environment === "live" ? "실계좌" : "모의"} API 실패 [${trId}]: ${result.msg1 || response.status}`);
-      return result;
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const token = await this.accessToken();
+        const waitMs = this.requestIntervalMs - (Date.now() - this.lastRequestAt);
+        if (waitMs > 0) await new Promise((resolve) => setTimeout(resolve, waitMs));
+        this.lastRequestAt = Date.now();
+        const response = await this.fetch(`${this.baseUrl}${path}${query}`, {
+          method,
+          headers: {
+            authorization: `Bearer ${token}`,
+            appkey: this.appKey,
+            appsecret: this.appSecret,
+            tr_id: trId,
+            custtype: "P",
+            ...(body ? { "content-type": "application/json" } : {}),
+          },
+          ...(body ? { body: JSON.stringify(body) } : {}),
+          signal: AbortSignal.timeout(this.timeoutMs),
+        });
+        const result = await response.json();
+        if (attempt === 0 && result.msg_cd === "EGW00123") {
+          this.token = null;
+          this.tokenExpiresAt = 0;
+          continue;
+        }
+        if (!response.ok || result.rt_cd !== "0") throw new Error(`한투 ${this.environment === "live" ? "실계좌" : "모의"} API 실패 [${trId}]: ${result.msg1 || response.status}`);
+        return result;
+      }
+      throw new Error("한투 인증 재시도에 실패했습니다.");
     });
     this.requestQueue = queued.catch(() => {});
     return queued;
@@ -187,6 +196,17 @@ class KisClient {
       params: this.accountParams({ OVRS_EXCG_CD: this.kisExchange(exchange), OVRS_ORD_UNPR: String(price), ITEM_CD: symbol }),
     });
     return { usd: number(result.output?.ovrs_ord_psbl_amt || result.output?.frcr_ord_psbl_amt1) };
+  }
+
+  async getUsQuote({ exchange, symbol }) {
+    const market = { NASD: "NAS", NYSE: "NYS", AMEX: "AMS" }[this.kisExchange(exchange)];
+    const result = await this.request("/uapi/overseas-price/v1/quotations/price", {
+      trId: "HHDFS00000300",
+      params: { AUTH: "", EXCD: market, SYMB: symbol },
+    });
+    const currentPrice = number(result.output?.last);
+    if (currentPrice <= 0) throw new Error("한투 미국주식 현재가 응답이 비어 있습니다.");
+    return { exchange, symbol, currentPrice, previousClose: number(result.output?.base) };
   }
 
   async placeUsLimitOrder({ side, exchange, symbol, quantity, price }) {

@@ -51,6 +51,9 @@ const deferred = store.putDeferred("KIWOOM", { requestId: "request-3", payload: 
 assert.equal(store.listDeferred()[0].key, deferred.key);
 store.markDeferredAttempt(deferred.key, "2026-08-26");
 assert.equal(store.listDeferred()[0].lastAttemptMarketDate, "2026-08-26");
+store.markDeferredFailure(deferred.key, new Error("temporary auth failure"));
+assert.equal(store.listDeferred()[0].lastError, "temporary auth failure");
+assert.equal(store.listDeferred().length, 1);
 store.removeDeferred(deferred.key);
 assert.equal(store.listDeferred().length, 0);
 

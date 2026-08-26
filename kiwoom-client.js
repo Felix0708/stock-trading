@@ -39,7 +39,7 @@ class KiwoomClient {
     this.#timeoutMs = timeoutMs;
   }
 
-  async post(path, { apiId, body = {}, authorization = false } = {}) {
+  async post(path, { apiId, body = {}, authorization = false, retryAuthorization = true } = {}) {
     const headers = { "content-type": "application/json;charset=UTF-8" };
     if (apiId) headers["api-id"] = apiId;
     if (authorization) headers.authorization = `Bearer ${await this.getAccessToken()}`;
@@ -62,6 +62,12 @@ class KiwoomClient {
       data = text ? JSON.parse(text) : {};
     } catch {
       throw new Error(`키움 ${this.#environmentLabel} 응답이 JSON이 아닙니다. (HTTP ${response.status})`);
+    }
+    if (authorization && retryAuthorization && Number(data.return_code) === 8005) {
+      this.#token = null;
+      this.#expiresDt = null;
+      await this.authenticate();
+      return this.post(path, { apiId, body, authorization, retryAuthorization: false });
     }
     if (!response.ok || data.return_code !== 0) {
       throw new Error(`키움 ${this.#environmentLabel} 요청 실패: ${data.return_msg || `HTTP ${response.status}`}`);

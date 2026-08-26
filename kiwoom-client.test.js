@@ -276,6 +276,27 @@ async function fakeFetch(url, options) {
   await sessionClient.placeDomesticMarketOrder({ side: "SELL", symbol: "005930", quantity: 1, session: "PRE" });
   await sessionClient.placeDomesticMarketOrder({ side: "BUY", symbol: "005930", quantity: 1, price: 81000, session: "AFTER_SINGLE" });
   assert.deepEqual(sessionBodies.map((body) => [body.trde_tp, body.ord_uv]), [["61", ""], ["62", "81000"]]);
+
+  let authCount = 0;
+  let accountCount = 0;
+  const refreshedHeaders = [];
+  const refreshClient = new KiwoomClient({
+    appKey: "app-key", secretKey: "secret-key",
+    fetchImpl: async (url, options) => {
+      if (url.endsWith("/oauth2/token")) {
+        authCount += 1;
+        return new Response(JSON.stringify({ token: `token-${authCount}`, expires_dt: "20991231235959", return_code: 0 }));
+      }
+      accountCount += 1;
+      refreshedHeaders.push(options.headers.authorization);
+      return new Response(JSON.stringify(accountCount === 1
+        ? { return_code: 8005, return_msg: "Token이 유효하지 않습니다" }
+        : { acctNo: "1234567890", return_code: 0 }));
+    },
+  });
+  assert.equal(await refreshClient.getDomesticAccountNumber(), "1234567890");
+  assert.equal(authCount, 2);
+  assert.deepEqual(refreshedHeaders, ["Bearer token-1", "Bearer token-2"]);
   console.log("kiwoom-client test OK");
 })().catch((error) => {
   console.error(error);

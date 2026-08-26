@@ -87,6 +87,13 @@ class SignalReceiptStore {
     this.write();
   }
 
+  markDeferredFailure(key, error) {
+    if (!this.state.deferred[key]) return;
+    this.state.deferred[key].lastError = String(error?.message || error);
+    this.state.deferred[key].lastFailedAt = new Date().toISOString();
+    this.write();
+  }
+
   removeDeferred(key) {
     delete this.state.deferred[key];
     this.write();
@@ -397,9 +404,7 @@ async function start() {
         continue;
       }
       try {
-        const quoteClient = domestic
-          ? broker.domesticClient
-          : broker.overseasClient.getUsQuote ? broker.overseasClient : brokers.find((item) => item.overseasClient.getUsQuote)?.overseasClient;
+        const quoteClient = domestic ? broker.domesticClient : broker.overseasClient;
         if (domestic && quoteClient?.getDomesticQuote) {
           const quote = await quoteClient.getDomesticQuote({ symbol: record.payload.ticker });
           record.payload.price = quote.currentPrice;
@@ -413,7 +418,7 @@ async function start() {
         receipts.removeDeferred(deferred.key);
       } catch (error) {
         if (shouldDeferEntry(record, error)) continue;
-        receipts.removeDeferred(deferred.key);
+        receipts.markDeferredFailure(deferred.key, error);
         await reportError(`${broker.label} 예약 매수 재시도 실패`, error, record);
       }
     }
