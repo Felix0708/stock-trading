@@ -4,6 +4,7 @@ const crypto = require("node:crypto");
 const zlib = require("node:zlib");
 
 const PREFIX = "LAZY_SIGNAL_V1:";
+const TRANSPORT_URL_PREFIX = "https://discord.com/#";
 const ALLOWED_VERDICTS = new Set(["PAPER_ENTRY", "PAPER_ADD", "PAPER_PARTIAL_EXIT", "PAPER_EXIT"]);
 const PAYLOAD_FIELDS = [
   "ticker", "name", "exchange", "timeframe", "action", "type", "price", "sl", "rr", "conviction",
@@ -26,7 +27,7 @@ function encodeSignalEnvelope(record) {
   };
   const body = zlib.deflateRawSync(JSON.stringify(value)).toString("base64url");
   const encoded = `${PREFIX}${body}.${checksum(body)}`;
-  if (encoded.length > 2_048) throw new Error("Discord 신호 봉투가 2,048자를 초과했습니다.");
+  if (`${TRANSPORT_URL_PREFIX}${encoded}`.length > 2_048) throw new Error("Discord 신호 봉투가 전송 한도를 초과했습니다.");
   return encoded;
 }
 
@@ -47,4 +48,12 @@ function decodeSignalEnvelope(value) {
   }
 }
 
-module.exports = { decodeSignalEnvelope, encodeSignalEnvelope, PREFIX };
+function decodeSignalEmbed(embed) {
+  const url = embed?.author?.url;
+  const encoded = typeof url === "string" && url.startsWith(TRANSPORT_URL_PREFIX)
+    ? url.slice(TRANSPORT_URL_PREFIX.length)
+    : embed?.footer?.text;
+  return decodeSignalEnvelope(encoded);
+}
+
+module.exports = { decodeSignalEmbed, decodeSignalEnvelope, encodeSignalEnvelope, PREFIX, TRANSPORT_URL_PREFIX };

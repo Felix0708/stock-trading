@@ -34,22 +34,26 @@ const { loadRecentResearch } = require("./recent-research");
 const { collectTelegramDay, previousDate } = require("./telegram-collector");
 const { createBuyApproval, findBuyApproval, parseBuyApprovalCommand } = require("./buy-approval");
 const {
+  enrichInstrumentNames,
   formatDuquesne13fContext,
+  formatInstrumentLabel,
   formatInvestorPortfolioMessage,
+  formatInvestorPortfolioMessages,
+  formatManager13fContexts,
   formatMyPortfolioMessage,
-  loadLatestDuquesne13f,
+  loadManager13fFilings,
   loadManager13fContexts,
   shouldRefreshInvestorPortfolio,
 } = require("./investor-portfolio");
 const {
-  extractRoundtableTopic,
   isAccountExecutorRequest,
   isHelpRequest,
   isResetRequest,
-  isRoundtableRequest,
+  isGroupDiscussionRequest,
   isStopRequest,
   naturalTradeCommand,
   pickResponder,
+  resolveGroupDiscussionTopic,
   sessionKey,
 } = require("./conversation-router");
 
@@ -80,6 +84,10 @@ const INVESTOR_PORTFOLIO_ENABLED = process.env.INVESTOR_PORTFOLIO_ENABLED === "t
 const INVESTOR_PORTFOLIO_CHANNEL = process.env.INVESTOR_PORTFOLIO_CHANNEL || "주요인사-포트폴리오";
 const INSTITUTION_PORTFOLIO_CHANNEL = process.env.INSTITUTION_PORTFOLIO_CHANNEL || "기관-포트폴리오";
 const INVESTOR_PORTFOLIO_REFRESH_DAYS = Number(process.env.INVESTOR_PORTFOLIO_REFRESH_DAYS || 1);
+const INVESTOR_PORTFOLIO_PEOPLE = [
+  "스탠리 드러켄밀러", "워런 버핏", "캐시 우드", "마이클 버리", "조지 소로스",
+  "레오폴드 아셴브레너", "피터 틸", "피터 린치", "낸시 펠로시", "도널드 트럼프",
+];
 const MY_PORTFOLIO_CHANNEL = process.env.MY_PORTFOLIO_CHANNEL || "내-포트폴리오";
 const MY_PORTFOLIO_SYNC_MINUTES = Number(process.env.MY_PORTFOLIO_SYNC_MINUTES || 10);
 const WEBHOOK_ENABLED = process.env.WEBHOOK_ENABLED === "true";
@@ -174,6 +182,7 @@ const PERSONAS = [
 ];
 
 let state = loadState();
+let stateBaseline = structuredClone(state);
 let codexQueue = Promise.resolve();
 let briefingInProgress = false;
 let telegramCollectionInProgress = false;
@@ -188,7 +197,7 @@ let domesticAccountCache = null;
 const orderTracker = new OrderTracker(KIWOOM_ORDER_STATE_FILE);
 const clients = new Map();
 const botRelayCount = new Map();
-const roundtableChannels = new Set();
+const groupDiscussionChannels = new Set();
 const defaultResponderByMessage = new Map();
 const lastResponderByChannel = new Map();
 const conversationVersions = new Map();
@@ -204,8 +213,9 @@ function loadState() {
   if (!fs.existsSync(STATE_FILE)) return {
     sessions: {}, scheduledRuns: {}, reviewedResearch: {}, telegramRuns: {},
     investorPortfolioContext: "", investorPortfolioUpdatedAt: "", investorPortfolioSourceMtime: 0,
-    investorPortfolioAnnouncedAt: "", investorPortfolioMessageId: "", duquesne13fContext: "", duquesne13fUpdatedAt: "",
-    institutionPortfolioContext: "", institutionPortfolioUpdatedAt: "", institutionPortfolioMessageId: "",
+    investorPortfolioAnnouncedAt: "", investorPortfolioMessageId: "", investorPortfolioMessageIds: [], investorPortfolioDisplayContext: "", duquesne13fContext: "", duquesne13fUpdatedAt: "",
+    muniPortfolioContext: "", muniPortfolioUpdatedAt: "", muniPortfolioMessageId: "",
+    institutionPortfolioContext: "", institutionPortfolioUpdatedAt: "", institutionPortfolioMessageId: "", institutionPortfolioMessageIds: [],
     myPortfolioMessageId: "", myPortfolioUpdatedAt: "",
     watchlist: {}, watchlistMessageId: "", watchlistMessageIds: [], watchlistSyncRuns: {},
     alertRegistry: {}, alertRegistryMessageIds: [], alertRegistrySyncRuns: {}, alertRegistryUpdatedAt: "",
@@ -223,11 +233,17 @@ function loadState() {
       investorPortfolioSourceMtime: Number(parsed.investorPortfolioSourceMtime || 0),
       investorPortfolioAnnouncedAt: parsed.investorPortfolioAnnouncedAt || "",
       investorPortfolioMessageId: parsed.investorPortfolioMessageId || "",
+      investorPortfolioMessageIds: parsed.investorPortfolioMessageIds || (parsed.investorPortfolioMessageId ? [parsed.investorPortfolioMessageId] : []),
+      investorPortfolioDisplayContext: parsed.investorPortfolioDisplayContext || parsed.investorPortfolioContext || "",
       duquesne13fContext: parsed.duquesne13fContext || "",
       duquesne13fUpdatedAt: parsed.duquesne13fUpdatedAt || "",
+      muniPortfolioContext: parsed.muniPortfolioContext || "",
+      muniPortfolioUpdatedAt: parsed.muniPortfolioUpdatedAt || "",
+      muniPortfolioMessageId: parsed.muniPortfolioMessageId || "",
       institutionPortfolioContext: parsed.institutionPortfolioContext || "",
       institutionPortfolioUpdatedAt: parsed.institutionPortfolioUpdatedAt || "",
       institutionPortfolioMessageId: parsed.institutionPortfolioMessageId || "",
+      institutionPortfolioMessageIds: parsed.institutionPortfolioMessageIds || (parsed.institutionPortfolioMessageId ? [parsed.institutionPortfolioMessageId] : []),
       myPortfolioMessageId: parsed.myPortfolioMessageId || "",
       myPortfolioUpdatedAt: parsed.myPortfolioUpdatedAt || "",
       watchlist: parsed.watchlist || {},
@@ -249,8 +265,18 @@ function loadState() {
   }
 }
 
+function mergeStateChanges(current, baseline, latest) {
+  const merged = { ...latest };
+  for (const [key, value] of Object.entries(current)) {
+    if (JSON.stringify(value) !== JSON.stringify(baseline[key])) merged[key] = value;
+  }
+  return merged;
+}
+
 function saveState() {
-  const temporary = `${STATE_FILE}.tmp`;
+  state = mergeStateChanges(state, stateBaseline, loadState());
+  stateBaseline = structuredClone(state);
+  const temporary = `${STATE_FILE}.${process.pid}.tmp`;
   fs.writeFileSync(temporary, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
   fs.renameSync(temporary, STATE_FILE);
 }
@@ -278,6 +304,9 @@ function personaPrompt(persona, question) {
     `<shared-trading-context>\n${SHARED_TRADING_CONTEXT}\n</shared-trading-context>`,
     state.investorPortfolioContext
       ? `<investor-portfolio-context>\n${state.investorPortfolioContext}\n</investor-portfolio-context>`
+      : "",
+    state.muniPortfolioContext
+      ? `<muni-portfolio-context>\n${state.muniPortfolioContext}\n</muni-portfolio-context>`
       : "",
     state.institutionPortfolioContext
       ? `<institution-portfolio-context>\n${state.institutionPortfolioContext}\n</institution-portfolio-context>`
@@ -556,9 +585,27 @@ async function sendFormattedWebhook(channel, formatted, content = "") {
 async function editOrSend(channel, messageId, payload) {
   let message = null;
   if (messageId) {
-    try { message = await channel.messages.fetch(messageId); } catch {}
+    try { message = await channel.messages.fetch(messageId); }
+    catch (error) {
+      if (!shouldReplaceMissingDiscordMessage(error)) throw error;
+    }
   }
   return message ? message.edit(payload) : channel.send(payload);
+}
+
+function shouldReplaceMissingDiscordMessage(error) {
+  return error?.code === 10008;
+}
+
+async function editOrSendPages(channel, messageIds, payloads) {
+  const messages = [];
+  for (let index = 0; index < payloads.length; index += 1) {
+    messages.push(await editOrSend(channel, messageIds[index], payloads[index]));
+  }
+  for (const staleId of messageIds.slice(payloads.length)) {
+    try { await (await channel.messages.fetch(staleId)).delete(); } catch {}
+  }
+  return messages;
 }
 
 async function withTyping(channel, work) {
@@ -732,14 +779,14 @@ async function currentMarketContext(text) {
   ].filter(Boolean).join("\n\n");
 }
 
-async function runRoundtable(message, topic, {
+async function runGroupDiscussion(message, topic, {
   includeResearch = false,
   includeResearchImages = true,
   dedupeResearch = false,
   participants = PERSONAS,
 } = {}) {
   const version = conversationVersion(message.channel.id);
-  roundtableChannels.add(message.channel.id);
+  groupDiscussionChannels.add(message.channel.id);
   const marketContext = await currentMarketContext(topic);
   let research = { files: [], context: "", images: [] };
   if (includeResearch && process.env.RESEARCH_ENABLED === "true") {
@@ -767,7 +814,7 @@ async function runRoundtable(message, topic, {
         channel,
         () => runCodex(
           persona,
-          `라운드테이블 주제: ${topic}${marketContext ? `\n\n${marketContext}` : ""}${researchContext}${prior}${closing}`,
+          `공동 토론 주제: ${topic}${marketContext ? `\n\n${marketContext}` : ""}${researchContext}${prior}${closing}`,
           index === 0 ? researchImages : [],
           message.channel.id,
           version,
@@ -780,12 +827,12 @@ async function runRoundtable(message, topic, {
       lastResponderByChannel.set(message.channel.id, persona.id);
     } catch (error) {
       if (error.code === "CODEX_STOPPED") break;
-      console.error(`[roundtable:${persona.id}]`, error);
+      console.error(`[group-discussion:${persona.id}]`, error);
       await channel.send(`응답 실패: ${String(error.message).slice(0, 300)}`);
     }
     if (!client?.isReady()) break;
   }
-  roundtableChannels.delete(message.channel.id);
+  groupDiscussionChannels.delete(message.channel.id);
   if (statements.length) {
     for (const item of research.files.filter((file) => file.readable)) {
       state.reviewedResearch[item.id] = {
@@ -930,7 +977,7 @@ function formatWatchlist(items, updatedAt = new Date()) {
   const domestic = items.filter((item) => item.exchange === "KRX").sort((a, b) => a.ticker.localeCompare(b.ticker));
   const overseas = items.filter((item) => item.exchange !== "KRX").sort((a, b) => a.ticker.localeCompare(b.ticker));
   const lines = (group) => group.length
-    ? group.map((item) => `- ${item.name ? `${item.name} (${item.ticker})` : item.ticker}`)
+    ? group.map((item) => `- ${formatInstrumentLabel(item)}`)
     : ["- 없음"];
   const clock = zonedClock(updatedAt);
   return [
@@ -961,7 +1008,7 @@ function formatAlertRegistry(items, updatedAt = new Date()) {
   const domestic = items.filter((item) => item.exchange === "KRX").sort((a, b) => a.ticker.localeCompare(b.ticker));
   const overseas = items.filter((item) => item.exchange !== "KRX").sort((a, b) => a.ticker.localeCompare(b.ticker));
   const lines = (group) => group.length
-    ? group.map((item) => `- ${item.name ? `${item.name} (${item.ticker})` : item.ticker}`)
+    ? group.map((item) => `- ${formatInstrumentLabel(item)}`)
     : ["- 없음"];
   const clock = zonedClock(updatedAt, ALERTS_SYNC_TIMEZONE);
   return [
@@ -1065,7 +1112,9 @@ function seedAlertRegistry() {
 async function syncAlertRegistryMessage() {
   const channel = findTextChannelByName(ALERTS_CHANNEL);
   if (!channel) return false;
-  const chunks = splitDiscordText(formatAlertRegistry(Object.values(state.alertRegistry)));
+  const items = await enrichInstrumentNames(Object.values(state.alertRegistry));
+  state.alertRegistry = Object.fromEntries(items.map((item) => [`${item.exchange}:${item.ticker}`, item]));
+  const chunks = splitDiscordText(formatAlertRegistry(items));
   const previous = [];
   for (const id of state.alertRegistryMessageIds) {
     try { previous.push(await channel.messages.fetch(id)); } catch { previous.push(null); }
@@ -1087,10 +1136,11 @@ async function syncAlertRegistryMessage() {
 async function refreshAlertRegistry() {
   if (TRADINGVIEW_ALERT_WATCHLIST_URL) {
     const remote = await fetchSharedWatchlist(TRADINGVIEW_ALERT_WATCHLIST_URL);
-    state.alertRegistry = Object.fromEntries(remote.symbols.map((symbol) => {
+    const items = await enrichInstrumentNames(remote.symbols.map((symbol) => {
       const [exchange, ticker] = symbol.split(":");
-      return [symbol, { exchange, ticker, name: remote.names.get(symbol) || state.alertRegistry[symbol]?.name || "" }];
+      return { exchange, ticker, name: remote.names.get(symbol) || state.alertRegistry[symbol]?.name || "" };
     }));
+    state.alertRegistry = Object.fromEntries(items.map((item) => [`${item.exchange}:${item.ticker}`, item]));
   }
   return syncAlertRegistryMessage();
 }
@@ -1119,7 +1169,9 @@ function startAlertRegistryScheduler() {
 async function syncWatchlistMessage() {
   const channel = findTextChannelByName(WATCHLIST_CHANNEL);
   if (!channel) return;
-  const chunks = splitDiscordText(formatWatchlist(Object.values(state.watchlist)));
+  const items = await enrichInstrumentNames(Object.values(state.watchlist));
+  state.watchlist = Object.fromEntries(items.map((item) => [`${item.exchange}:${item.ticker}`, item]));
+  const chunks = splitDiscordText(formatWatchlist(items));
   const previousIds = state.watchlistMessageIds.length ? state.watchlistMessageIds : [state.watchlistMessageId].filter(Boolean);
   const previous = [];
   for (const id of previousIds) {
@@ -1140,12 +1192,11 @@ async function syncWatchlistMessage() {
 
 async function refreshSharedWatchlist() {
   const remote = await fetchSharedWatchlist();
-  const next = {};
-  for (const symbol of remote.symbols) {
+  const items = await enrichInstrumentNames(remote.symbols.map((symbol) => {
     const [exchange, ticker] = symbol.split(":");
-    next[symbol] = { exchange, ticker, name: state.watchlist[symbol]?.name || remote.names.get(symbol) || "" };
-  }
-  state.watchlist = next;
+    return { exchange, ticker, name: state.watchlist[symbol]?.name || remote.names.get(symbol) || "" };
+  }));
+  state.watchlist = Object.fromEntries(items.map((item) => [`${item.exchange}:${item.ticker}`, item]));
   saveState();
   await syncWatchlistMessage();
   return remote;
@@ -1178,9 +1229,9 @@ async function updateWatchlist(record) {
   const ticker = String(record.payload?.ticker || "").toUpperCase();
   if (!exchange || !ticker) return;
   const key = `${exchange}:${ticker}`;
-  const name = String(record.payload?.name || "").trim();
-  if (state.watchlist[key]?.name || (!name && state.watchlist[key])) return;
-  state.watchlist[key] = { exchange, ticker, name };
+  if (state.watchlist[key]?.koreanName && state.watchlist[key]?.englishName) return;
+  const [item] = await enrichInstrumentNames([{ ...state.watchlist[key], exchange, ticker, name: String(record.payload?.name || "").trim() }]);
+  state.watchlist[key] = item;
   saveState();
   await syncWatchlistMessage();
 }
@@ -1197,7 +1248,8 @@ async function appendDailyJournal(order) {
       ? `${fillPrice.toLocaleString("ko-KR")}원`
       : `$${fillPrice.toLocaleString("en-US", { maximumFractionDigits: 2 })}`
     : "체결가 미확인";
-  const identity = order.name ? `${order.name} (${order.symbol})` : order.symbol;
+  const [instrument] = await enrichInstrumentNames([{ exchange: order.market, ticker: order.symbol, name: order.name }]);
+  const identity = formatInstrumentLabel(instrument);
   const details = [order.signalType, order.conviction && `등급 ${order.conviction}`];
   if (Number.isFinite(order.stopPrice)) details.push(`SL ${order.stopPrice}`);
   const line = `- ${clock.time} · **${order.side}** · ${identity} · ${order.filledQuantity}주 @ ${price}${details.filter(Boolean).length ? ` · ${details.filter(Boolean).join(" · ")}` : ""}`;
@@ -1558,10 +1610,14 @@ async function syncMyPortfolioMessage() {
     getDomesticAccountSnapshot(),
     getUsAccountSnapshot(),
   ]);
+  const [domesticHoldings, overseasHoldings] = await Promise.all([
+    enrichInstrumentNames(domestic.holdingPositions.map((item) => ({ ...item, exchange: "KRX", ticker: item.code }))),
+    enrichInstrumentNames(overseas.holdingPositions.map((item) => ({ ...item, exchange: item.exchange || item.market || "NASDAQ", ticker: item.code }))),
+  ]);
   const updatedAt = new Date().toISOString();
   const message = await editOrSend(channel, state.myPortfolioMessageId, formatMyPortfolioMessage({
-    domestic,
-    overseas,
+    domestic: { ...domestic, holdingPositions: domesticHoldings },
+    overseas: { ...overseas, holdingPositions: overseasHoldings },
     environment: KIWOOM_ENV,
     updatedAt,
   }));
@@ -1685,7 +1741,7 @@ function tradingHelpText() {
       "`!trade resume` 신규 진입 신호 재개",
       "`!trade off` 매매 판단 중지",
       "계좌별 상태·최근 주문은 각 사용자 시스템 채널에서 `계좌 상태 보여줘`, `계좌 최근 주문 보여줘`",
-      "실계좌 주문은 지원하지 않습니다.",
+      "실계좌 주문 기능은 사용자별 계좌 실행기에 있으며, 별도 잠금을 해제하기 전에는 실행되지 않습니다.",
     ].join("\n");
   }
   return [
@@ -1699,7 +1755,7 @@ function tradingHelpText() {
     "`!trade resume` 신규 진입 재개",
     "`!trade off` 매매 판단 중지",
     `BUY 승인 대기 신호는 #${ORDER_APPROVAL_CHANNEL}에서 \`사줘 티커\``,
-    "실계좌 주문은 지원하지 않습니다.",
+    "실계좌 주문 기능은 사용자별 계좌 실행기에 있으며, 별도 잠금을 해제하기 전에는 실행되지 않습니다.",
   ].join("\n");
 }
 
@@ -1915,7 +1971,7 @@ async function runSignalReviewBatch(records) {
   const symbols = records.map((record) => `${record.payload.ticker} ${record.payload.action}`).join(", ");
   await channel.send(`🔭 **워치리스트 사전 검토 시작** — ${symbols}\n관찰 신호이며 주문 판단과는 분리됩니다.`);
   console.log(`AI 신호 검토 시작: ${symbols}`);
-  await runRoundtable({ channel }, buildSignalReviewTopic(records));
+  await runGroupDiscussion({ channel }, buildSignalReviewTopic(records));
   console.log(`AI 신호 검토 완료: ${symbols}`);
 }
 
@@ -1970,7 +2026,7 @@ async function checkScheduledBriefing(now = new Date(), forceTime = "") {
     const sourceContext = await briefingSourceContext(clock);
     delete state.sessions[sessionKey(PERSONAS[0].id, channel.id)];
     saveState();
-    const responses = await runRoundtable(
+    const responses = await runGroupDiscussion(
       { channel },
       `${scheduledTopic(clock.time)}\n\n${sourceContext.prompt}\n\n반드시 최신 웹 검색과 제공된 스냅샷을 함께 사용해 브리핑을 완성하세요. 확인되지 않은 수치를 추정하지 마세요.`,
       {
@@ -2041,20 +2097,29 @@ function investorPortfolioRefreshRequested(text) {
   return /(?:투자자|무니|기관).*(?:포트폴리오|포폴).*(?:갱신|업데이트|새로)/.test(text);
 }
 
-function investorPortfolioPrompt(researchContext, secContext) {
+function investorPortfolioPrompt(secContext) {
   return [
-    "투자 관점 AI가 공유할 최신 공개 포트폴리오·종목 언급 문맥을 작성하세요.",
-    "갱신 대상은 스탠리 드러켄밀러, 워런 버핏, 캐시 우드, 마이클 버리, 조지 소로스, 레오폴드 아셴브레너와 사용자 제공 자료의 무니입니다. 레이 달리오, 빌 애크먼, 윌리엄 오닐, 제시 리버모어, 마크 미너비니, 크리스티안 쿨라메기는 현재 공개 포트폴리오 대상에서 제외하세요.",
-    "드러켄밀러는 아래 Duquesne SEC 전체 13F 명세를 최우선 근거로 사용하세요. 그 밖에는 Berkshire Hathaway(CIK 1067983), ARK Investment Management(CIK 1697748), Scion Asset Management(CIK 1649339), Soros Fund Management(CIK 1029160), Situational Awareness LP(CIK 2045724)의 최신 SEC 13F-HR 정보표와 공식 자료만 사용하세요. 제출목록 페이지만 보고 멈추지 말고 최신 정보표 원문에서 상위 항목을 확인하세요.",
-    "각 인물은 최신 공식 공시의 상위 7개 종목을 공시가액 비중 내림차순으로 적고, 공시 항목이 7개보다 적으면 확인되는 만큼만 적으세요. 종목명·티커·비중은 한 줄에 표시하세요. 주식·콜·풋이 섞이면 유형을 구분하고 옵션 공시가액은 실제 투자원금이 아니라 기초자산 명목가일 수 있다고 짧게 밝히세요.",
+    "투자 관점 AI가 공유할 최신 공개 포트폴리오 문맥을 작성하세요.",
+    `갱신 대상은 ${INVESTOR_PORTFOLIO_PEOPLE.join(", ")}입니다. 레이 달리오, 빌 애크먼, 윌리엄 오닐, 제시 리버모어, 마크 미너비니, 크리스티안 쿨라메기는 현재 공개 포트폴리오 대상에서 제외하세요.`,
+    "드러켄밀러는 아래 Duquesne SEC 전체 13F 명세를 최우선 근거로 사용하세요. 그 밖에는 Berkshire Hathaway(CIK 1067983), ARK Investment Management(CIK 1697748), Scion Asset Management(CIK 1649339), Soros Fund Management(CIK 1029160), Situational Awareness LP(CIK 2045724), Thiel Macro LLC(CIK 1562087)의 최신 SEC 13F-HR 정보표와 공식 자료만 사용하세요. 제출목록 페이지만 보고 멈추지 말고 최신 정보표 원문에서 상위 항목을 확인하세요.",
+    "대화용 요약에는 각 인물의 최신 공식 공시에서 전체 포트폴리오 비중 1% 이상인 종목을 모두 공시가액 비중 내림차순으로 적으세요. 각 종목은 한국에서 통용되는 한글 회사명(티커) · 유형 · 비중 형식으로 한 줄에 표시하세요. 한글명이 확실하지 않으면 짧은 영문명(티커)을 사용하고 긴 법인명은 쓰지 마세요. 주식·콜·풋이 섞이면 유형을 구분하세요.",
+    "낸시 펠로시는 House Clerk의 최신 Periodic Transaction Report(https://disclosures-clerk.house.gov/public_disc/ptr-pdfs/2026/20034836.pdf)를 기준으로 배우자 거래임을 표시하고 종목·거래유형·금액범위·거래일을 적으세요. 도널드 트럼프는 OGE의 최신 연례 재산공개 안내(https://www2.oge.gov/web/oge.nsf/Resources/Now%2BAvailable:%2BThe%2BPresident%E2%80%99s%2Band%2BVice%2BPresident%E2%80%99s%2Bcertified%2Bannual%2Bfinancial%2Bdisclosure%2Breports)와 연결된 보고서를 기준으로 공개된 자산·가액범위만 적으세요. 두 공시는 13F가 아니므로 보유비중을 계산하거나 완전한 실시간 포트폴리오라고 표현하지 마세요.",
+    "피터 린치는 최신 공식 개인 포트폴리오가 확인되지 않으면 `최신 공식 공개 포트폴리오 확인 불가`로 표시하세요. 현재 피델리티·마젤란 펀드 보유 종목이나 과거 인터뷰 종목을 피터 린치 개인의 현재 보유로 바꾸지 마세요.",
     "운용사 공시를 개인의 실시간 보유로 표현하지 말고 보고일을 붙이세요. 13F는 지연된 미국 상장 롱·일부 옵션 공시이며 숏·현금·비상장 자산·공시 뒤 거래는 보여주지 않는다는 공통 한계는 상태판 맨 아래 한 번만 적으세요.",
-    "무니는 아래 사용자 제공 무니인사이트 채팅·자료에서 실제 매입·보유, 관심·긍정 언급, 단순 뉴스 언급을 구분하세요. 파일명에 무니가 없는 PDF는 무니 채팅에서 인용한 경우에만 무니 자료로 연결하세요.",
-    "무니는 최신 자료의 핵심 종목을 최대 5개만 적고, 출처에는 긴 파일명을 나열하지 말고 '최근 무니인사이트 자료 N건'처럼 자료 수와 최신 자료일만 짧게 적으세요.",
     "각 인물의 출처는 공식 링크 하나와 보고일만 60자 안팎으로 짧게 적고, 확인 불가하면 없다고 명시하세요. 현재 사실은 웹에서 다시 확인하세요.",
-    "표시는 각 인물의 이름·운용사를 굵은 제목 한 줄로 끝내고 빈 줄을 넣은 뒤, 그 아래에 종목을 한 줄에 하나씩 불릿으로 나열하세요. 인물 제목 뒤에 종목들을 문장으로 이어 붙이지 마세요.",
-    "Discord 상태판에 담을 수 있도록 4,000자 이내의 한국어 요약만 출력하세요.",
+    "대화용 요약은 각 인물의 한국어 이름만 굵은 제목 한 줄로 쓰고 빈 줄을 넣은 뒤, 그 아래에 종목을 한 줄에 하나씩 불릿으로 나열하세요. 제목에 영어 이름이나 운용사명을 붙이지 마세요.",
+    "인물별 구역은 Discord 메시지 한도인 4,000자 이내로 쓰세요. 1% 이상 종목만으로 한도를 넘는 인물은 비중이 낮은 종목부터 생략하고 끝에 생략 사실을 한 줄로 밝히세요.",
     secContext || "SEC 전체 13F 명세를 불러오지 못했습니다. 드러켄밀러의 특정 종목 보유 여부를 단정하지 마세요.",
-    researchContext || "사용자 제공 무니 자료를 읽지 못했습니다. 무니 항목은 확인 불가로 표시하세요.",
+  ].join("\n\n");
+}
+
+function muniPortfolioPrompt(researchContext) {
+  return [
+    "사용자 제공 무니인사이트 자료의 최신 종목 문맥만 한국어로 작성하세요.",
+    "실제 매입·보유, 관심·긍정 언급, 단순 뉴스 언급을 구분하고 핵심 종목은 최대 5개만 적으세요.",
+    "파일명에 무니가 없는 PDF는 무니 채팅에서 인용한 경우에만 연결하세요. 출처는 긴 파일명 대신 자료 수와 최신 자료일만 짧게 적으세요.",
+    "Discord 상태판에 담을 수 있도록 4,000자 이내로 출력하세요.",
+    researchContext || "최근 무니인사이트 자료를 읽지 못했습니다. 확인 불가로 표시하세요.",
   ].join("\n\n");
 }
 
@@ -2067,15 +2132,29 @@ async function checkInvestorPortfolioRefresh(now = new Date(), force = false) {
   );
   if (!force && !refreshDue) {
     const channel = findTextChannelByName(INVESTOR_PORTFOLIO_CHANNEL);
-    if (!channel || state.investorPortfolioMessageId || !state.investorPortfolioContext) return false;
-    const message = await editOrSend(channel, "", formatInvestorPortfolioMessage(
-      state.investorPortfolioContext,
-      state.investorPortfolioUpdatedAt,
-    ));
-    state.investorPortfolioMessageId = message.id;
-    state.investorPortfolioAnnouncedAt = state.investorPortfolioUpdatedAt;
+    if (!channel) return false;
+    let restored = false;
+    if (!state.investorPortfolioMessageIds.length && state.investorPortfolioDisplayContext) {
+      const messages = await editOrSendPages(channel, [], formatInvestorPortfolioMessages(
+        state.investorPortfolioDisplayContext,
+        state.investorPortfolioUpdatedAt,
+      ));
+      state.investorPortfolioMessageIds = messages.map((message) => message.id);
+      state.investorPortfolioMessageId = messages[0]?.id || "";
+      state.investorPortfolioAnnouncedAt = state.investorPortfolioUpdatedAt;
+      restored = true;
+    }
+    if (!state.muniPortfolioMessageId && state.muniPortfolioContext) {
+      const message = await editOrSend(channel, "", formatInvestorPortfolioMessage(
+        state.muniPortfolioContext,
+        state.muniPortfolioUpdatedAt,
+        "무니인사이트 포트폴리오",
+      ));
+      state.muniPortfolioMessageId = message.id;
+      restored = true;
+    }
     saveState();
-    return true;
+    return restored;
   }
 
   investorPortfolioRefreshInProgress = true;
@@ -2083,70 +2162,98 @@ async function checkInvestorPortfolioRefresh(now = new Date(), force = false) {
     const research = process.env.RESEARCH_ENABLED === "true"
       ? loadRecentResearch({ lookbackDays: 31, maxFiles: 100, maxPages: 8, maxChars: 30_000, maxImages: 0 })
       : { context: "", files: [] };
+    const investorManagers = [
+      { name: "스탠리 드러켄밀러", cik: 1536411 },
+      { name: "워런 버핏", cik: 1067983 },
+      { name: "캐시 우드", cik: 1697748 },
+      { name: "마이클 버리", cik: 1649339 },
+      { name: "조지 소로스", cik: 1029160 },
+      { name: "레오폴드 아셴브레너", cik: 2045724 },
+      { name: "피터 틸", cik: 1562087 },
+    ];
+    const managerFilings = await loadManager13fFilings(investorManagers, { userAgent: process.env.SEC_USER_AGENT });
     let secContext = state.duquesne13fContext;
+    const duquesne = managerFilings.find(({ manager }) => manager.cik === 1536411);
     try {
-      secContext = formatDuquesne13fContext(await loadLatestDuquesne13f({ userAgent: process.env.SEC_USER_AGENT }));
+      if (duquesne?.error) throw duquesne.error;
+      secContext = formatDuquesne13fContext(duquesne.filing);
       state.duquesne13fContext = secContext;
       state.duquesne13fUpdatedAt = new Date().toISOString();
     } catch (error) {
       console.error("Duquesne SEC 13F 전체 명세 갱신 실패:", error.message);
     }
-    const public13fContext = await loadManager13fContexts([
-      { name: "워런 버핏 · Berkshire Hathaway", cik: 1067983 },
-      { name: "캐시 우드 · ARK Investment Management", cik: 1697748 },
-      { name: "마이클 버리 · Scion Asset Management", cik: 1649339 },
-      { name: "조지 소로스 · Soros Fund Management", cik: 1029160 },
-      { name: "레오폴드 아셴브레너 · Situational Awareness LP", cik: 2045724 },
-    ], 7, { userAgent: process.env.SEC_USER_AGENT });
+    const public13fContext = formatManager13fContexts(managerFilings, Number.POSITIVE_INFINITY, 1);
     const key = sessionKey(PERSONAS[0].id, "investor-portfolio-refresh");
+    const muniKey = sessionKey(PERSONAS[0].id, "muni-portfolio-refresh");
     delete state.sessions[key];
+    delete state.sessions[muniKey];
     saveState();
     const answer = (await runCodex(
       PERSONAS[0],
-      investorPortfolioPrompt(research.context, [secContext, public13fContext].filter(Boolean).join("\n\n")),
+      investorPortfolioPrompt([secContext, public13fContext].filter(Boolean).join("\n\n")),
       [],
       "investor-portfolio-refresh",
     )).trim();
     if (!answer) throw new Error("투자자 포트폴리오 문맥이 비어 있습니다.");
+    const muniAnswer = (await runCodex(
+      PERSONAS[0],
+      muniPortfolioPrompt(research.context),
+      [],
+      "muni-portfolio-refresh",
+    )).trim();
+    if (!muniAnswer) throw new Error("무니 포트폴리오 문맥이 비어 있습니다.");
     const institutionHoldings = await loadManager13fContexts([
-      { name: "Citadel Advisors", cik: 1423053 },
-      { name: "BlackRock", cik: 2012383 },
-      { name: "Vanguard Group", cik: 102909 },
-      { name: "State Street", cik: 93751 },
-      { name: "FMR · Fidelity", cik: 315066 },
-      { name: "Capital Research Global Investors", cik: 1422848 },
-      { name: "JPMorgan Chase", cik: 19617 },
-      { name: "Goldman Sachs", cik: 886982 },
-      { name: "Morgan Stanley", cik: 895421 },
-      { name: "Renaissance Technologies", cik: 1037389 },
-    ], 4, { userAgent: process.env.SEC_USER_AGENT });
+      { name: "시타델 어드바이저스 / Citadel Advisors", cik: 1423053 },
+      { name: "블랙록 / BlackRock", cik: 2012383 },
+      { name: "뱅가드 그룹 / Vanguard Group", cik: 102909 },
+      { name: "스테이트 스트리트 / State Street", cik: 93751 },
+      { name: "피델리티 / FMR", cik: 315066 },
+      { name: "캐피털 리서치 글로벌 인베스터스 / Capital Research Global Investors", cik: 1422848 },
+      { name: "JP모건 체이스 / JPMorgan Chase", cik: 19617 },
+      { name: "골드만삭스 / Goldman Sachs", cik: 886982 },
+      { name: "모건스탠리 / Morgan Stanley", cik: 895421 },
+      { name: "르네상스 테크놀로지스 / Renaissance Technologies", cik: 1037389 },
+    ], Number.POSITIVE_INFINITY, { userAgent: process.env.SEC_USER_AGENT, minimumWeight: 1 });
     const institutionAnswer = `${institutionHoldings}\n\n13F는 지연 공시이며 숏·현금·비상장·공시 후 거래를 보여주지 않습니다. 지수·고객자산·수탁·마켓메이킹·헤지 목적 보유는 기관의 확신 매수로 해석하면 안 됩니다.`.trim();
     if (!institutionAnswer) throw new Error("기관 포트폴리오 문맥이 비어 있습니다.");
     state.investorPortfolioContext = answer;
+    state.investorPortfolioDisplayContext = answer;
     state.investorPortfolioUpdatedAt = new Date().toISOString();
+    state.muniPortfolioContext = muniAnswer;
+    state.muniPortfolioUpdatedAt = state.investorPortfolioUpdatedAt;
     state.institutionPortfolioContext = institutionAnswer;
     state.institutionPortfolioUpdatedAt = state.investorPortfolioUpdatedAt;
     state.investorPortfolioSourceMtime = Math.max(0, ...research.files.map((item) => item.mtimeMs || 0));
     delete state.sessions[key];
+    delete state.sessions[muniKey];
     saveState();
     const channel = findTextChannelByName(INVESTOR_PORTFOLIO_CHANNEL);
     if (channel) {
-      const message = await editOrSend(channel, state.investorPortfolioMessageId, formatInvestorPortfolioMessage(
+      const messages = await editOrSendPages(channel, state.investorPortfolioMessageIds, formatInvestorPortfolioMessages(
         answer,
         state.investorPortfolioUpdatedAt,
       ));
-      state.investorPortfolioMessageId = message.id;
+      state.investorPortfolioMessageIds = messages.map((message) => message.id);
+      state.investorPortfolioMessageId = messages[0]?.id || "";
       state.investorPortfolioAnnouncedAt = state.investorPortfolioUpdatedAt;
+      saveState();
+      const muniMessage = await editOrSend(channel, state.muniPortfolioMessageId, formatInvestorPortfolioMessage(
+        muniAnswer,
+        state.muniPortfolioUpdatedAt,
+        "무니인사이트 포트폴리오",
+      ));
+      state.muniPortfolioMessageId = muniMessage.id;
       saveState();
     }
     const institutionChannel = findTextChannelByName(INSTITUTION_PORTFOLIO_CHANNEL);
     if (institutionChannel) {
-      const message = await editOrSend(
+      const messages = await editOrSendPages(
         institutionChannel,
-        state.institutionPortfolioMessageId,
-        formatInvestorPortfolioMessage(institutionAnswer, state.institutionPortfolioUpdatedAt, "주요 기관 공개 포트폴리오"),
+        state.institutionPortfolioMessageIds,
+        formatInvestorPortfolioMessages(institutionAnswer, state.institutionPortfolioUpdatedAt, "주요 기관 공개 포트폴리오"),
       );
-      state.institutionPortfolioMessageId = message.id;
+      state.institutionPortfolioMessageIds = messages.map((message) => message.id);
+      state.institutionPortfolioMessageId = messages[0]?.id || "";
       saveState();
     }
     return true;
@@ -2232,7 +2339,7 @@ async function handleMessage(persona, client, message, edited = false) {
   if (!fromOwner && !peerPersona) return;
 
   if (peerPersona) {
-    if (edited || pausedPeerChannels.has(message.channel.id) || roundtableChannels.has(message.channel.id) || !message.mentions.has(client.user)) return;
+    if (edited || pausedPeerChannels.has(message.channel.id) || groupDiscussionChannels.has(message.channel.id) || !message.mentions.has(client.user)) return;
     const relayCount = botRelayCount.get(message.channel.id) || 0;
     if (relayCount >= 1) return;
     botRelayCount.set(message.channel.id, relayCount + 1);
@@ -2272,7 +2379,7 @@ async function handleMessage(persona, client, message, edited = false) {
 
   if (investorPortfolioRefreshRequested(content)) {
     if (persona.id === PERSONAS[0].id) {
-      await message.reply("무니 제공 자료와 생존 투자자의 최신 공개 자료를 다시 확인합니다.");
+      await message.reply("공개 투자자 자료와 무니인사이트 자료를 별도 상태판으로 갱신합니다.");
       const refreshed = await checkInvestorPortfolioRefresh(new Date(), true);
       if (!refreshed) await message.reply("투자자 포트폴리오 갱신이 이미 진행 중입니다.");
     }
@@ -2290,9 +2397,9 @@ async function handleMessage(persona, client, message, edited = false) {
     return;
   }
 
-  if (callsEveryone(content) || isRoundtableRequest(content)) {
+  if (callsEveryone(content) || isGroupDiscussionRequest(content)) {
     if (persona.id === PERSONAS[0].id) {
-      const topic = isRoundtableRequest(content) ? extractRoundtableTopic(content) : content;
+      const topic = resolveGroupDiscussionTopic(content, await recentChannelContext(message));
       if (!topic) await message.reply("토론할 주제를 같이 적어주세요.");
       else {
         let lookupTopic = topic;
@@ -2301,8 +2408,8 @@ async function handleMessage(persona, client, message, edited = false) {
           catch { /* 삭제되었거나 접근할 수 없는 답장 대상은 무시한다. */ }
         }
         const sharedAlerts = alertRegistryContext(topic);
-        const roundtableTopic = [edited ? `[수정된 주제] ${lookupTopic}` : lookupTopic, sharedAlerts].filter(Boolean).join("\n\n");
-        await runRoundtable(message, roundtableTopic, { includeResearch: true });
+        const discussionTopic = [edited ? `[수정된 주제] ${lookupTopic}` : lookupTopic, sharedAlerts].filter(Boolean).join("\n\n");
+        await runGroupDiscussion(message, discussionTopic, { includeResearch: true });
       }
     }
     return;
@@ -2487,6 +2594,18 @@ function selfTest() {
   if (sharedContextPrompts.some((prompt) => (prompt.match(/<shared-trading-context>/g) || []).length !== 1 || !prompt.includes("</shared-trading-context>"))) throw new Error("공통 매매 기준 주입 실패");
   if (!investorPortfolioRefreshRequested("투자자 포폴 새로 갱신해줘")
       || investorPortfolioRefreshRequested("오늘 포트폴리오 어때?")) throw new Error("투자자 포폴 갱신 요청 식별 실패");
+  if (!INVESTOR_PORTFOLIO_PEOPLE.includes("피터 린치")) throw new Error("피터 린치 주요 인사 설정 실패");
+  if (!shouldReplaceMissingDiscordMessage({ code: 10008 })
+      || shouldReplaceMissingDiscordMessage(new Error("일시 조회 실패"))) throw new Error("Discord 상태판 중복 생성 차단 실패");
+  const baseline = { sessions: {}, investorPortfolioMessageIds: [] };
+  const merged = mergeStateChanges(
+    { sessions: { druckenmiller: "session-1" }, investorPortfolioMessageIds: [] },
+    baseline,
+    { sessions: {}, investorPortfolioMessageIds: ["message-1"] },
+  );
+  if (merged.sessions.druckenmiller !== "session-1"
+      || merged.investorPortfolioMessageIds[0] !== "message-1") throw new Error("동시 state 저장 병합 실패");
+  if (!("muniPortfolioContext" in state) || !("muniPortfolioMessageId" in state)) throw new Error("무니 포트폴리오 별도 상태 실패");
   const originalInvestorContext = state.investorPortfolioContext;
   state.investorPortfolioContext = "검증용 문맥";
   const investorPrompts = PERSONAS.map((persona) => personaPrompt(persona, "테스트"));
@@ -2520,7 +2639,7 @@ function selfTest() {
   const journal = defaultResponder({ id: "message-4", channel: { id: "channel-3", name: "매매일지" } });
   if (briefing !== "druckenmiller" || journal !== "druckenmiller") throw new Error("채널 기본 응답자 실패");
   if (PERSONAS[0].id !== "druckenmiller") throw new Error("자동 브리핑 담당자 실패");
-  if (!tradingHelpText().includes("!trade status")) throw new Error("자동매매 도움말 실패");
+  if (!tradingHelpText().includes("!trade status") || !tradingHelpText().includes("실계좌 주문 기능은 사용자별 계좌 실행기에 있으며, 별도 잠금을 해제하기 전에는 실행되지 않습니다.")) throw new Error("자동매매 도움말 실패");
   const clock = zonedClock(new Date("2026-08-07T23:30:00.000Z"));
   if (clock.date !== "2026-08-08" || clock.time !== "08:30" || clock.weekday !== "Sat") throw new Error("자동 브리핑 시간대 계산 실패");
   if (!scheduledTopic("08:30").includes("장전 브리핑")) throw new Error("자동 브리핑 주제 선택 실패");
@@ -2575,12 +2694,17 @@ function selfTest() {
 
 if (process.argv.includes("--self-test")) selfTest();
 else if (process.argv.includes("--refresh-investor-portfolios")) {
-  checkInvestorPortfolioRefresh(new Date(), true)
+  const persona = PERSONAS[0];
+  const client = new Client({ intents: [GatewayIntentBits.Guilds] });
+  clients.set(persona.id, client);
+  client.login(process.env[persona.tokenEnv])
+    .then(() => checkInvestorPortfolioRefresh(new Date(), true))
     .then((refreshed) => console.log(refreshed ? "투자자 포트폴리오 갱신 완료" : "투자자 포트폴리오 갱신 비활성"))
     .catch((error) => {
       console.error(error.message);
       process.exitCode = 1;
-    });
+    })
+    .finally(() => client.destroy());
 } else main().catch((error) => {
   console.error(error.message);
   process.exitCode = 1;

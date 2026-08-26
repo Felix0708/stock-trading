@@ -1,6 +1,102 @@
 "use strict";
 
 const EMBED_DESCRIPTION_LIMIT = 4_096;
+const instrumentNameCache = new Map();
+const KNOWN_13F_INSTRUMENTS = {
+  "02079K107": { ticker: "GOOG", koreanName: "알파벳 클래스 C", englishName: "Alphabet Class C" },
+  "02079K305": { ticker: "GOOGL", koreanName: "알파벳", englishName: "Alphabet Class A" },
+  "02079K602": { koreanName: "알파벳 클래스 B 예탁주", englishName: "Alphabet Depositary Shares Class B" },
+  "023135106": { ticker: "AMZN", koreanName: "아마존", englishName: "Amazon" },
+  "037833100": { ticker: "AAPL", koreanName: "애플", englishName: "Apple" },
+  "11135F101": { ticker: "AVGO", koreanName: "브로드컴", englishName: "Broadcom" },
+  "30303M102": { ticker: "META", koreanName: "메타 플랫폼스", englishName: "Meta Platforms" },
+  "458140100": { ticker: "INTC", koreanName: "인텔", englishName: "Intel" },
+  "46090E103": { ticker: "QQQ", koreanName: "인베스코 QQQ", englishName: "Invesco QQQ" },
+  "464287572": { ticker: "IOO", koreanName: "아이셰어즈 글로벌 100 ETF", englishName: "iShares Global 100 ETF" },
+  "594918104": { ticker: "MSFT", koreanName: "마이크로소프트", englishName: "Microsoft" },
+  "67066G104": { ticker: "NVDA", koreanName: "엔비디아", englishName: "NVIDIA" },
+  "78462F103": { ticker: "SPY", koreanName: "SPDR S&P 500 ETF", englishName: "SPDR S&P 500 ETF Trust" },
+  "81141R100": { ticker: "SE", koreanName: "씨", englishName: "Sea Limited" },
+  "91307C102": { ticker: "UTHR", koreanName: "유나이티드 테라퓨틱스", englishName: "United Therapeutics" },
+};
+
+function formatInstrumentLabel({ ticker, name, koreanName, englishName } = {}) {
+  const fallback = String(name || "").trim();
+  const korean = String(koreanName || (/[가-힣]/.test(fallback) ? fallback : "")).trim();
+  const english = String(englishName || (!/[가-힣]/.test(fallback) ? fallback : "")).trim();
+  const names = [...new Set([korean, english].filter(Boolean))];
+  const symbol = String(ticker || "").trim();
+  return `${names.join(" / ")}${names.length && symbol ? " " : ""}${symbol ? `(${symbol})` : ""}` || "종목명 미확인";
+}
+
+function exchangeCode(value) {
+  const exchange = String(value || "").toUpperCase();
+  if (["KRX", "KOSPI", "KOSDAQ"].includes(exchange)) return "KRX";
+  if (["NASDAQ", "NASD", "ND"].includes(exchange)) return "NASDAQ";
+  if (["NYSE", "NY"].includes(exchange)) return "NYSE";
+  if (["AMEX", "ARCA", "NYSEARCA", "NA"].includes(exchange)) return "AMEX";
+  return exchange;
+}
+
+async function enrichInstrumentNames(items, { fetchImpl = fetch } = {}) {
+  const rows = items.map((item) => {
+    const name = String(item.name || "").trim();
+    return {
+      ...item,
+      exchange: String(item.exchange || "").toUpperCase(),
+      ticker: String(item.ticker || item.code || "").replace(/^A(?=\d{6}$)/, "").toUpperCase(),
+      koreanName: String(item.koreanName || (/[가-힣]/.test(name) ? name : "")).trim(),
+      englishName: String(item.englishName || (name && !/[가-힣]/.test(name) ? name : "")).trim(),
+    };
+  });
+  const missing = [...new Map(rows
+    .filter((item) => item.ticker && (!item.koreanName || !item.englishName))
+    .map((item) => [`${item.exchange}:${item.ticker}`, item])).values()]
+    .filter((item) => {
+      const cached = instrumentNameCache.get(`${item.exchange}:${item.ticker}`) || {};
+      return (!item.koreanName && !cached.koreanName) || (!item.englishName && !cached.englishName);
+    });
+
+  if (missing.length) {
+    try {
+      const symbols = missing.map((item) => `${item.exchange}:${item.ticker}`);
+      const response = await fetchImpl("https://scanner.tradingview.com/global/scan", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ symbols: { tickers: symbols, query: { types: [] } }, columns: ["description"] }),
+        signal: AbortSignal.timeout(5_000),
+      });
+      if (response.ok) {
+        for (const item of (await response.json()).data || []) {
+          instrumentNameCache.set(item.s, { englishName: String(item.d?.[0] || "").trim() });
+        }
+      }
+    } catch { /* 이름 보완 실패는 목록·주문 기록을 막지 않는다. */ }
+
+    for (let index = 0; index < missing.length; index += 8) {
+      await Promise.all(missing.slice(index, index + 8).map(async (item) => {
+        const key = `${item.exchange}:${item.ticker}`;
+        const market = exchangeCode(item.exchange);
+        const suffix = market === "NASDAQ" ? ".O" : market === "NYSE" ? ".K" : market === "AMEX" ? ".A" : "";
+        const url = market === "KRX"
+          ? `https://m.stock.naver.com/api/stock/${item.ticker}/basic`
+          : `https://api.stock.naver.com/stock/${item.ticker}${suffix}/basic`;
+        try {
+          const response = await fetchImpl(url, { signal: AbortSignal.timeout(5_000) });
+          if (!response.ok) return;
+          const data = await response.json();
+          instrumentNameCache.set(key, {
+            ...instrumentNameCache.get(key),
+            koreanName: String(data.stockName || "").trim(),
+            englishName: String(data.stockNameEng || instrumentNameCache.get(key)?.englishName || "").trim(),
+          });
+        } catch { /* 다음 갱신에서 다시 시도한다. */ }
+      }));
+    }
+  }
+
+  return rows.map((item) => ({ ...item, ...instrumentNameCache.get(`${item.exchange}:${item.ticker}`) }));
+}
 
 function shouldRefreshInvestorPortfolio(updatedAt, now, refreshDays) {
   const previous = Date.parse(updatedAt || "") || 0;
@@ -77,7 +173,7 @@ function loadLatestDuquesne13f(options = {}) {
   return loadLatest13f({ cik: 1536411, ...options });
 }
 
-function topHoldings(filing, limit) {
+function topHoldings(filing, limit, minimumWeight = 0) {
   const total = filing.holdings.reduce((sum, item) => sum + item.valueThousands, 0);
   const merged = new Map();
   for (const holding of filing.holdings) {
@@ -90,12 +186,13 @@ function topHoldings(filing, limit) {
       : holding);
   }
   return [...merged.values()]
+    .map((holding) => ({ ...holding, weight: total > 0 ? holding.valueThousands / total * 100 : 0 }))
+    .filter((holding) => holding.weight >= minimumWeight)
     .toSorted((a, b) => b.valueThousands - a.valueThousands)
-    .slice(0, limit)
-    .map((holding) => ({ ...holding, weight: total > 0 ? holding.valueThousands / total * 100 : 0 }));
+    .slice(0, limit);
 }
 
-async function loadManager13fContexts(managers, limit, options = {}) {
+async function loadManager13fFilings(managers, options = {}) {
   const filings = [];
   for (const manager of managers) {
     try {
@@ -104,11 +201,16 @@ async function loadManager13fContexts(managers, limit, options = {}) {
       filings.push({ manager, error });
     }
   }
+  return filings;
+}
+
+function formatManager13fContexts(filings, limit = Number.POSITIVE_INFINITY, minimumWeight = 0) {
   return filings.map(({ manager, filing, error }) => {
     if (error) return `**${manager.name}**\n\n- SEC 13F 원문 확인 실패: ${error.message}`;
-    const holdings = topHoldings(filing, limit).map((holding) => {
+    const holdings = topHoldings(filing, limit, minimumWeight).map((holding) => {
       const type = holding.putCall || holding.title || "주식";
-      return `- ${holding.issuer} · ${type} · ${holding.weight.toFixed(1)}%`;
+      const instrument = KNOWN_13F_INSTRUMENTS[holding.cusip.toUpperCase()];
+      return `- ${formatInstrumentLabel(instrument || { name: holding.issuer, ticker: holding.cusip })} · ${type} · ${holding.weight.toFixed(1)}%`;
     });
     return [
       `**${manager.name}**`,
@@ -117,6 +219,14 @@ async function loadManager13fContexts(managers, limit, options = {}) {
       `- 출처: [SEC 13F](${filing.sourceUrl}) · 보고일 ${filing.reportDate}`,
     ].join("\n");
   }).join("\n\n");
+}
+
+async function loadManager13fContexts(managers, limit, options = {}) {
+  return formatManager13fContexts(
+    await loadManager13fFilings(managers, options),
+    limit,
+    Number(options.minimumWeight) || 0,
+  );
 }
 
 function formatDuquesne13fContext(filing) {
@@ -155,6 +265,34 @@ function formatInvestorPortfolioMessage(context, updatedAt, title = "주요인�
   };
 }
 
+function formatInvestorPortfolioMessages(context, updatedAt, title = "주요인사 공개 포트폴리오") {
+  const sections = String(context || "").trim().split(/\n{2}(?=\*\*[^*\n]+\*\*\n)/).filter(Boolean);
+  const pages = [];
+  for (const section of sections) {
+    const lines = section.split("\n");
+    const heading = lines[0].match(/^\*\*([^*\n]+)\*\*$/)?.[1] || "";
+    if (!heading && sections.length > 1) continue;
+    if (heading) lines.shift();
+    const pageTitle = heading || title;
+    let page = "";
+    const omission = "- 메시지 한도로 비중 하위 종목 생략";
+    for (const line of lines) {
+      const next = `${page}${page ? "\n" : ""}${line}`;
+      if (next.length > EMBED_DESCRIPTION_LIMIT - omission.length - 2) {
+        page = `${page.trim()}\n\n${omission}`;
+        break;
+      }
+      page = next;
+    }
+    if (page.trim()) pages.push({ title: pageTitle, description: page.trim() });
+  }
+  return pages.map((page) => formatInvestorPortfolioMessage(
+    page.description,
+    updatedAt,
+    page.title,
+  ));
+}
+
 function money(value, currency) {
   const amount = Math.abs(Number(value) || 0);
   return currency === "KRW"
@@ -170,37 +308,48 @@ function holdingLines(account, currency) {
     const ratio = Number.isFinite(holding.positionRatio)
       ? holding.positionRatio
       : account.equity > 0 ? holding.evaluationAmount / account.equity * 100 : 0;
-    return `**${holding.name || code} (${code})**\n${holding.quantity}주 · ${money(holding.evaluationAmount, currency)} · ${ratio.toFixed(1)}%`;
+    return `**${formatInstrumentLabel({ ...holding, ticker: code })}**\n${holding.quantity}주 · ${money(holding.evaluationAmount, currency)} · ${ratio.toFixed(1)}%`;
   });
 }
 
-function formatMyPortfolioMessage({ domestic, overseas, environment, updatedAt }) {
-  const description = [
-    `**국내주식 · ${domestic?.holdingPositions?.length || 0}종목**`,
+function formatMyPortfolioMessage({ accounts, domestic, overseas, environment, updatedAt }) {
+  const connected = accounts?.length ? accounts : [{ label: "키움", domestic, overseas, environment }];
+  const description = connected.flatMap((account, index) => [
+    ...(index ? [""] : []),
+    `**${account.label} ${account.environment === "mock" ? "모의계좌" : "실계좌"}**`,
     "",
-    ...holdingLines(domestic, "KRW"),
+    `**국내주식 · ${account.domestic?.holdingPositions?.length || 0}종목**`,
     "",
-    `**미국주식 · ${overseas?.holdingPositions?.length || 0}종목**`,
+    ...holdingLines(account.domestic, "KRW"),
     "",
-    ...holdingLines(overseas, "USD"),
-  ].join("\n");
+    `**미국주식 · ${account.overseas?.holdingPositions?.length || 0}종목**`,
+    "",
+    ...holdingLines(account.overseas, "USD"),
+  ]).join("\n");
+  const labels = connected.map((account) => account.label).join("·");
+  const accountKind = connected.every((account) => account.environment === "mock") ? "모의계좌" : "계좌";
   return {
     embeds: [{
       color: 0x2f9e74,
       title: "나의 포트폴리오",
       description: clipDescription(description),
-      footer: { text: `연결된 키움 ${environment === "mock" ? "모의계좌" : "계좌"} 기준 · ${String(updatedAt || "").slice(0, 16).replace("T", " ")} UTC` },
+      footer: { text: `연결된 ${labels} ${accountKind} 기준 · ${String(updatedAt || "").slice(0, 16).replace("T", " ")} UTC` },
     }],
     allowedMentions: { parse: [] },
   };
 }
 
 module.exports = {
+  enrichInstrumentNames,
   formatDuquesne13fContext,
   formatInvestorPortfolioMessage,
+  formatInvestorPortfolioMessages,
+  formatInstrumentLabel,
+  formatManager13fContexts,
   formatMyPortfolioMessage,
   loadLatest13f,
   loadLatestDuquesne13f,
+  loadManager13fFilings,
   loadManager13fContexts,
   parse13fInformationTable,
   shouldRefreshInvestorPortfolio,

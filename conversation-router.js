@@ -16,17 +16,25 @@ function isStopRequest(content) {
   return ["그만", "그만해", "멈춰", "대화그만", "토론그만", "여기까지", "!stop", "!중지"].includes(normalize(content));
 }
 
-function isRoundtableRequest(content) {
+function isGroupDiscussionRequest(content) {
   const text = String(content || "").trim();
-  return /^!roundtable(?:\s|$)/i.test(text) || /(?:같이\s*)?토론(?:해\s*줘|하자)[.!?]*$/i.test(text);
+  return /(?:같이\s*)?토론(?:해\s*(?:줘|봐)|하자)[.!?]*$/i.test(text);
 }
 
-function extractRoundtableTopic(content) {
+function extractGroupDiscussionTopic(content) {
   return String(content || "")
     .trim()
-    .replace(/^!roundtable\s*/i, "")
-    .replace(/(?:같이\s*)?토론(?:해\s*줘|하자)[.!?]*$/i, "")
+    .replace(/(?:같이\s*)?토론(?:해\s*(?:줘|봐)|하자)[.!?]*$/i, "")
     .trim();
+}
+
+function resolveGroupDiscussionTopic(content, recentContext = "") {
+  const topic = isGroupDiscussionRequest(content)
+    ? extractGroupDiscussionTopic(content)
+    : String(content || "").trim();
+  const contextualFollowUp = /^(?:모두(?:들)?|다들|여러분|전부)(?:의)?(?:생각|의견)(?:이)?(?:궁금해|궁금하다|궁금합니다|알려줘|말해줘|어때)$/.test(normalize(content));
+  if (!contextualFollowUp || !String(recentContext).trim()) return topic;
+  return `최근 Discord 채널 대화:\n${String(recentContext).trim()}\n\n현재 요청:\n${topic}\n\n직전 대화의 주제를 이어서 답하세요. 새 주제로 바꾸지 마세요.`;
 }
 
 function isResetRequest(content) {
@@ -78,13 +86,14 @@ function pickResponder({ content, fixedPersonaId = "", lastPersonaId = "", perso
 }
 
 module.exports = {
-  extractRoundtableTopic,
+  extractGroupDiscussionTopic,
   isAccountExecutorRequest,
   isHelpRequest,
   isResetRequest,
-  isRoundtableRequest,
+  isGroupDiscussionRequest,
   isStopRequest,
   naturalTradeCommand,
   pickResponder,
+  resolveGroupDiscussionTopic,
   sessionKey,
 };

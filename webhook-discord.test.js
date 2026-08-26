@@ -1,10 +1,13 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const { decodeSignalEmbed, encodeSignalEnvelope, TRANSPORT_URL_PREFIX } = require("./discord-signal-envelope");
 const {
   formatBrokerStartup,
   formatBuyApproval,
   formatDailyJournal,
+  formatDeferredBuy,
+  formatExecutorError,
   formatOrderStatus,
   formatWebhookRecord,
   targetSignalChannels,
@@ -39,7 +42,11 @@ assert(normal.embed.description.includes("삼성전자 (005930)"));
 assert(normal.embed.description.includes("80,000원 · SL 77,500원 · R/R 2.2"));
 assert(normal.embed.fields.some((field) => field.name === "AI 평가" && field.value === "상승 추세"));
 assert(normal.embed.fields.some((field) => field.name === "자동매매" && field.value.includes("PAPER_ENTRY")));
-assert(normal.embed.footer.text.startsWith("LAZY_SIGNAL_V1:"));
+assert.equal(normal.embed.footer, undefined);
+assert.equal(normal.embed.author.name, "자동주문 연동");
+assert(normal.embed.author.url.startsWith(TRANSPORT_URL_PREFIX));
+assert.equal(decodeSignalEmbed(normal.embed).requestId, base.requestId);
+assert.equal(decodeSignalEmbed({ footer: { text: encodeSignalEnvelope(base) } }).requestId, base.requestId);
 assert.equal(normal.embed.timestamp, undefined);
 
 const observationRecord = {
@@ -136,7 +143,8 @@ assert.equal(clipped.embed.fields.find((field) => field.name === "AI 평가").va
 assert([
   clipped.embed.title,
   clipped.embed.description,
-  clipped.embed.footer.text,
+  clipped.embed.author.name,
+  clipped.embed.author.url,
   ...clipped.embed.fields.flatMap((field) => [field.name, field.value]),
 ].reduce((sum, value) => sum + value.length, 0) <= 6_000);
 
@@ -146,12 +154,17 @@ assert(duplicate.text.includes("중복 신호 무시"));
 
 const rejected = formatWebhookRecord({
   ...base,
+  payload: { ...base.payload, ai_summary: "원본 상세값" },
   validation: { ok: false, errors: ["필수 필드 누락: ticker"] },
   outcome: { decision: "REJECTED_INVALID", orderCreated: false, warnings: [] },
 });
 assert.equal(rejected.channel, "system");
 assert(rejected.text.includes("웹훅 차단"));
 assert(rejected.text.includes("필수 필드 누락"));
+assert.equal(rejected.text.split("\n").length, 5);
+assert.equal(rejected.text.includes("TradingView 원본 지표 전체값"), false);
+assert.equal(rejected.text.includes("원본 상세값"), false);
+assert.equal(rejected.text.includes("request_id"), false);
 
 const order = formatOrderStatus({
   orderNo: "000000282", symbol: "AAPL", name: "Apple Inc.", side: "BUY", status: "PARTIALLY_FILLED",
@@ -185,5 +198,11 @@ assert.equal(
   formatBrokerStartup("공통 신호 서버", "드러켄밀러#2229", "TradingView 웹훅 수신 · 계좌 중립 신호 전달"),
   "✅ 공통 신호 서버 연결 · 드러켄밀러#2229\nTradingView 웹훅 수신 · 계좌 중립 신호 전달 · 실계좌 차단",
 );
+assert.equal(formatBrokerStartup("계좌 실행기", "봇#1", "키움 모의", "실계좌 지원 · 현재 잠금"), "✅ 계좌 실행기 연결 · 봇#1\n키움 모의 · 실계좌 지원 · 현재 잠금");
+const deferredBuy = formatDeferredBuy(base, "한투", "mock");
+assert.equal(deferredBuy.event, "DEFERRED_BUY");
+assert.equal(deferredBuy.text.includes("청산 실패"), false);
+assert(formatDeferredBuy({ ...base, payload: { ...base.payload, exchange: "KRX" } }, "키움", "mock").text.includes("국내 모의 매수 예약"));
+assert.equal(formatExecutorError("한투 예약 매수 재시도 실패", new Error("장 종료"), base).event, "EXECUTOR_ERROR");
 
 console.log("webhook-discord test OK");

@@ -1,6 +1,6 @@
 "use strict";
 
-const { encodeSignalEnvelope } = require("./discord-signal-envelope");
+const { encodeSignalEnvelope, TRANSPORT_URL_PREFIX } = require("./discord-signal-envelope");
 
 const DECISION_LABELS = {
   ENTRY_CANDIDATE: "진입 검토",
@@ -91,6 +91,7 @@ function signalEmbed(record, identity, orderLine) {
   const sizing = preview?.available && !preview.blocked
     ? `\n수량 ${display(preview.quantity)}주 · 예상 ${money(preview.positionValue, preview.currency)}`
     : preview?.blocked ? `\n수량 차단 · ${display(preview.reason)}` : "";
+  const envelope = encodeSignalEnvelope(record);
   const fields = [
     { name: "상태", value: clip(status, 512) },
     { name: "AI 평가", value: clip(payload.ai_summary, 1024) },
@@ -112,7 +113,7 @@ function signalEmbed(record, identity, orderLine) {
       `${signalPrice(payload.price, payload.exchange)} · SL ${signalPrice(payload.sl, payload.exchange)} · R/R ${display(payload.rr)}`,
     ].join("\n"), 1024),
     fields,
-    footer: { text: encodeSignalEnvelope(record) || "Lazy Alpha" },
+    ...(envelope ? { author: { name: "자동주문 연동", url: `${TRANSPORT_URL_PREFIX}${envelope}` } } : {}),
     ...(record.receivedAt ? { timestamp: record.receivedAt } : {}),
   };
 }
@@ -152,7 +153,7 @@ function formatWebhookRecord(record) {
       : `**주문**: 🛑 ${display(record.orderAttempt.status)} — ${display(record.orderAttempt.reason)}`;
 
   if (!record.validation?.ok || outcome.decision === "REJECTED_INVALID" || outcome.decision === "BLOCKED") {
-    const reasons = [...(record.validation?.errors || []), ...(outcome.warnings || [])].slice(0, 8);
+    const reasons = [...(record.validation?.errors || []), ...(outcome.warnings || [])].slice(0, 3);
     return {
       channel: "system",
       text: [
@@ -161,8 +162,6 @@ function formatWebhookRecord(record) {
         `**원본 신호**: ${display(payload.type)}`,
         `**사유**: ${reasons.join(" / ") || "알 수 없는 신호"}`,
         "**주문**: 🔒 생성 안 됨",
-        ...payloadLines(payload),
-        `\`request_id: ${record.requestId}\``,
       ].join("\n"),
     };
   }
@@ -266,14 +265,44 @@ function formatDailyJournal(date, entries, brokerLabel = "키움 모의계좌") 
   };
 }
 
-function formatBrokerStartup(service, botTag, detail) {
-  return `✅ ${service} 연결 · ${botTag}\n${detail} · 실계좌 차단`;
+function formatDeferredBuy(record, brokerLabel, environment = "mock") {
+  const payload = record.payload || {};
+  const market = payload.exchange === "KRX" ? "국내" : "미국";
+  return {
+    channel: "order",
+    event: "DEFERRED_BUY",
+    text: [
+      `⏰ **${brokerLabel} ${market} ${environment === "live" ? "실계좌" : "모의"} 매수 예약**`,
+      `**종목**: ${display(payload.name)} (${display(payload.ticker)})`,
+      "프리장·장 종료 시간에는 주문하지 않고, 다음 정규장 또는 애프터장에 계좌를 다시 확인합니다.",
+    ].join("\n"),
+  };
+}
+
+function formatExecutorError(title, error, record) {
+  const payload = record?.payload;
+  return {
+    channel: "system",
+    event: "EXECUTOR_ERROR",
+    text: [
+      `🛑 **${title}**`,
+      ...(payload ? [`**종목**: ${display(payload.name)} (${display(payload.ticker)})`] : []),
+      `**사유**: ${display(error?.message || error)}`,
+      ...(payload ? ["**주문**: 🔒 생성 안 됨"] : []),
+    ].join("\n"),
+  };
+}
+
+function formatBrokerStartup(service, botTag, detail, safety = "실계좌 차단") {
+  return `✅ ${service} 연결 · ${botTag}\n${detail} · ${safety}`;
 }
 
 module.exports = {
   formatBrokerStartup,
   formatBuyApproval,
   formatDailyJournal,
+  formatDeferredBuy,
+  formatExecutorError,
   formatOrderStatus,
   formatWebhookRecord,
   positionPreviewLines,
