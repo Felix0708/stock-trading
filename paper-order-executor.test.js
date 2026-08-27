@@ -122,12 +122,13 @@ const record = {
   assert.equal((await trackPaperOrder(auto, {
     domesticClient: options.client, overseasClient, tracker: autoTracker, attempts: 1, delayMs: 0,
   })).status, "FILLED");
+  const regularSession = new Date("2026-08-24T00:00:00.000Z");
   const domesticAuto = await submitPaperOrder({
     payload: { ticker: "005930", exchange: "KRX", action: "BUY", price: 100000 },
     risk: { verdict: "PAPER_ENTRY" },
     positionPreview: { quantity: 2 },
   }, {
-    enabled: true, environment: "mock", domesticClient: options.client, overseasClient, tracker: autoTracker,
+    enabled: true, environment: "mock", domesticClient: options.client, overseasClient, tracker: autoTracker, now: regularSession,
   });
   assert.equal(domesticAuto.orderQuantity, 2);
   assert.equal(domesticAuto.market, "KRX");
@@ -146,6 +147,7 @@ const record = {
     },
     tracker: autoTracker,
     partialExit1Ratio: 0.25,
+    now: regularSession,
   });
   assert.equal(domesticPartial.orderQuantity, 2);
   assert.equal(domesticPartial.partialExitRatio, 0.25);
@@ -166,6 +168,7 @@ const record = {
       getDomesticBalance: async () => ({ holdings: [{ code: "A005930", tradableQuantity: 8 }] }),
     },
     tracker: autoTracker,
+    now: regularSession,
   });
   assert.equal(domesticCrash.marketFallbackAllowed, true);
   assert.equal((await submitPaperOrder(autoRecord, {
