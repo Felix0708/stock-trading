@@ -18,7 +18,20 @@ function isStopRequest(content) {
 
 function isGroupDiscussionRequest(content) {
   const text = String(content || "").trim();
-  return /(?:같이\s*)?토론(?:해\s*(?:줘|봐)|하자)[.!?]*$/i.test(text);
+  return /(?:같이\s*)?토론(?:해\s*(?:줘|봐)|하자)[.!?]*$/i.test(text)
+    || isGroupOpinionRequest(content);
+}
+
+function isGroupOpinionRequest(content) {
+  const text = normalize(content);
+  if (/(?:다|모두|전부)(?:말(?:해|하(?:라|렴|세요|자))|답해|얘기해|한마디)/.test(text)) return true;
+  if (/^(?:다른|나머지)(?:사람|분|애)들?(?:은|는|도)?$/.test(text)) return true;
+  return /(?:모두(?:들)?|다들|여러분|전부|전원|각자|(?:다른|나머지)(?:사람|분|애)들?|의견안(?:낸|말한|준)(?:사람|분))/.test(text)
+    && /(?:의견|생각|답|말|얘기|한마디|들어보|어때)/.test(text);
+}
+
+function isRemainingGroupRequest(content) {
+  return /(?:(?:다른|나머지)(?:사람|분|애)들?|의견안(?:낸|말한|준)(?:사람|분))/.test(normalize(content));
 }
 
 function extractGroupDiscussionTopic(content) {
@@ -32,7 +45,7 @@ function resolveGroupDiscussionTopic(content, recentContext = "") {
   const topic = isGroupDiscussionRequest(content)
     ? extractGroupDiscussionTopic(content)
     : String(content || "").trim();
-  const contextualFollowUp = /^(?:모두(?:들)?|다들|여러분|전부)(?:의)?(?:생각|의견)(?:이)?(?:궁금해|궁금하다|궁금합니다|알려줘|말해줘|어때)$/.test(normalize(content));
+  const contextualFollowUp = isGroupOpinionRequest(content);
   if (!contextualFollowUp || !String(recentContext).trim()) return topic;
   return `최근 Discord 채널 대화:\n${String(recentContext).trim()}\n\n현재 요청:\n${topic}\n\n직전 대화의 주제를 이어서 답하세요. 새 주제로 바꾸지 마세요.`;
 }
@@ -91,6 +104,7 @@ module.exports = {
   isHelpRequest,
   isResetRequest,
   isGroupDiscussionRequest,
+  isRemainingGroupRequest,
   isStopRequest,
   naturalTradeCommand,
   pickResponder,

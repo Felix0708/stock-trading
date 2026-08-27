@@ -52,6 +52,7 @@ const {
   isHelpRequest,
   isResetRequest,
   isGroupDiscussionRequest,
+  isRemainingGroupRequest,
   isStopRequest,
   naturalTradeCommand,
   pickResponder,
@@ -2390,7 +2391,11 @@ async function handleMessage(persona, client, message, edited = false) {
         }
         const sharedAlerts = alertRegistryContext(topic);
         const discussionTopic = [edited ? `[수정된 주제] ${lookupTopic}` : lookupTopic, sharedAlerts].filter(Boolean).join("\n\n");
-        await runGroupDiscussion(message, discussionTopic, { includeResearch: true });
+        const lastResponder = lastResponderByChannel.get(message.channel.id);
+        const participants = isRemainingGroupRequest(content) && lastResponder
+          ? PERSONAS.filter((candidate) => candidate.id !== lastResponder)
+          : PERSONAS;
+        await runGroupDiscussion(message, discussionTopic, { includeResearch: true, participants });
       }
     }
     return;
