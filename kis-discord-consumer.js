@@ -151,7 +151,7 @@ function orderNeedsResultReport(order) {
 }
 
 function orderNeedsPortfolioSync(order) {
-  return ["FILLED", "PARTIALLY_FILLED"].includes(order.status)
+  return ["FILLED", "PARTIALLY_FILLED", "CANCELLED"].includes(order.status)
     && Number(order.filledQuantity || 0) > Number(order.portfolioSyncedFilledQuantity || 0);
 }
 

@@ -146,6 +146,7 @@ async function submitPaperOrder(record, options) {
   let quantity;
   let order;
   let orderStyle;
+  let marketFallbackAllowed = false;
   if (exchange === "KRX") {
     client = options.domesticClient;
     if (!/^\d{6}$/.test(payload.ticker)) return blocked("국내주식 종목코드는 6자리여야 함");
@@ -157,6 +158,7 @@ async function submitPaperOrder(record, options) {
     if (!Number.isInteger(quantity) || quantity < 1) return blocked("주문 가능한 국내주식 수량 없음");
     const session = domesticSession(options.now || new Date());
     orderStyle = side === "SELL" && session === "REGULAR" ? "PROTECTED" : "MARKET";
+    marketFallbackAllowed = orderStyle === "PROTECTED" && record.outcome?.signal?.signalCode === "EXIT_CRASH";
     order = await client.placeDomesticMarketOrder({
       side, symbol: payload.ticker, quantity, price: payload.price,
       session, orderStyle,
@@ -179,7 +181,7 @@ async function submitPaperOrder(record, options) {
   }
   return options.tracker.record({
     ...order, orderQuantity: quantity, filledQuantity: 0, remainingQuantity: quantity,
-    orderStyle,
+    orderStyle, marketFallbackAllowed,
     brokerLabel: options.brokerLabel || "키움 모의계좌",
     source: record.source || "TRADINGVIEW", market: exchange, name: payload.name,
     signalType: payload.type, signalPrice: payload.price, stopPrice: payload.sl,

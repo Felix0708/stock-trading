@@ -139,6 +139,21 @@ const record = {
   assert.equal(domesticPartial.orderQuantity, 2);
   assert.equal(domesticPartial.partialExitRatio, 0.25);
   assert.equal(domesticPartial.orderStyle, "PROTECTED");
+  assert.equal(domesticPartial.marketFallbackAllowed, false);
+  const domesticCrash = await submitPaperOrder({
+    payload: { ticker: "005930", exchange: "KRX", action: "SELL", type: "급락 손절", price: 100000 },
+    outcome: { signal: { signalCode: "EXIT_CRASH" } },
+    risk: { verdict: "PAPER_EXIT" },
+  }, {
+    enabled: true,
+    environment: "mock",
+    domesticClient: {
+      ...options.client,
+      getDomesticBalance: async () => ({ holdings: [{ code: "A005930", tradableQuantity: 8 }] }),
+    },
+    tracker: autoTracker,
+  });
+  assert.equal(domesticCrash.marketFallbackAllowed, true);
   assert.equal((await submitPaperOrder(autoRecord, {
     enabled: true, environment: "live", domesticClient: options.client, overseasClient, tracker: autoTracker,
   })).status, "ACCEPTED");

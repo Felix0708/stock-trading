@@ -82,6 +82,7 @@ assert.equal(
   enforceOwnAccountRules({ risk: { verdict: "PAPER_ADD" } }, { hasExistingPosition: true, positionProfitable: false }, preview).blocked,
   true,
 );
+assert.equal(orderNeedsPortfolioSync({ status: "CANCELLED", filledQuantity: 2, portfolioSyncedFilledQuantity: 0 }), true);
 
 (async () => {
   const context = await accountContext({

@@ -71,7 +71,7 @@ function aggregate(base, fills, brokerOrderNos, marketFallback, status, tracking
     fillPrice: filledQuantity ? filledValue / filledQuantity : 0,
     brokerOrderNos,
     marketFallback,
-    orderStrategy: marketFallback ? "최유리 IOC 2회 후 시장가" : "최유리 IOC",
+    orderStrategy: marketFallback ? "최유리 IOC 2회 후 시장가" : "최유리 IOC 최대 2회",
     ...tracking,
   };
 }
@@ -89,7 +89,11 @@ async function trackProtectedDomesticSell(order, options) {
     if (quantity) fills.push({ quantity, price: Number(current.fillPrice) || 0 });
     const remaining = order.orderQuantity - fills.reduce((sum, fill) => sum + fill.quantity, 0);
     if (remaining <= 0) return options.tracker.record(aggregate(order, fills, brokerOrderNos, false, "FILLED"));
-    const orderStyle = attempt + 1 < protectedAttempts ? "PROTECTED" : "MARKET";
+    const retryProtected = attempt + 1 < protectedAttempts;
+    if (!retryProtected && !order.marketFallbackAllowed) {
+      return options.tracker.record(aggregate(order, fills, brokerOrderNos, false, "CANCELLED"));
+    }
+    const orderStyle = retryProtected ? "PROTECTED" : "MARKET";
     active = { ...await options.domesticClient.placeDomesticMarketOrder({ side: "SELL", symbol: order.symbol, quantity: remaining, session: "REGULAR", orderStyle }), market: "KRX" };
     brokerOrderNos.push(active.orderNo);
     if (orderStyle === "MARKET") {

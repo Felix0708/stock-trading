@@ -22,7 +22,7 @@ const { refreshPaperOrder, trackPaperOrder } = require("./order-tracking");
 
   const completed = await trackPaperOrder({
     orderNo: "1001", side: "SELL", symbol: "005930", market: "KRX", status: "ACCEPTED",
-    orderQuantity: 8, filledQuantity: 0, remainingQuantity: 8, orderStyle: "PROTECTED",
+    orderQuantity: 8, filledQuantity: 0, remainingQuantity: 8, orderStyle: "PROTECTED", marketFallbackAllowed: true,
   }, { domesticClient, tracker, attempts: 1, delayMs: 0, protectionDelayMs: 0 });
 
   assert.equal(completed.status, "FILLED");
@@ -54,7 +54,7 @@ const { refreshPaperOrder, trackPaperOrder } = require("./order-tracking");
   };
   const pending = await trackPaperOrder({
     orderNo: "2001", side: "SELL", symbol: "005930", market: "KRX", status: "ACCEPTED",
-    orderQuantity: 5, filledQuantity: 0, remainingQuantity: 5, orderStyle: "PROTECTED",
+    orderQuantity: 5, filledQuantity: 0, remainingQuantity: 5, orderStyle: "PROTECTED", marketFallbackAllowed: true,
   }, { domesticClient: pendingClient, tracker, attempts: 1, delayMs: 0, protectionDelayMs: 0 });
   executions["2003"] = { ...executions["2003"], filledQuantity: 2, remainingQuantity: 0, fillPrice: 98, status: "FILLED" };
   const reconciled = await refreshPaperOrder(pending, { domesticClient: pendingClient, tracker });
@@ -62,6 +62,25 @@ const { refreshPaperOrder, trackPaperOrder } = require("./order-tracking");
   assert.equal(reconciled.status, "FILLED");
   assert.equal(reconciled.filledQuantity, 5);
   assert.equal(reconciled.fillPrice, 99);
+
+  Object.assign(executions, {
+    "3001": { orderNo: "3001", orderQuantity: 5, filledQuantity: 2, remainingQuantity: 0, fillPrice: 100, status: "PARTIALLY_FILLED" },
+    "3002": { orderNo: "3002", orderQuantity: 3, filledQuantity: 1, remainingQuantity: 0, fillPrice: 99, status: "PARTIALLY_FILLED" },
+  });
+  const protectedOnly = await trackPaperOrder({
+    orderNo: "3001", side: "SELL", symbol: "005930", market: "KRX", status: "ACCEPTED",
+    orderQuantity: 5, filledQuantity: 0, remainingQuantity: 5, orderStyle: "PROTECTED", marketFallbackAllowed: false,
+  }, {
+    domesticClient: {
+      getDomesticOrderExecutions: domesticClient.getDomesticOrderExecutions,
+      placeDomesticMarketOrder: async (request) => ({ ...request, orderNo: "3002", status: "ACCEPTED", orderQuantity: request.quantity }),
+    },
+    tracker, attempts: 1, delayMs: 0, protectionDelayMs: 0,
+  });
+  assert.equal(protectedOnly.status, "CANCELLED");
+  assert.equal(protectedOnly.filledQuantity, 3);
+  assert.equal(protectedOnly.remainingQuantity, 2);
+  assert.equal(protectedOnly.marketFallback, false);
 
   console.log("order-tracking test OK");
 })().catch((error) => {
