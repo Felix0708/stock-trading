@@ -267,7 +267,7 @@ class KiwoomClient {
     if (!/^\d{6}$/.test(symbol)) throw new Error("국내주식 종목코드는 6자리 숫자여야 합니다.");
     if (!Number.isInteger(quantity) || quantity < 1) throw new Error("국내주식 주문수량은 1 이상의 정수여야 합니다.");
     if (!["MARKET", "PROTECTED"].includes(orderStyle)) throw new Error("국내주식 주문방식이 올바르지 않습니다.");
-    const orderType = session === "REGULAR" && side === "SELL" && orderStyle === "PROTECTED" ? "16" : { PRE: "61", REGULAR: "3", AFTER_CLOSE: "81", AFTER_SINGLE: "62" }[session];
+    const orderType = session === "REGULAR" && orderStyle === "PROTECTED" ? "16" : { PRE: "61", REGULAR: "3", AFTER_CLOSE: "81", AFTER_SINGLE: "62" }[session];
     if (!orderType) throw new Error("국내주식 주문 가능 시간이 아닙니다.");
     if (session === "AFTER_SINGLE" && (!Number.isFinite(price) || price <= 0)) throw new Error("시간외 단일가 주문 가격이 필요합니다.");
 

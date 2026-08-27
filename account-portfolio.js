@@ -1,6 +1,7 @@
 "use strict";
 
-const { enrichInstrumentNames, formatMyPortfolioMessage } = require("./investor-portfolio");
+const { enrichInstrumentNames } = require("./instrument-names");
+const { formatMyPortfolioMessage } = require("./investor-portfolio");
 
 async function brokerPortfolio(broker) {
   const domesticClient = broker.domesticClient || broker;

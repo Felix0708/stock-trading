@@ -129,6 +129,15 @@ function partialExitQuantity(tradableQuantity, ratio) {
   return Math.floor(tradableQuantity * ratio);
 }
 
+function protectedUsBuyLimit(signalPrice, currentPrice) {
+  if (!Number.isFinite(signalPrice) || signalPrice <= 0 || !Number.isFinite(currentPrice) || currentPrice <= 0) {
+    throw new Error("미국주식 매수 상한가 계산에 유효한 신호가와 현재가가 필요합니다.");
+  }
+  const raw = Math.min(signalPrice, currentPrice * 1.005);
+  const scale = raw < 1 ? 10_000 : 100;
+  return Math.floor(raw * scale + Number.EPSILON) / scale;
+}
+
 async function submitPaperOrder(record, options) {
   if (record.payload?.paper_order_test === true) return null;
 
@@ -146,6 +155,9 @@ async function submitPaperOrder(record, options) {
   let quantity;
   let order;
   let orderStyle;
+  let orderStrategy;
+  let limitPrice;
+  let referencePrice;
   let marketFallbackAllowed = false;
   if (exchange === "KRX") {
     client = options.domesticClient;
@@ -157,8 +169,11 @@ async function submitPaperOrder(record, options) {
     }
     if (!Number.isInteger(quantity) || quantity < 1) return blocked("주문 가능한 국내주식 수량 없음");
     const session = domesticSession(options.now || new Date());
-    orderStyle = side === "SELL" && session === "REGULAR" ? "PROTECTED" : "MARKET";
+    orderStyle = session === "REGULAR" ? "PROTECTED" : "MARKET";
     marketFallbackAllowed = orderStyle === "PROTECTED" && record.outcome?.signal?.signalCode === "EXIT_CRASH";
+    orderStrategy = session === "REGULAR"
+      ? `최유리 IOC 최대 2회${marketFallbackAllowed ? " 후 급락 손절 잔량만 시장가" : " · 시장가 전환 없음"}`
+      : { PRE: "장전 시간외 종가", AFTER_CLOSE: "장후 시간외 종가", AFTER_SINGLE: "시간외 단일가 지정가" }[session];
     order = await client.placeDomesticMarketOrder({
       side, symbol: payload.ticker, quantity, price: payload.price,
       session, orderStyle,
@@ -173,17 +188,27 @@ async function submitPaperOrder(record, options) {
       quantity = partialExit ? partialExitQuantity(tradable, partialExitRatio(record, options)) : tradable;
     }
     if (!Number.isInteger(quantity) || quantity < 1) return blocked("주문 가능한 미국주식 수량 없음");
+    limitPrice = payload.price;
+    if (entry) {
+      const quote = await client.getUsQuote({ exchange: kiwoomExchange, symbol: payload.ticker });
+      referencePrice = quote.currentPrice;
+      limitPrice = protectedUsBuyLimit(payload.price, referencePrice);
+      orderStrategy = "신호가·현재가 기준 상한 지정가";
+    } else {
+      orderStrategy = "신호가 지정가";
+    }
     order = await client.placeUsLimitOrder({
       side, exchange: kiwoomExchange, symbol: payload.ticker,
-      quantity, price: payload.price,
+      quantity, price: limitPrice,
     });
     order.exchange = kiwoomExchange;
   }
   return options.tracker.record({
     ...order, orderQuantity: quantity, filledQuantity: 0, remainingQuantity: quantity,
-    orderStyle, marketFallbackAllowed,
+    orderStyle, orderStrategy, marketFallbackAllowed, limitPrice, referencePrice,
     brokerLabel: options.brokerLabel || "키움 모의계좌",
     source: record.source || "TRADINGVIEW", market: exchange, name: payload.name,
+    koreanName: payload.koreanName, englishName: payload.englishName,
     signalType: payload.type, signalPrice: payload.price, stopPrice: payload.sl,
     conviction: payload.conviction, requestId: record.requestId,
     partialExitRatio: partialExit ? partialExitRatio(record, options) : null,
@@ -241,6 +266,7 @@ module.exports = {
   isUsRegularSession,
   partialExitQuantity,
   partialExitRatio,
+  protectedUsBuyLimit,
   refreshPaperOrder,
   shouldDeferUsEntry,
   shouldDeferEntry,

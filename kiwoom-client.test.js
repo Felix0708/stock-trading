@@ -278,8 +278,9 @@ async function fakeFetch(url, options) {
   });
   await sessionClient.placeDomesticMarketOrder({ side: "SELL", symbol: "005930", quantity: 1, session: "PRE" });
   await sessionClient.placeDomesticMarketOrder({ side: "BUY", symbol: "005930", quantity: 1, price: 81000, session: "AFTER_SINGLE" });
+  await sessionClient.placeDomesticMarketOrder({ side: "BUY", symbol: "005930", quantity: 1, session: "REGULAR", orderStyle: "PROTECTED" });
   await sessionClient.placeDomesticMarketOrder({ side: "SELL", symbol: "005930", quantity: 1, session: "REGULAR", orderStyle: "PROTECTED" });
-  assert.deepEqual(sessionBodies.map((body) => [body.trde_tp, body.ord_uv]), [["61", ""], ["62", "81000"], ["16", ""]]);
+  assert.deepEqual(sessionBodies.map((body) => [body.trde_tp, body.ord_uv]), [["61", ""], ["62", "81000"], ["16", ""], ["16", ""]]);
 
   let authCount = 0;
   let accountCount = 0;

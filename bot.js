@@ -14,6 +14,8 @@ const {
   formatDailyJournal,
   formatOrderStatus,
   formatTradeJournal,
+} = require("./order-discord");
+const {
   formatWebhookRecord,
 } = require("./webhook-discord");
 const { createWebhookService, loadOrCreateWebhookToken } = require("./webhook-server");
@@ -34,10 +36,9 @@ const { calculatePositionSize, calculateWebhookPositionPreview, inferPositionPro
 const { loadRecentResearch } = require("./recent-research");
 const { collectTelegramDay, previousDate } = require("./telegram-collector");
 const { createBuyApproval, findBuyApproval, parseBuyApprovalCommand } = require("./buy-approval");
+const { enrichInstrumentNames, formatInstrumentLabel } = require("./instrument-names");
 const {
-  enrichInstrumentNames,
   formatDuquesne13fContext,
-  formatInstrumentLabel,
   formatInvestorPortfolioMessage,
   formatInvestorPortfolioMessages,
   formatManager13fContexts,
@@ -1242,7 +1243,7 @@ async function appendDailyJournal(order) {
   const channel = findTextChannelByName(JOURNAL_CHANNEL);
   if (!channel) return;
   const [instrument] = await enrichInstrumentNames([{ exchange: order.market, ticker: order.symbol, name: order.name }]);
-  await sendFormattedWebhook(channel, formatTradeJournal({ ...order, name: instrument.name || order.name }));
+  await sendFormattedWebhook(channel, formatTradeJournal({ ...order, ...instrument, symbol: order.symbol }));
   state.journaledOrders[order.orderNo] = order.updatedAt;
   saveState();
 }

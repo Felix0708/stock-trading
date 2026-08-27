@@ -1,11 +1,10 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const { enrichInstrumentNames, formatInstrumentLabel } = require("./instrument-names");
 const {
-  enrichInstrumentNames,
   formatInvestorPortfolioMessage,
   formatInvestorPortfolioMessages,
-  formatInstrumentLabel,
   formatMyPortfolioMessage,
   loadLatestDuquesne13f,
   loadManager13fContexts,
@@ -63,6 +62,14 @@ const fetchImpl = async (url) => {
     } },
   );
   assert.equal(formatInstrumentLabel(enriched), "삼성전자 / Samsung Electronics Co Ltd (005930)");
+  const seaAliases = await enrichInstrumentNames([
+    { exchange: "NY", ticker: "SE", name: "씨이에이(ADS)" },
+    { exchange: "NYSE", ticker: "SE", name: "Sea Limited Sponsored ADR Class A" },
+  ], { fetchImpl: async () => ({ ok: false }) });
+  assert.deepEqual(seaAliases.map(formatInstrumentLabel), [
+    "씨 / Sea Limited (SE)",
+    "씨 / Sea Limited (SE)",
+  ]);
 
   const filing = await loadLatestDuquesne13f({ fetchImpl });
   assert.equal(filing.reportDate, "2026-06-30");

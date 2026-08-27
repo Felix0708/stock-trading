@@ -7,7 +7,7 @@ const { parseBuyApprovalCommand } = require("./buy-approval");
 const { decodeSignalEmbed } = require("./discord-signal-envelope");
 const { KiwoomClient } = require("./kiwoom-client");
 const { KisClient } = require("./kis-client");
-const { enrichInstrumentNames, formatInstrumentLabel } = require("./investor-portfolio");
+const { enrichInstrumentNames, formatInstrumentLabel } = require("./instrument-names");
 const { OrderTracker } = require("./order-tracker");
 const {
   domesticSession,
@@ -21,7 +21,7 @@ const {
   usSessionClock,
 } = require("./paper-order-executor");
 const { calculateWebhookPositionPreview, inferPositionProfitable } = require("./position-sizer");
-const { formatBrokerStartup, formatDeferredBuy, formatExecutorError, formatOrderStatus, formatTradeJournal, formatUncreatedOrder } = require("./webhook-discord");
+const { formatBrokerStartup, formatDeferredBuy, formatExecutorError, formatOrderStatus, formatTradeJournal, formatUncreatedOrder } = require("./order-discord");
 
 function shouldConsumeMessage(message, config) {
   return message?.author?.bot === true

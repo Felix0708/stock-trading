@@ -165,7 +165,7 @@ class KisClient {
   async placeDomesticMarketOrder({ side, symbol, quantity, price, session = "REGULAR", orderStyle = "MARKET" }) {
     if (!["BUY", "SELL"].includes(side) || !/^\d{6}$/.test(symbol) || !Number.isInteger(quantity) || quantity < 1) throw new Error("국내 모의주문 값이 올바르지 않습니다.");
     if (!["MARKET", "PROTECTED"].includes(orderStyle)) throw new Error("국내주식 주문방식이 올바르지 않습니다.");
-    const orderType = session === "REGULAR" && side === "SELL" && orderStyle === "PROTECTED" ? "15" : { PRE: "05", REGULAR: "01", AFTER_CLOSE: "06", AFTER_SINGLE: "07" }[session];
+    const orderType = session === "REGULAR" && orderStyle === "PROTECTED" ? "15" : { PRE: "05", REGULAR: "01", AFTER_CLOSE: "06", AFTER_SINGLE: "07" }[session];
     if (!orderType) throw new Error("국내주식 주문 가능 시간이 아닙니다.");
     if (session === "AFTER_SINGLE" && (!Number.isFinite(price) || price <= 0)) throw new Error("시간외 단일가 주문 가격이 필요합니다.");
     const result = await this.request("/uapi/domestic-stock/v1/trading/order-cash", {

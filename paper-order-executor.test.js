@@ -15,13 +15,17 @@ const {
 
 const directory = fs.mkdtempSync(path.join(os.tmpdir(), "paper-order-test-"));
 const tracker = new OrderTracker(path.join(directory, "orders.json"));
+const domesticOrders = [];
 const options = {
   enabled: true,
   symbol: "005930",
   lockFile: path.join(directory, "lock.json"),
   tracker,
   client: {
-    placeDomesticMarketOrder: async () => ({ status: "ACCEPTED", orderNo: "00024", side: "BUY", symbol: "005930", orderQuantity: 1 }),
+    placeDomesticMarketOrder: async (request) => {
+      domesticOrders.push(request);
+      return { status: "ACCEPTED", orderNo: "00024", side: request.side, symbol: request.symbol, orderQuantity: request.quantity };
+    },
     getDomesticOrderExecutions: async () => [{
       status: "FILLED", orderNo: "00024", side: "BUY", symbol: "005930",
       orderQuantity: 1, filledQuantity: 1, remainingQuantity: 0, fillPrice: 100,
@@ -91,6 +95,7 @@ const record = {
     },
   };
   const overseasClient = {
+    getUsQuote: async () => ({ currentPrice: 240 }),
     placeUsLimitOrder: async ({ side, exchange, symbol, quantity, price }) => ({
       status: "ACCEPTED", orderNo: "000000282", side, exchange, symbol, orderQuantity: quantity, price,
     }),
@@ -107,6 +112,8 @@ const record = {
   assert.equal(auto.plannedInvestment, 1000);
   assert.equal(auto.projectedPositionRatio, 12.5);
   assert.equal(auto.accountEquity, 8000);
+  assert.equal(auto.limitPrice, 241.2);
+  assert.equal(auto.referencePrice, 240);
   assert.equal((await refreshPaperOrder(auto, {
     domesticClient: options.client, overseasClient, tracker: autoTracker,
   })).status, "FILLED");
@@ -122,8 +129,10 @@ const record = {
   });
   assert.equal(domesticAuto.orderQuantity, 2);
   assert.equal(domesticAuto.market, "KRX");
+  assert.equal(domesticAuto.orderStyle, "PROTECTED");
+  assert.equal(domesticOrders.at(-1).orderStyle, "PROTECTED");
   const domesticPartial = await submitPaperOrder({
-    payload: { ticker: "005930", exchange: "KRX", action: "SELL", type: "🔪 1차 분할청산", price: 100000 },
+    payload: { ticker: "005930", exchange: "KRX", action: "SELL", type: "🔪 1차 분할청산", price: 100000, koreanName: "삼성전자", englishName: "Samsung Electronics" },
     outcome: { signal: { signalCode: "EXIT_PARTIAL_1" } },
     risk: { verdict: "PAPER_PARTIAL_EXIT" },
   }, {
@@ -140,6 +149,8 @@ const record = {
   assert.equal(domesticPartial.partialExitRatio, 0.25);
   assert.equal(domesticPartial.orderStyle, "PROTECTED");
   assert.equal(domesticPartial.marketFallbackAllowed, false);
+  assert.equal(domesticPartial.koreanName, "삼성전자");
+  assert.equal(domesticPartial.englishName, "Samsung Electronics");
   const domesticCrash = await submitPaperOrder({
     payload: { ticker: "005930", exchange: "KRX", action: "SELL", type: "급락 손절", price: 100000 },
     outcome: { signal: { signalCode: "EXIT_CRASH" } },

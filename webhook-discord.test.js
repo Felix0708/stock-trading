@@ -11,6 +11,8 @@ const {
   formatUncreatedOrder,
   formatOrderStatus,
   formatTradeJournal,
+} = require("./order-discord");
+const {
   formatWebhookRecord,
   targetSignalChannels,
 } = require("./webhook-discord");
@@ -173,11 +175,11 @@ const order = formatOrderStatus({
   orderQuantity: 2, filledQuantity: 1, remainingQuantity: 1,
 });
 assert.equal(order.channel, "system");
-assert(order.text.includes("Apple Inc. (AAPL)"));
+assert(order.text.includes("애플 / Apple (AAPL)"));
 assert(order.text.includes("PARTIALLY_FILLED"));
 assert(order.text.includes("0282"));
 assert.equal(order.embed.title, "⏳ BUY · 부분 체결");
-assert(order.embed.description.includes("Apple Inc. (AAPL)"));
+assert(order.embed.description.includes("애플 / Apple (AAPL)"));
 const kisOrder = formatOrderStatus({
   orderNo: "5678", symbol: "AAPL", name: "Apple Inc.", side: "BUY", status: "ACCEPTED",
   orderQuantity: 1, filledQuantity: 0, remainingQuantity: 1, brokerLabel: "한투 모의계좌",
@@ -187,10 +189,13 @@ assert.equal(kisOrder.embed.footer.text, "한투 모의계좌");
 const acceptedSizing = formatOrderStatus({
   orderNo: "1903", symbol: "SE", side: "BUY", status: "ACCEPTED", market: "NYSE",
   orderQuantity: 63, filledQuantity: 0, remainingQuantity: 63,
+  limitPrice: 121.18, orderStrategy: "신호가·현재가 기준 상한 지정가",
   plannedInvestment: 7634.655, projectedPositionRatio: 7.634655, positionLimitRatio: 0.2, currency: "USD",
 });
 assert(acceptedSizing.text.includes("**예상 투입**: $7,634.66"));
 assert(acceptedSizing.text.includes("**주문 후 예상 계좌 비중**: 7.63% / 최대 20%"));
+assert(acceptedSizing.text.includes("**매수 상한가**: $121.18"));
+assert(acceptedSizing.embed.fields.some((field) => field.name === "주문 방식" && field.value.includes("상한 지정가")));
 const filledSizing = formatOrderStatus({
   orderNo: "1903", symbol: "SE", side: "BUY", status: "FILLED", market: "NYSE",
   orderQuantity: 63, filledQuantity: 63, remainingQuantity: 0, fillPrice: 120.95,
@@ -201,14 +206,20 @@ assert(filledSizing.text.includes("**실제 투입**: $7,619.85"));
 assert(filledSizing.text.includes("**체결 후 계좌 비중**: 7.62%"));
 assert(filledSizing.embed.fields.some((field) => field.name === "실제 투입·비중" && field.value.includes("7.62%")));
 const tradeJournal = formatTradeJournal({
-  orderNo: "9346", symbol: "SE", name: "SEA(ADR)", side: "BUY", status: "FILLED", market: "NYSE",
+  orderNo: "9346", symbol: "SE", name: "SEA(ADR)", koreanName: "씨", englishName: "Sea Limited", side: "BUY", status: "FILLED", market: "NYSE",
   orderQuantity: 63, filledQuantity: 63, remainingQuantity: 0, fillPrice: 121.18,
   positionRatio: 7.64, currency: "USD", brokerLabel: "한투 모의계좌",
 });
 assert.equal(tradeJournal.embed.title, "📘 BUY · 매매 기록");
+assert.equal(tradeJournal.embed.description, "**씨 / Sea Limited (SE)**");
 assert(tradeJournal.text.includes("**실제 투입**: $7,634.34"));
 assert(tradeJournal.text.includes("**체결 후 계좌 비중**: 7.64%"));
 assert.equal(tradeJournal.embed.footer.text, "한투 모의계좌 체결 기준");
+const legacySeaOrder = formatOrderStatus({
+  orderNo: "1903", symbol: "SE", name: "씨이에이(ADS)", side: "BUY", status: "FILLED",
+  orderQuantity: 63, filledQuantity: 63, remainingQuantity: 0,
+});
+assert.equal(legacySeaOrder.embed.description, "**씨 / Sea Limited (SE)**");
 
 const approval = formatBuyApproval(base, {
   ticker: "005930", name: "삼성전자",

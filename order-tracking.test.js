@@ -82,6 +82,28 @@ const { refreshPaperOrder, trackPaperOrder } = require("./order-tracking");
   assert.equal(protectedOnly.remainingQuantity, 2);
   assert.equal(protectedOnly.marketFallback, false);
 
+  Object.assign(executions, {
+    "4001": { orderNo: "4001", orderQuantity: 5, filledQuantity: 2, remainingQuantity: 0, fillPrice: 101, status: "PARTIALLY_FILLED" },
+    "4002": { orderNo: "4002", orderQuantity: 3, filledQuantity: 0, remainingQuantity: 0, fillPrice: 0, status: "CANCELLED" },
+  });
+  const buyRetries = [];
+  const protectedBuy = await trackPaperOrder({
+    orderNo: "4001", side: "BUY", symbol: "005930", market: "KRX", status: "ACCEPTED",
+    orderQuantity: 5, filledQuantity: 0, remainingQuantity: 5, orderStyle: "PROTECTED", marketFallbackAllowed: false,
+  }, {
+    domesticClient: {
+      getDomesticOrderExecutions: domesticClient.getDomesticOrderExecutions,
+      placeDomesticMarketOrder: async (request) => {
+        buyRetries.push(request);
+        return { ...request, orderNo: "4002", status: "ACCEPTED", orderQuantity: request.quantity };
+      },
+    },
+    tracker, attempts: 1, delayMs: 0, protectionDelayMs: 0,
+  });
+  assert.equal(protectedBuy.status, "CANCELLED");
+  assert.equal(protectedBuy.filledQuantity, 2);
+  assert.deepEqual(buyRetries.map(({ side, quantity, orderStyle }) => [side, quantity, orderStyle]), [["BUY", 3, "PROTECTED"]]);
+
   console.log("order-tracking test OK");
 })().catch((error) => {
   console.error(error);

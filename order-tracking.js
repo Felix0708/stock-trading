@@ -76,7 +76,7 @@ function aggregate(base, fills, brokerOrderNos, marketFallback, status, tracking
   };
 }
 
-async function trackProtectedDomesticSell(order, options) {
+async function trackProtectedDomesticOrder(order, options) {
   let active = order;
   const fills = [];
   const brokerOrderNos = [order.orderNo];
@@ -94,7 +94,7 @@ async function trackProtectedDomesticSell(order, options) {
       return options.tracker.record(aggregate(order, fills, brokerOrderNos, false, "CANCELLED"));
     }
     const orderStyle = retryProtected ? "PROTECTED" : "MARKET";
-    active = { ...await options.domesticClient.placeDomesticMarketOrder({ side: "SELL", symbol: order.symbol, quantity: remaining, session: "REGULAR", orderStyle }), market: "KRX" };
+    active = { ...await options.domesticClient.placeDomesticMarketOrder({ side: order.side, symbol: order.symbol, quantity: remaining, session: "REGULAR", orderStyle }), market: "KRX" };
     brokerOrderNos.push(active.orderNo);
     if (orderStyle === "MARKET") {
       const priorFilledQuantity = fills.reduce((sum, fill) => sum + fill.quantity, 0);
@@ -115,8 +115,8 @@ async function trackProtectedDomesticSell(order, options) {
 }
 
 async function trackPaperOrder(order, options) {
-  return order.market === "KRX" && order.side === "SELL" && order.orderStyle === "PROTECTED"
-    ? trackProtectedDomesticSell(order, options)
+  return order.market === "KRX" && order.orderStyle === "PROTECTED"
+    ? trackProtectedDomesticOrder(order, options)
     : trackOrdinaryOrder(order, options);
 }
 
