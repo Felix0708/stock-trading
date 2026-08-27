@@ -6,8 +6,13 @@ const { OrderTracker } = require("./order-tracker");
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+function assertMockSmokeOrder(env = process.env) {
+  if ((env.KIWOOM_ENV || "mock") !== "mock") throw new Error("이 스모크 시험은 키움 모의계좌에서만 실행할 수 있습니다.");
+  if (env.CONFIRM_MOCK_ORDER !== "AAPL-1-USD") throw new Error("모의주문 확인값이 없습니다.");
+}
+
 async function main() {
-  if (process.env.CONFIRM_MOCK_ORDER !== "AAPL-1-USD") throw new Error("모의주문 확인값이 없습니다.");
+  assertMockSmokeOrder();
   const client = new KiwoomClient({
     appKey: process.env.KIWOOM_OVERSEAS_APP_KEY,
     secretKey: process.env.KIWOOM_OVERSEAS_SECRET_KEY,
@@ -34,7 +39,9 @@ async function main() {
   console.log(`최종 조회 상태: ${final?.status || "조회 결과 없음"}`);
 }
 
-main().catch((error) => {
+if (require.main === module) main().catch((error) => {
   console.error(error.message);
   process.exitCode = 1;
 });
+
+module.exports = { assertMockSmokeOrder };

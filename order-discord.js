@@ -51,6 +51,9 @@ function formatOrderStatus(order) {
     : null;
   const statusReason = order.reason || order.expirationReason
     || (["REJECTED", "CANCELLED"].includes(order.status) ? order.rawStatus : "");
+  const pyramidLine = order.pyramidStage
+    ? `피라미딩 ${order.pyramidStage}차 · 최초 진입 ${order.initialEntryQuantity}주의 ${order.pyramidRatio * 100}%`
+    : null;
   return {
     channel: "system",
     embed: {
@@ -59,6 +62,7 @@ function formatOrderStatus(order) {
       description: `**${identity}**`,
       fields: [
         { name: "수량", value: `주문 ${display(order.orderQuantity)}주 · 체결 ${display(order.filledQuantity)}주 · 잔량 ${display(order.remainingQuantity)}주` },
+        ...(pyramidLine ? [{ name: "피라미딩", value: pyramidLine }] : []),
         ...(order.orderStrategy ? [{ name: "주문 방식", value: clip(order.orderStrategy, 1024) }] : []),
         ...(limitPrice ? [{ name: "매수 상한가", value: money(limitPrice, currency), inline: true }] : []),
         ...(fillPrice > 0 ? [{ name: "체결가", value: money(fillPrice, currency), inline: true }] : []),
@@ -74,6 +78,7 @@ function formatOrderStatus(order) {
       `**종목**: ${identity} / ${display(order.side)}`,
       `**상태**: \`${display(order.status)}\``,
       `**수량**: 주문 ${display(order.orderQuantity)} / 체결 ${display(order.filledQuantity)} / 잔량 ${display(order.remainingQuantity)}`,
+      pyramidLine ? `**피라미딩**: ${pyramidLine}` : null,
       order.orderStrategy ? `**주문 방식**: ${order.orderStrategy}` : null,
       limitPrice ? `**매수 상한가**: ${money(limitPrice, currency)}` : null,
       fillPrice > 0 ? `**체결가**: ${money(fillPrice, currency)}` : null,

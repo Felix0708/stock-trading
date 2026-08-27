@@ -191,11 +191,13 @@ const acceptedSizing = formatOrderStatus({
   orderQuantity: 63, filledQuantity: 0, remainingQuantity: 63,
   limitPrice: 121.18, orderStrategy: "신호가·현재가 기준 상한 지정가",
   plannedInvestment: 7634.655, projectedPositionRatio: 7.634655, positionLimitRatio: 0.2, currency: "USD",
+  pyramidStage: 2, pyramidRatio: 0.25, initialEntryQuantity: 8,
 });
 assert(acceptedSizing.text.includes("**예상 투입**: $7,634.66"));
 assert(acceptedSizing.text.includes("**주문 후 예상 계좌 비중**: 7.63% / 최대 20%"));
 assert(acceptedSizing.text.includes("**매수 상한가**: $121.18"));
 assert(acceptedSizing.embed.fields.some((field) => field.name === "주문 방식" && field.value.includes("상한 지정가")));
+assert(acceptedSizing.text.includes("피라미딩 2차 · 최초 진입 8주의 25%"));
 const filledSizing = formatOrderStatus({
   orderNo: "1903", symbol: "SE", side: "BUY", status: "FILLED", market: "NYSE",
   orderQuantity: 63, filledQuantity: 63, remainingQuantity: 0, fillPrice: 120.95,

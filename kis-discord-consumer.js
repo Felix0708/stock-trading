@@ -170,8 +170,12 @@ function enabledBrokerIds(env = process.env) {
 function brokerEnvironments(brokerIds, env = process.env) {
   const environments = Object.fromEntries(brokerIds.map((id) => [id, env[`${id}_ENV`] || "mock"]));
   if (Object.values(environments).some((environment) => !["mock", "live"].includes(environment))) throw new Error("계좌 환경은 mock 또는 live여야 합니다.");
-  if (Object.values(environments).includes("live") && env.ACCOUNT_LIVE_TRADING !== "true") throw new Error("실계좌는 ACCOUNT_LIVE_TRADING=true로 명시적으로 잠금을 해제해야 합니다.");
+  if (Object.values(environments).includes("live") && env.ACCOUNT_LIVE_TRADING !== "true" && env.ACCOUNT_READ_ONLY !== "true") throw new Error("실계좌는 ACCOUNT_LIVE_TRADING=true 또는 ACCOUNT_READ_ONLY=true가 필요합니다.");
   return environments;
+}
+
+function readOnlySignalAllowed(record, readOnly) {
+  return !readOnly || record.payload?.paper_order_test === true;
 }
 
 function accountPortfolioSyncMinutes(env = process.env) {
@@ -303,6 +307,65 @@ function enforceOwnAccountRules(record, account, preview) {
   return preview;
 }
 
+const PYRAMID_RATIOS = [0.5, 0.25];
+const PENDING_ORDER_STATUSES = new Set(["ACCEPTED", "CANCEL_REQUESTED", "PARTIALLY_FILLED"]);
+
+function pyramidPlan(orders, record) {
+  const market = String(record.payload?.exchange || "").toUpperCase();
+  const symbol = String(record.payload?.ticker || "").replace(/^A/, "").toUpperCase();
+  let initialEntryQuantity = 0;
+  let completedAdds = 0;
+  let initialEntryPending = false;
+
+  for (const order of [...orders].sort((a, b) => Number(a.revision || 0) - Number(b.revision || 0))) {
+    if (String(order.market || "").toUpperCase() !== market
+        || String(order.symbol || "").replace(/^A/, "").toUpperCase() !== symbol) continue;
+    const filledQuantity = Number(order.filledQuantity || 0);
+    if (order.fullExit && order.status === "FILLED") {
+      initialEntryQuantity = 0;
+      completedAdds = 0;
+      initialEntryPending = false;
+    } else if (order.entryType === "PAPER_ENTRY" && filledQuantity > 0) {
+      initialEntryQuantity = filledQuantity;
+      completedAdds = 0;
+      initialEntryPending = PENDING_ORDER_STATUSES.has(order.status);
+    } else if (initialEntryQuantity > 0 && order.entryType === "PAPER_ADD") {
+      if (PENDING_ORDER_STATUSES.has(order.status)) {
+        return { blocked: true, reason: "이전 피라미딩 추가매수 체결 확인 중" };
+      }
+      if (filledQuantity > 0) completedAdds += 1;
+    }
+  }
+
+  if (initialEntryQuantity < 1) return { blocked: true, reason: "최초 진입 체결수량 기록 없음 — 피라미딩 차단" };
+  if (initialEntryPending) return { blocked: true, reason: "최초 진입 주문 체결 완료 확인 중 — 피라미딩 차단" };
+  if (completedAdds >= PYRAMID_RATIOS.length) return { blocked: true, reason: "피라미딩 2차까지 실행 완료" };
+  const ratio = PYRAMID_RATIOS[completedAdds];
+  const quantity = Math.floor(initialEntryQuantity * ratio);
+  if (quantity < 1) return { blocked: true, reason: `최초 진입 ${initialEntryQuantity}주의 피라미딩 ${completedAdds + 1}차 수량이 1주 미만` };
+  return { blocked: false, stage: completedAdds + 1, ratio, quantity, initialEntryQuantity };
+}
+
+function applyPyramidSizing(record, preview, orders) {
+  if (record.risk?.verdict !== "PAPER_ADD" || preview?.blocked) return preview;
+  const plan = pyramidPlan(orders, record);
+  if (plan.blocked) return { ...preview, blocked: true, quantity: 0, reason: plan.reason };
+  const quantity = Math.min(preview.quantity, plan.quantity);
+  if (!Number.isInteger(quantity) || quantity < 1) return { ...preview, blocked: true, quantity: 0, reason: "피라미딩 주문수량이 1주 미만" };
+  const positionValue = quantity * record.payload.price;
+  const projectedPositionValue = preview.currentPositionValue + positionValue;
+  return {
+    ...preview,
+    quantity,
+    positionValue,
+    projectedPositionValue,
+    projectedPositionRatio: projectedPositionValue / preview.equity * 100,
+    pyramidStage: plan.stage,
+    pyramidRatio: plan.ratio,
+    initialEntryQuantity: plan.initialEntryQuantity,
+  };
+}
+
 async function reconcilePendingBrokerOrders(broker) {
   const changes = [];
   for (const previous of broker.tracker.pending()) {
@@ -327,7 +390,7 @@ async function holdingLines(account) {
 function approvalText(record, previews, brokerIds = Object.keys(previews)) {
   const lines = Object.values(previews).map(({ label, preview }) => preview.blocked
     ? `**${label}**: 불가 · ${preview.reason}`
-    : `**${label}**: ${preview.quantity}주 · 예상 ${preview.currency === "KRW" ? `${Math.round(preview.positionValue).toLocaleString("ko-KR")}원` : `$${preview.positionValue.toLocaleString("en-US", { maximumFractionDigits: 2 })}`} · 주문 후 계좌 비중 ${preview.projectedPositionRatio.toFixed(2)}% / 최대 ${preview.positionLimitRatio * 100}%`);
+    : `**${label}**: ${preview.quantity}주 · 예상 ${preview.currency === "KRW" ? `${Math.round(preview.positionValue).toLocaleString("ko-KR")}원` : `$${preview.positionValue.toLocaleString("en-US", { maximumFractionDigits: 2 })}`} · 주문 후 계좌 비중 ${preview.projectedPositionRatio.toFixed(2)}% / 최대 ${preview.positionLimitRatio * 100}%${preview.pyramidStage ? ` · 피라미딩 ${preview.pyramidStage}차(최초 ${preview.initialEntryQuantity}주의 ${preview.pyramidRatio * 100}%)` : ""}`);
   const commands = brokerIds.length === 2
     ? "`사줘`·`둘다` / `키움만` / `한투만` / `안 사`"
     : `${brokerIds[0] === "KIWOOM" ? "`키움만`" : "`한투만`"} / \`안 사\``;
@@ -342,6 +405,7 @@ function approvalText(record, previews, brokerIds = Object.keys(previews)) {
 async function start() {
   const brokerIds = enabledBrokerIds();
   if (!brokerIds.length) throw new Error("ACCOUNT_EXECUTOR_ENABLED=true와 사용할 증권사 설정이 필요합니다.");
+  const readOnly = process.env.ACCOUNT_READ_ONLY === "true";
   const environments = brokerEnvironments(brokerIds);
   const sourceChannelIds = csv(process.env.ACCOUNT_SOURCE_CHANNEL_IDS || process.env.KIS_SOURCE_CHANNEL_IDS);
   const sourceBotIds = csv(process.env.ACCOUNT_SOURCE_BOT_IDS || process.env.KIS_SOURCE_BOT_IDS);
@@ -429,7 +493,9 @@ async function start() {
 
   async function previewFor(broker, record) {
     const ownAccount = await accountContext(broker, record, maxOpenPositions);
-    const preview = enforceOwnAccountRules(record, ownAccount, calculateWebhookPositionPreview(record, ownAccount));
+    const preview = applyPyramidSizing(record,
+      enforceOwnAccountRules(record, ownAccount, calculateWebhookPositionPreview(record, ownAccount)),
+      broker.tracker.list());
     return { label: broker.label, preview };
   }
 
@@ -461,6 +527,7 @@ async function start() {
   }
 
   async function execute(broker, record) {
+    if (!readOnlySignalAllowed(record, readOnly)) return null;
     record.positionPreview = (await previewFor(broker, record)).preview;
     if (record.payload?.paper_order_test === true) {
       await send(channels.order, { text: `✅ **${brokerAccountLabel(broker)} 자동매매 연동 테스트 통과**\n**종목**: ${formatInstrumentLabel(record.payload)}\n계좌 조회 정상 · 주문 생성 없음` });
@@ -568,6 +635,7 @@ async function start() {
   }
 
   async function executeOrDefer(broker, record, { retry = false } = {}) {
+    if (!readOnlySignalAllowed(record, readOnly)) return null;
     if (!retry && shouldDelayEntry(record)) {
       receipts.putDeferred(broker.id, record, deferredTtlMs);
       await send(channels.order, formatDeferredBuy(record, broker.label, broker.environment));
@@ -643,6 +711,10 @@ async function start() {
     if (message.channelId !== approvalChannel && message.channel?.name !== approvalChannel) return false;
     const command = parseBuyApprovalCommand(message.content);
     if (!command.matched) return false;
+    if (readOnly) {
+      await message.reply("읽기 전용 계좌 점검 중이므로 주문 승인을 실행하지 않습니다.");
+      return true;
+    }
     if (command.ambiguous) {
       await message.reply("계좌 선택이 애매합니다. `둘다`, `키움만`, `한투만`, `안 사` 중 하나로 말해 주세요.");
       return true;
@@ -683,6 +755,7 @@ async function start() {
     if (!shouldConsumeMessage(message, trusted)) return;
     const record = decodeSignalEmbed(message.embeds?.[0]);
     if (!record) return;
+    if (!readOnlySignalAllowed(record, readOnly)) return;
     if (Date.now() - new Date(record.receivedAt).getTime() > maxAgeMs) return;
     if (!receipts.claim(record.requestId, message.id)) return;
 
@@ -724,6 +797,10 @@ async function start() {
     } else if (command === "STATUS") {
       await message.reply([`🧭 **${accountLabel} 주문 실행기 상태**`, `증권사: ${accountSummary()}`, `신뢰 채널: ${sourceChannelIds.size}개`, `자동매매: ${receipts.autoTrading() ? "ON" : "OFF"}`, `실계좌: ${brokers.some((broker) => broker.environment === "live") ? "활성 · 강한 BUY 자동, 축소 BUY 승인" : "지원 · 현재 잠금"}`].join("\n"));
     } else if (["AUTO_ON", "AUTO_OFF", "AUTO_STATUS"].includes(command)) {
+      if (readOnly) {
+        await message.reply("🔒 **읽기 전용 계좌 점검 모드**\n자동매매 설정을 바꾸지 않으며 주문 없는 종단간 테스트만 처리합니다.");
+        return true;
+      }
       if (command !== "AUTO_STATUS") receipts.setAutoTrading(command === "AUTO_ON");
       await message.reply(`🤖 **${accountLabel} 자동매매 ${receipts.autoTrading() ? "ON" : "OFF"}**\n${receipts.autoTrading() ? "모의계좌는 BUY를 자동 주문하고, 실계좌는 강한 BUY만 자동·축소 BUY는 승인 후 주문합니다." : "신호는 수신하지만 자동 주문하지 않습니다."}\n실계좌 기능은 지원하며 현재 계좌 설정의 잠금 상태를 따릅니다.`);
     } else {
@@ -746,15 +823,15 @@ async function start() {
       `Discord: ${client.user.tag}`,
       `계좌: ${accountSummary()} · 실계좌 기능 지원`,
       `수신: 매매신호 채널 ${sourceChannelIds.size}개`,
-      `처리: 공통 신호 → 계좌별 수량 계산 → ${receipts.autoTrading() ? "자동 주문" : "BUY 승인"}`,
+      `처리: ${readOnly ? "읽기 전용 · 주문 없는 테스트만" : `공통 신호 → 계좌별 수량 계산 → ${receipts.autoTrading() ? "자동 주문" : "BUY 승인"}`}`,
     ].join("\n"));
     await send(channels.system, { text: formatBrokerStartup(
       `${accountLabel} 주문 실행기`,
       client.user.tag,
-      `${accountSummary()} · 신뢰 채널 ${sourceChannelIds.size}개 · 자동매매 ${receipts.autoTrading() ? "ON" : "OFF"}`,
-      brokers.some((broker) => broker.environment === "live") ? "실계좌 활성 · 강한 BUY 자동, 축소 BUY 승인" : "실계좌 지원 · 현재 잠금",
+      `${accountSummary()} · 신뢰 채널 ${sourceChannelIds.size}개 · ${readOnly ? "읽기 전용" : `자동매매 ${receipts.autoTrading() ? "ON" : "OFF"}`}`,
+      readOnly ? "주문 잠금 · 주문 없는 종단간 테스트만 허용" : brokers.some((broker) => broker.environment === "live") ? "실계좌 활성 · 강한 BUY 자동, 축소 BUY 승인" : "실계좌 지원 · 현재 잠금",
     ) });
-    const reconciled = await reconcileOrders().catch(async (error) => {
+    const reconciled = readOnly ? false : await reconcileOrders().catch(async (error) => {
       await reportError("미완료 주문 시작 조회 실패", error);
       return false;
     });
@@ -768,16 +845,18 @@ async function start() {
       const recent = [...(await channel.messages.fetch({ limit: 50 })).values()].reverse();
       for (const message of recent) queue = queue.then(() => processMessage(message));
     }
-    setInterval(() => {
-      queue = queue.then(() => retryDeferred()).catch((error) => reportError("미국 예약 주문 재시도 실패", error));
-    }, 15_000).unref();
-    setInterval(() => {
-      queue = queue.then(() => reconcileOrders()).catch((error) => reportError("미완료 주문 체결 조회 실패", error));
-    }, 30_000).unref();
+    if (!readOnly) {
+      setInterval(() => {
+        queue = queue.then(() => retryDeferred()).catch((error) => reportError("미국 예약 주문 재시도 실패", error));
+      }, 15_000).unref();
+      setInterval(() => {
+        queue = queue.then(() => reconcileOrders()).catch((error) => reportError("미완료 주문 체결 조회 실패", error));
+      }, 30_000).unref();
+    }
   });
   await client.login(process.env.ACCOUNT_DISCORD_TOKEN || process.env.KIS_DISCORD_TOKEN || process.env.DISCORD_TOKEN_DRUCKENMILLER);
 }
 
 if (require.main === module) start().catch((error) => { console.error(error); process.exitCode = 1; });
 
-module.exports = { SignalReceiptStore, accountCommand, accountContext, accountPortfolioSyncMinutes, approvalText, brokerEnvironments, buyApprovalRequiredForBroker, discordMessagePayload, enabledBrokerIds, enforceOwnAccountRules, errorReportDue, liveAutoBuyEligible, orderNeedsPortfolioSync, orderNeedsResultReport, reconcilePendingBrokerOrders, shouldConsumeMessage, signalExchange, start };
+module.exports = { SignalReceiptStore, accountCommand, accountContext, accountPortfolioSyncMinutes, applyPyramidSizing, approvalText, brokerEnvironments, buyApprovalRequiredForBroker, discordMessagePayload, enabledBrokerIds, enforceOwnAccountRules, errorReportDue, liveAutoBuyEligible, orderNeedsPortfolioSync, orderNeedsResultReport, pyramidPlan, readOnlySignalAllowed, reconcilePendingBrokerOrders, shouldConsumeMessage, signalExchange, start };

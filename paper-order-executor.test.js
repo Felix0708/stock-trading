@@ -94,6 +94,7 @@ const record = {
     positionPreview: {
       quantity: 4, positionValue: 1000, projectedPositionRatio: 12.5,
       positionLimitRatio: 0.2, equity: 8000, currentPositionValue: 0, currency: "USD",
+      pyramidStage: 1, pyramidRatio: 0.5, initialEntryQuantity: 8,
     },
   };
   const overseasClient = {
@@ -114,6 +115,9 @@ const record = {
   assert.equal(auto.plannedInvestment, 1000);
   assert.equal(auto.projectedPositionRatio, 12.5);
   assert.equal(auto.accountEquity, 8000);
+  assert.equal(auto.pyramidStage, 1);
+  assert.equal(auto.pyramidRatio, 0.5);
+  assert.equal(auto.initialEntryQuantity, 8);
   assert.equal(auto.limitPrice, 241.2);
   assert.equal(auto.referencePrice, 240);
   assert.equal((await refreshPaperOrder(auto, {

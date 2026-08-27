@@ -1,14 +1,18 @@
 "use strict";
 
 const assert = require("node:assert/strict");
-const { accountCommand, accountContext, accountPortfolioSyncMinutes, approvalText, brokerEnvironments, buyApprovalRequiredForBroker, discordMessagePayload, enabledBrokerIds, enforceOwnAccountRules, errorReportDue, liveAutoBuyEligible, orderNeedsPortfolioSync, orderNeedsResultReport, reconcilePendingBrokerOrders, shouldConsumeMessage, SignalReceiptStore } = require("./kis-discord-consumer");
+const { accountCommand, accountContext, accountPortfolioSyncMinutes, applyPyramidSizing, approvalText, brokerEnvironments, buyApprovalRequiredForBroker, discordMessagePayload, enabledBrokerIds, enforceOwnAccountRules, errorReportDue, liveAutoBuyEligible, orderNeedsPortfolioSync, orderNeedsResultReport, pyramidPlan, readOnlySignalAllowed, reconcilePendingBrokerOrders, shouldConsumeMessage, SignalReceiptStore } = require("./kis-discord-consumer");
 
 assert.deepEqual(enabledBrokerIds({ ACCOUNT_EXECUTOR_ENABLED: "true", EXECUTOR_KIWOOM_ENABLED: "true", EXECUTOR_KIS_ENABLED: "true" }), ["KIWOOM", "KIS"]);
 assert.deepEqual(enabledBrokerIds({ ACCOUNT_EXECUTOR_ENABLED: "true", EXECUTOR_KIWOOM_ENABLED: "true", EXECUTOR_KIS_ENABLED: "false" }), ["KIWOOM"]);
 assert.deepEqual(enabledBrokerIds({ KIS_CONSUMER_ENABLED: "true" }), ["KIS"]);
 assert.deepEqual(enabledBrokerIds({}), []);
 assert.deepEqual(brokerEnvironments(["KIWOOM", "KIS"], { KIWOOM_ENV: "mock", KIS_ENV: "live", ACCOUNT_LIVE_TRADING: "true" }), { KIWOOM: "mock", KIS: "live" });
+assert.deepEqual(brokerEnvironments(["KIWOOM"], { KIWOOM_ENV: "live", ACCOUNT_READ_ONLY: "true" }), { KIWOOM: "live" });
 assert.throws(() => brokerEnvironments(["KIWOOM"], { KIWOOM_ENV: "live" }), /ACCOUNT_LIVE_TRADING=true/);
+assert.equal(readOnlySignalAllowed({ payload: { paper_order_test: true } }, true), true);
+assert.equal(readOnlySignalAllowed({ payload: { paper_order_test: false } }, true), false);
+assert.equal(readOnlySignalAllowed({ payload: {} }, false), true);
 assert.equal(accountPortfolioSyncMinutes({ MY_PORTFOLIO_SYNC_MINUTES: "10" }), 1440);
 assert.equal(accountPortfolioSyncMinutes({ ACCOUNT_PORTFOLIO_SYNC_MINUTES: "720", MY_PORTFOLIO_SYNC_MINUTES: "10" }), 720);
 assert.deepEqual(discordMessagePayload({ text: "중복되면 안 됨", embed: { title: "카드" } }), { embeds: [{ title: "카드" }] });
@@ -107,6 +111,28 @@ assert.equal(
 );
 assert.equal(orderNeedsPortfolioSync({ status: "CANCELLED", filledQuantity: 2, portfolioSyncedFilledQuantity: 0 }), true);
 
+const pyramidRecord = { payload: { exchange: "NASDAQ", ticker: "AAPL", price: 120 }, risk: { verdict: "PAPER_ADD" } };
+const initialEntry = { revision: 1, market: "NASDAQ", symbol: "AAPL", entryType: "PAPER_ENTRY", status: "FILLED", filledQuantity: 8 };
+assert.match(pyramidPlan([], pyramidRecord).reason, /최초 진입 체결수량/);
+assert.deepEqual(pyramidPlan([initialEntry], pyramidRecord), { blocked: false, stage: 1, ratio: 0.5, quantity: 4, initialEntryQuantity: 8 });
+assert.match(pyramidPlan([{ ...initialEntry, status: "PARTIALLY_FILLED", filledQuantity: 4 }], pyramidRecord).reason, /최초 진입 주문 체결 완료 확인 중/);
+assert.match(pyramidPlan([initialEntry, { revision: 2, market: "NASDAQ", symbol: "AAPL", entryType: "PAPER_ADD", status: "ACCEPTED", filledQuantity: 0 }], pyramidRecord).reason, /체결 확인 중/);
+assert.deepEqual(pyramidPlan([initialEntry, { revision: 2, market: "NASDAQ", symbol: "AAPL", entryType: "PAPER_ADD", status: "FILLED", filledQuantity: 4 }], pyramidRecord), { blocked: false, stage: 2, ratio: 0.25, quantity: 2, initialEntryQuantity: 8 });
+assert.match(pyramidPlan([initialEntry,
+  { revision: 2, market: "NASDAQ", symbol: "AAPL", entryType: "PAPER_ADD", status: "FILLED", filledQuantity: 4 },
+  { revision: 3, market: "NASDAQ", symbol: "AAPL", entryType: "PAPER_ADD", status: "FILLED", filledQuantity: 2 },
+], pyramidRecord).reason, /2차까지 실행 완료/);
+assert.match(pyramidPlan([initialEntry, { revision: 2, market: "NASDAQ", symbol: "AAPL", fullExit: true, status: "FILLED", filledQuantity: 14 }], pyramidRecord).reason, /최초 진입 체결수량/);
+assert.deepEqual(pyramidPlan([initialEntry, { revision: 2, market: "NASDAQ", symbol: "AAPL", fullExit: true, status: "PARTIALLY_FILLED", filledQuantity: 4 }], pyramidRecord), { blocked: false, stage: 1, ratio: 0.5, quantity: 4, initialEntryQuantity: 8 });
+const pyramidSizing = applyPyramidSizing(pyramidRecord, {
+  blocked: false, quantity: 3, currentPositionValue: 960, equity: 10_000, positionValue: 360, projectedPositionValue: 1320, projectedPositionRatio: 13.2,
+}, [initialEntry]);
+assert.deepEqual({ ...pyramidSizing, projectedPositionRatio: 13.2 }, {
+  blocked: false, quantity: 3, currentPositionValue: 960, equity: 10_000, positionValue: 360, projectedPositionValue: 1320, projectedPositionRatio: 13.2,
+  pyramidStage: 1, pyramidRatio: 0.5, initialEntryQuantity: 8,
+});
+assert.ok(Math.abs(pyramidSizing.projectedPositionRatio - 13.2) < 1e-9);
+
 (async () => {
   const context = await accountContext({
     getDomesticBalance: async () => ({ estimatedAssets: 0, totalEvaluation: 0, holdings: [] }),
@@ -116,11 +142,12 @@ assert.equal(orderNeedsPortfolioSync({ status: "CANCELLED", filledQuantity: 2, p
   assert.equal(context.accountPositionRatio, 7625.52 / (92294.675 + 7625.52) * 100);
 
   const approval = approvalText({ payload: { ticker: "SE", name: "Sea Limited" } }, {
-    KIS: { label: "한투", preview: { blocked: false, quantity: 63, currency: "USD", positionValue: 7634.655, projectedPositionRatio: 7.64, positionLimitRatio: 0.2 } },
+    KIS: { label: "한투", preview: { blocked: false, quantity: 4, currency: "USD", positionValue: 484.72, projectedPositionRatio: 7.64, positionLimitRatio: 0.2, pyramidStage: 1, pyramidRatio: 0.5, initialEntryQuantity: 8 } },
   }, ["KIS"]);
   assert.match(approval, /주문 후 계좌 비중 7\.64% \/ 최대 20%/);
   assert.match(approval, /`한투만` \/ `안 사`/);
   assert.doesNotMatch(approval, /둘다/);
+  assert.match(approval, /피라미딩 1차\(최초 8주의 50%\)/);
 
   const changes = await reconcilePendingBrokerOrders({
     tracker: {
