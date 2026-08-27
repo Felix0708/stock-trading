@@ -420,7 +420,11 @@ async function start() {
   }
 
   async function syncPortfolio() {
-    return syncAccountPortfolio(await targetChannel(channels.portfolio), brokers);
+    const result = await syncAccountPortfolio(await targetChannel(channels.portfolio), brokers);
+    for (const failure of result.failures) {
+      await reportError(`${failure.label} 포트폴리오 조회 실패`, failure.reason);
+    }
+    return result;
   }
 
   async function previewFor(broker, record) {
@@ -501,8 +505,10 @@ async function start() {
     }
     if (orderNeedsPortfolioSync(final)) {
       try {
-        await syncPortfolio();
-        final = broker.tracker.record({ ...final, portfolioSyncedFilledQuantity: final.filledQuantity });
+        const synced = await syncPortfolio();
+        if (synced.succeededBrokerIds.has(broker.id)) {
+          final = broker.tracker.record({ ...final, portfolioSyncedFilledQuantity: final.filledQuantity });
+        }
       } catch (error) {
         await reportError("포트폴리오 주문 후 갱신 실패", error);
       }
@@ -547,8 +553,9 @@ async function start() {
     }
     if (portfolioChanged) {
       try {
-        await syncPortfolio();
+        const synced = await syncPortfolio();
         for (const broker of brokers) {
+          if (!synced.succeededBrokerIds.has(broker.id)) continue;
           for (const order of broker.tracker.list().filter(orderNeedsPortfolioSync)) {
             broker.tracker.record({ ...order, portfolioSyncedFilledQuantity: order.filledQuantity });
           }

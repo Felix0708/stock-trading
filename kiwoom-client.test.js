@@ -11,7 +11,7 @@ async function fakeFetch(url, options) {
   calls.push({ url, options });
   if (url.endsWith("/oauth2/token")) {
     return new Response(JSON.stringify({
-      expires_dt: "20260810010000",
+      expires_dt: "20991231235959",
       token_type: "bearer",
       token: "test-access-token",
       return_code: 0,
@@ -142,7 +142,7 @@ async function fakeFetch(url, options) {
     fetchImpl: async (url, options) => {
       liveCalls.push({ url, options });
       return url.endsWith("/oauth2/token")
-        ? new Response(JSON.stringify({ expires_dt: "20260810010000", token: "live-token", return_code: 0 }))
+        ? new Response(JSON.stringify({ expires_dt: "20991231235959", token: "live-token", return_code: 0 }))
         : new Response(JSON.stringify({ acctNo: "1234567890", return_code: 0 }));
     },
   });
@@ -295,7 +295,7 @@ async function fakeFetch(url, options) {
       accountCount += 1;
       refreshedHeaders.push(options.headers.authorization);
       return new Response(JSON.stringify(accountCount === 1
-        ? { return_code: 8005, return_msg: "Token이 유효하지 않습니다" }
+        ? { return_code: 3, return_msg: "인증에 실패했습니다[8005:Token이 유효하지 않습니다]" }
         : { acctNo: "1234567890", return_code: 0 }));
     },
   });
@@ -312,7 +312,7 @@ async function fakeFetch(url, options) {
       }
       rateLimitedCount += 1;
       return new Response(JSON.stringify(rateLimitedCount === 1
-        ? { return_code: 1700, return_msg: "허용된 API 요청 개수를 초과하였습니다" }
+        ? { return_code: 3, return_msg: "요청 실패[1700:허용된 API 요청 개수를 초과하였습니다]" }
         : { crnc_code: "USD", tot_evlt_amt: "0", tot_pl_amt: "0", result_list: [], return_code: 0 }));
     },
   });
@@ -320,6 +320,21 @@ async function fakeFetch(url, options) {
     currency: "USD", totalEvaluation: 0, totalProfitLoss: 0, holdings: [],
   });
   assert.equal(rateLimitedCount, 2);
+
+  let expiringAuthCount = 0;
+  const expiringClient = new KiwoomClient({
+    appKey: "app-key", secretKey: "secret-key",
+    fetchImpl: async () => {
+      expiringAuthCount += 1;
+      return new Response(JSON.stringify({
+        token: `expiring-token-${expiringAuthCount}`,
+        expires_dt: expiringAuthCount === 1 ? "20000101000000" : "20991231235959",
+        return_code: 0,
+      }));
+    },
+  });
+  assert.equal((await expiringClient.getAccessToken()), "expiring-token-1");
+  assert.equal((await expiringClient.getAccessToken()), "expiring-token-2");
 
   const tokenDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "kiwoom-token-cache-"));
   try {

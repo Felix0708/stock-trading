@@ -24,6 +24,11 @@ function tokenExpiry(expiresDt) {
   return match ? Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]), Number(match[4]) - 9, Number(match[5]), Number(match[6])) : 0;
 }
 
+function responseErrorCode(data) {
+  const embedded = String(data?.return_msg || "").match(/\[(\d+):/);
+  return embedded ? Number(embedded[1]) : Number(data?.return_code);
+}
+
 class KiwoomClient {
   #appKey;
   #secretKey;
@@ -116,14 +121,15 @@ class KiwoomClient {
     } catch {
       throw new Error(`키움 ${this.#environmentLabel} 응답이 JSON이 아닙니다. (HTTP ${response.status})`);
     }
-    if (authorization && retryAuthorization && Number(data.return_code) === 8005) {
+    const errorCode = responseErrorCode(data);
+    if (authorization && retryAuthorization && errorCode === 8005) {
       const rejectedToken = this.#token;
       this.#token = null;
       this.#expiresDt = null;
       await this.#refreshAccessToken(rejectedToken);
       return this.post(path, { apiId, body, authorization, retryAuthorization: false });
     }
-    if (authorization && retryRateLimit && Number(data.return_code) === 1700) {
+    if (authorization && retryRateLimit && errorCode === 1700) {
       await new Promise((resolve) => setTimeout(resolve, 1100));
       return this.post(path, { apiId, body, authorization, retryAuthorization, retryRateLimit: false });
     }
@@ -153,6 +159,10 @@ class KiwoomClient {
   }
 
   async getAccessToken() {
+    if (this.#token && tokenExpiry(this.#expiresDt) <= Date.now() + 60_000) {
+      this.#token = null;
+      this.#expiresDt = null;
+    }
     if (!this.#token) await this.#refreshAccessToken();
     return this.#token;
   }
