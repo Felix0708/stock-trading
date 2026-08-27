@@ -138,6 +138,7 @@ const record = {
   });
   assert.equal(domesticPartial.orderQuantity, 2);
   assert.equal(domesticPartial.partialExitRatio, 0.25);
+  assert.equal(domesticPartial.orderStyle, "PROTECTED");
   assert.equal((await submitPaperOrder(autoRecord, {
     enabled: true, environment: "live", domesticClient: options.client, overseasClient, tracker: autoTracker,
   })).status, "ACCEPTED");

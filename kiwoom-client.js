@@ -35,6 +35,45 @@ class KiwoomClient {
   #token = null;
   #expiresDt = null;
 
+  #useCachedToken(rejectedToken = "") {
+    if (!this.#tokenCacheFile || !fs.existsSync(this.#tokenCacheFile)) return false;
+    const cached = JSON.parse(fs.readFileSync(this.#tokenCacheFile, "utf8"));
+    if (typeof cached.token !== "string" || cached.token === rejectedToken || tokenExpiry(cached.expiresDt) <= Date.now() + 60_000) return false;
+    this.#token = cached.token;
+    this.#expiresDt = cached.expiresDt;
+    return true;
+  }
+
+  async #refreshAccessToken(rejectedToken = "") {
+    if (!this.#tokenCacheFile) {
+      await this.authenticate();
+      return;
+    }
+    if (this.#useCachedToken(rejectedToken)) return;
+    const lockFile = `${this.#tokenCacheFile}.lock`;
+    let lock;
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      try {
+        lock = fs.openSync(lockFile, "wx", 0o600);
+        break;
+      } catch (error) {
+        if (error.code !== "EEXIST") throw error;
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        if (this.#useCachedToken(rejectedToken)) return;
+      }
+    }
+    if (lock === undefined) throw new Error("키움 토큰 갱신 잠금 대기 시간이 초과되었습니다.");
+    try {
+      if (!this.#useCachedToken(rejectedToken)) {
+        fs.rmSync(this.#tokenCacheFile, { force: true });
+        await this.authenticate();
+      }
+    } finally {
+      fs.closeSync(lock);
+      fs.rmSync(lockFile, { force: true });
+    }
+  }
+
   constructor({ appKey, secretKey, environment = "mock", fetchImpl = fetch, timeoutMs = 5000, tokenCacheFile } = {}) {
     if (!["mock", "live"].includes(environment)) throw new Error("KIWOOM_ENV는 mock 또는 live여야 합니다.");
     if (!appKey || !secretKey) throw new Error("키움 App Key와 App Secret이 필요합니다.");
@@ -78,10 +117,10 @@ class KiwoomClient {
       throw new Error(`키움 ${this.#environmentLabel} 응답이 JSON이 아닙니다. (HTTP ${response.status})`);
     }
     if (authorization && retryAuthorization && Number(data.return_code) === 8005) {
+      const rejectedToken = this.#token;
       this.#token = null;
       this.#expiresDt = null;
-      if (this.#tokenCacheFile) fs.rmSync(this.#tokenCacheFile, { force: true });
-      await this.authenticate();
+      await this.#refreshAccessToken(rejectedToken);
       return this.post(path, { apiId, body, authorization, retryAuthorization: false });
     }
     if (authorization && retryRateLimit && Number(data.return_code) === 1700) {
@@ -114,14 +153,7 @@ class KiwoomClient {
   }
 
   async getAccessToken() {
-    if (!this.#token && this.#tokenCacheFile && fs.existsSync(this.#tokenCacheFile)) {
-      const cached = JSON.parse(fs.readFileSync(this.#tokenCacheFile, "utf8"));
-      if (typeof cached.token === "string" && tokenExpiry(cached.expiresDt) > Date.now() + 60_000) {
-        this.#token = cached.token;
-        this.#expiresDt = cached.expiresDt;
-      }
-    }
-    if (!this.#token) await this.authenticate();
+    if (!this.#token) await this.#refreshAccessToken();
     return this.#token;
   }
 
@@ -228,13 +260,14 @@ class KiwoomClient {
     return { date, markets };
   }
 
-  async placeDomesticMarketOrder({ side, symbol, quantity, price, session = "REGULAR" } = {}) {
+  async placeDomesticMarketOrder({ side, symbol, quantity, price, session = "REGULAR", orderStyle = "MARKET" } = {}) {
     side = String(side || "").toUpperCase();
     symbol = String(symbol || "");
     if (!["BUY", "SELL"].includes(side)) throw new Error("국내주식 주문 side는 BUY 또는 SELL이어야 합니다.");
     if (!/^\d{6}$/.test(symbol)) throw new Error("국내주식 종목코드는 6자리 숫자여야 합니다.");
     if (!Number.isInteger(quantity) || quantity < 1) throw new Error("국내주식 주문수량은 1 이상의 정수여야 합니다.");
-    const orderType = { PRE: "61", REGULAR: "3", AFTER_CLOSE: "81", AFTER_SINGLE: "62" }[session];
+    if (!["MARKET", "PROTECTED"].includes(orderStyle)) throw new Error("국내주식 주문방식이 올바르지 않습니다.");
+    const orderType = session === "REGULAR" && side === "SELL" && orderStyle === "PROTECTED" ? "16" : { PRE: "61", REGULAR: "3", AFTER_CLOSE: "81", AFTER_SINGLE: "62" }[session];
     if (!orderType) throw new Error("국내주식 주문 가능 시간이 아닙니다.");
     if (session === "AFTER_SINGLE" && (!Number.isFinite(price) || price <= 0)) throw new Error("시간외 단일가 주문 가격이 필요합니다.");
 

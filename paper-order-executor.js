@@ -2,6 +2,7 @@
 
 const fs = require("node:fs");
 const { setTimeout: delay } = require("node:timers/promises");
+const { refreshPaperOrder, trackPaperOrder } = require("./order-tracking");
 
 function blocked(reason) {
   return { status: "BLOCKED", reason };
@@ -144,6 +145,7 @@ async function submitPaperOrder(record, options) {
   let client;
   let quantity;
   let order;
+  let orderStyle;
   if (exchange === "KRX") {
     client = options.domesticClient;
     if (!/^\d{6}$/.test(payload.ticker)) return blocked("국내주식 종목코드는 6자리여야 함");
@@ -153,9 +155,11 @@ async function submitPaperOrder(record, options) {
       quantity = partialExit ? partialExitQuantity(tradable, partialExitRatio(record, options)) : tradable;
     }
     if (!Number.isInteger(quantity) || quantity < 1) return blocked("주문 가능한 국내주식 수량 없음");
+    const session = domesticSession(options.now || new Date());
+    orderStyle = side === "SELL" && session === "REGULAR" ? "PROTECTED" : "MARKET";
     order = await client.placeDomesticMarketOrder({
       side, symbol: payload.ticker, quantity, price: payload.price,
-      session: domesticSession(options.now || new Date()),
+      session, orderStyle,
     });
   } else {
     client = options.overseasClient;
@@ -175,6 +179,7 @@ async function submitPaperOrder(record, options) {
   }
   return options.tracker.record({
     ...order, orderQuantity: quantity, filledQuantity: 0, remainingQuantity: quantity,
+    orderStyle,
     brokerLabel: options.brokerLabel || "키움 모의계좌",
     source: record.source || "TRADINGVIEW", market: exchange, name: payload.name,
     signalType: payload.type, signalPrice: payload.price, stopPrice: payload.sl,
@@ -187,28 +192,6 @@ async function submitPaperOrder(record, options) {
     preTradePositionValue: positionPreview?.currentPositionValue,
     currency: positionPreview?.currency || (exchange === "KRX" ? "KRW" : "USD"),
   });
-}
-
-async function refreshPaperOrder(order, options) {
-  const client = order.market === "KRX" ? options.domesticClient : options.overseasClient;
-  const query = order.market === "KRX"
-    ? () => client.getDomesticOrderExecutions({ symbol: order.symbol })
-    : () => client.getUsOrderExecutions({ exchange: order.exchange, symbol: order.symbol });
-  const normalizedOrderNo = String(order.orderNo).replace(/^0+(?=\d)/, "");
-  const current = (await query()).find((item) => String(item.orderNo).replace(/^0+(?=\d)/, "") === normalizedOrderNo);
-  if (!current) return order;
-  const changed = ["status", "filledQuantity", "remainingQuantity", "fillPrice"]
-    .some((key) => current[key] !== undefined && current[key] !== order[key]);
-  return changed ? options.tracker.record({ ...order, ...current, orderNo: order.orderNo }) : order;
-}
-
-async function trackPaperOrder(order, options) {
-  for (let attempt = 0; attempt < (options.attempts ?? 15); attempt += 1) {
-    order = await refreshPaperOrder(order, options);
-    if (["FILLED", "CANCELLED", "REJECTED"].includes(order.status)) return order;
-    await delay(options.delayMs ?? 1000);
-  }
-  return order;
 }
 
 async function submitPaperTestOrder(record, options) {

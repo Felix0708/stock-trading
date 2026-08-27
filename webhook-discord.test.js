@@ -8,6 +8,7 @@ const {
   formatDailyJournal,
   formatDeferredBuy,
   formatExecutorError,
+  formatUncreatedOrder,
   formatOrderStatus,
   formatTradeJournal,
   formatWebhookRecord,
@@ -230,5 +231,19 @@ assert.equal(deferredBuy.event, "DEFERRED_BUY");
 assert.equal(deferredBuy.text.includes("청산 실패"), false);
 assert(formatDeferredBuy({ ...base, payload: { ...base.payload, exchange: "KRX" } }, "키움", "mock").text.includes("국내 모의 매수 예약"));
 assert.equal(formatExecutorError("한투 예약 매수 재시도 실패", new Error("장 종료"), base).event, "EXECUTOR_ERROR");
+const executorOrderFailure = formatUncreatedOrder("키움 모의계좌", base, { title: "주문 실패", reason: "계좌 조회 실패" });
+assert.equal(executorOrderFailure.channel, "execution");
+assert(executorOrderFailure.embed.title.includes("키움 모의계좌 주문 실패"));
+assert(executorOrderFailure.embed.fields.some((field) => field.name === "사유" && field.value === "계좌 조회 실패"));
+assert(executorOrderFailure.embed.footer.text.includes("주문 생성 안 됨"));
+const userRejectedBuy = formatUncreatedOrder("두 계좌", base, { title: "사용자 BUY 승인 거부", reason: "사용자가 BUY 승인을 거부했습니다." });
+assert(userRejectedBuy.embed.title.includes("사용자 BUY 승인 거부"));
+const rejectedOrder = formatOrderStatus({
+  orderNo: "1903", symbol: "SE", side: "BUY", status: "REJECTED", market: "NYSE",
+  orderQuantity: 63, filledQuantity: 0, remainingQuantity: 63, rawStatus: "증권사 주문 거부",
+  resultAt: "2026-08-12T00:00:07.301Z", updatedAt: "2026-08-27T01:35:01.621Z",
+});
+assert(rejectedOrder.embed.fields.some((field) => field.name === "사유" && field.value === "증권사 주문 거부"));
+assert.equal(rejectedOrder.embed.timestamp, "2026-08-12T00:00:07.301Z");
 
 console.log("webhook-discord test OK");

@@ -278,7 +278,8 @@ async function fakeFetch(url, options) {
   });
   await sessionClient.placeDomesticMarketOrder({ side: "SELL", symbol: "005930", quantity: 1, session: "PRE" });
   await sessionClient.placeDomesticMarketOrder({ side: "BUY", symbol: "005930", quantity: 1, price: 81000, session: "AFTER_SINGLE" });
-  assert.deepEqual(sessionBodies.map((body) => [body.trde_tp, body.ord_uv]), [["61", ""], ["62", "81000"]]);
+  await sessionClient.placeDomesticMarketOrder({ side: "SELL", symbol: "005930", quantity: 1, session: "REGULAR", orderStyle: "PROTECTED" });
+  assert.deepEqual(sessionBodies.map((body) => [body.trde_tp, body.ord_uv]), [["61", ""], ["62", "81000"], ["16", ""]]);
 
   let authCount = 0;
   let accountCount = 0;
@@ -330,6 +331,22 @@ async function fakeFetch(url, options) {
     await new KiwoomClient({ appKey: "cached-app", secretKey: "cached-secret", fetchImpl: cachedFetch, tokenCacheFile }).getAccessToken();
     assert.equal(await new KiwoomClient({ appKey: "cached-app", secretKey: "cached-secret", fetchImpl: cachedFetch, tokenCacheFile }).getAccessToken(), "cached-token");
     assert.equal(cachedAuthCount, 1);
+
+    const sharedTokenCacheFile = path.join(tokenDirectory, "shared-token.json");
+    fs.writeFileSync(sharedTokenCacheFile, JSON.stringify({ token: "stale-token", expiresDt: "20991231235959" }));
+    let sharedAuthCount = 0;
+    const sharedFetch = async (url, options) => {
+      if (url.endsWith("/oauth2/token")) {
+        sharedAuthCount += 1;
+        return new Response(JSON.stringify({ token: "fresh-token", expires_dt: "20991231235959", return_code: 0 }));
+      }
+      return new Response(JSON.stringify(options.headers.authorization === "Bearer fresh-token"
+        ? { acctNo: "1234567890", return_code: 0 }
+        : { return_code: 8005, return_msg: "Token이 유효하지 않습니다" }));
+    };
+    const sharedClients = [1, 2].map(() => new KiwoomClient({ appKey: "shared-app", secretKey: "shared-secret", fetchImpl: sharedFetch, tokenCacheFile: sharedTokenCacheFile }));
+    assert.deepEqual(await Promise.all(sharedClients.map((client) => client.getDomesticAccountNumber())), ["1234567890", "1234567890"]);
+    assert.equal(sharedAuthCount, 1);
   } finally {
     fs.rmSync(tokenDirectory, { recursive: true, force: true });
   }

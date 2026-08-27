@@ -1,7 +1,7 @@
 "use strict";
 
 const assert = require("node:assert/strict");
-const { accountCommand, accountContext, accountPortfolioSyncMinutes, approvalText, brokerEnvironments, enabledBrokerIds, enforceOwnAccountRules, reconcilePendingBrokerOrders, shouldConsumeMessage, SignalReceiptStore } = require("./kis-discord-consumer");
+const { accountCommand, accountContext, accountPortfolioSyncMinutes, approvalText, brokerEnvironments, discordMessagePayload, enabledBrokerIds, enforceOwnAccountRules, errorReportDue, orderNeedsPortfolioSync, orderNeedsResultReport, reconcilePendingBrokerOrders, shouldConsumeMessage, SignalReceiptStore } = require("./kis-discord-consumer");
 
 assert.deepEqual(enabledBrokerIds({ ACCOUNT_EXECUTOR_ENABLED: "true", EXECUTOR_KIWOOM_ENABLED: "true", EXECUTOR_KIS_ENABLED: "true" }), ["KIWOOM", "KIS"]);
 assert.deepEqual(enabledBrokerIds({ ACCOUNT_EXECUTOR_ENABLED: "true", EXECUTOR_KIWOOM_ENABLED: "true", EXECUTOR_KIS_ENABLED: "false" }), ["KIWOOM"]);
@@ -11,6 +11,18 @@ assert.deepEqual(brokerEnvironments(["KIWOOM", "KIS"], { KIWOOM_ENV: "mock", KIS
 assert.throws(() => brokerEnvironments(["KIWOOM"], { KIWOOM_ENV: "live" }), /ACCOUNT_LIVE_TRADING=true/);
 assert.equal(accountPortfolioSyncMinutes({ MY_PORTFOLIO_SYNC_MINUTES: "10" }), 1440);
 assert.equal(accountPortfolioSyncMinutes({ ACCOUNT_PORTFOLIO_SYNC_MINUTES: "720", MY_PORTFOLIO_SYNC_MINUTES: "10" }), 720);
+assert.deepEqual(discordMessagePayload({ text: "중복되면 안 됨", embed: { title: "카드" } }), { embeds: [{ title: "카드" }] });
+assert.deepEqual(discordMessagePayload({ text: "텍스트만" }), { content: "텍스트만" });
+assert.equal(orderNeedsResultReport({ status: "FILLED", source: "USER_SCHEDULED_EXIT" }), false);
+assert.equal(orderNeedsResultReport({ status: "FILLED", source: "USER_SCHEDULED_EXIT", executorReportable: true }), true);
+assert.equal(orderNeedsResultReport({ status: "FILLED", source: "USER_SCHEDULED_EXIT", executorReportable: true, filledQuantity: 127, executionReportedStatus: "FILLED", journalReportedStatus: "FILLED", portfolioSyncedFilledQuantity: 127 }), false);
+assert.equal(orderNeedsResultReport({ status: "ACCEPTED", source: "USER_SCHEDULED_EXIT" }), false);
+assert.equal(orderNeedsPortfolioSync({ status: "FILLED", filledQuantity: 63 }), true);
+assert.equal(orderNeedsPortfolioSync({ status: "FILLED", filledQuantity: 63, portfolioSyncedFilledQuantity: 63 }), false);
+assert.equal(orderNeedsPortfolioSync({ status: "REJECTED", filledQuantity: 0 }), false);
+assert.equal(errorReportDue(undefined, 100_000), true);
+assert.equal(errorReportDue(90_000, 100_000), false);
+assert.equal(errorReportDue(0, 30 * 60_000), true);
 
 assert.equal(accountCommand("계좌 상태 보여줘"), "STATUS");
 assert.equal(accountCommand("계좌 상태"), "STATUS");

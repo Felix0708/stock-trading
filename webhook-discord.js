@@ -217,6 +217,8 @@ function formatOrderStatus(order) {
   const filledLine = filledValue
     ? `실제 투입 ${money(filledValue, currency)}${Number.isFinite(positionRatio) ? ` · 체결 후 계좌 비중 ${positionRatio.toFixed(2)}%` : ""}`
     : null;
+  const statusReason = order.reason || order.expirationReason
+    || (["REJECTED", "CANCELLED"].includes(order.status) ? order.rawStatus : "");
   return {
     channel: "system",
     embed: {
@@ -227,10 +229,11 @@ function formatOrderStatus(order) {
         { name: "수량", value: `주문 ${display(order.orderQuantity)}주 · 체결 ${display(order.filledQuantity)}주 · 잔량 ${display(order.remainingQuantity)}주` },
         ...(fillPrice > 0 ? [{ name: "체결가", value: money(fillPrice, currency), inline: true }] : []),
         ...(filledLine ? [{ name: "실제 투입·비중", value: filledLine, inline: false }] : plannedLine ? [{ name: "예상 투입·비중", value: plannedLine, inline: false }] : []),
+        ...(statusReason ? [{ name: "사유", value: clip(statusReason, 1024) }] : []),
         { name: "주문번호", value: `끝 4자리 ${String(order.orderNo || "").slice(-4) || "-"}`, inline: true },
       ],
       footer: { text: brokerLabel },
-      ...(order.updatedAt ? { timestamp: order.updatedAt } : {}),
+      ...(order.resultAt || order.updatedAt ? { timestamp: order.resultAt || order.updatedAt } : {}),
     },
     text: [
       `${icon} **${brokerLabel} 주문 상태**`,
@@ -240,6 +243,7 @@ function formatOrderStatus(order) {
       fillPrice > 0 ? `**체결가**: ${money(fillPrice, currency)}` : null,
       filledLine ? `**실제 투입**: ${money(filledValue, currency)}${Number.isFinite(positionRatio) ? ` / **체결 후 계좌 비중**: ${positionRatio.toFixed(2)}%` : ""}` : null,
       !filledLine && plannedLine ? `**예상 투입**: ${money(order.plannedInvestment, currency)}${Number.isFinite(order.projectedPositionRatio) ? ` / **주문 후 예상 계좌 비중**: ${order.projectedPositionRatio.toFixed(2)}% / 최대 ${(order.positionLimitRatio ?? 0.2) * 100}%` : ""}` : null,
+      statusReason ? `**사유**: ${statusReason}` : null,
       `**주문번호**: 끝 4자리 ${String(order.orderNo || "").slice(-4) || "-"}`,
     ].filter(Boolean).join("\n"),
   };
@@ -323,6 +327,27 @@ function formatExecutorError(title, error, record) {
   };
 }
 
+function formatUncreatedOrder(brokerLabel, record, { title, reason }) {
+  const payload = record?.payload || {};
+  const identity = payload.name ? `${payload.name} (${display(payload.ticker)})` : display(payload.ticker);
+  return {
+    channel: "execution",
+    event: "ORDER_NOT_CREATED",
+    embed: {
+      color: 0xED4245,
+      title: `🛑 ${brokerLabel} ${title}`,
+      description: `**${identity}**`,
+      fields: [
+        { name: "구분", value: display(payload.action), inline: true },
+        { name: "사유", value: clip(reason, 1024) },
+      ],
+      footer: { text: "주문 생성 안 됨" },
+      ...(record?.receivedAt ? { timestamp: record.receivedAt } : {}),
+    },
+    text: `${brokerLabel} ${title} · ${identity} · ${reason}`,
+  };
+}
+
 function formatBrokerStartup(service, botTag, detail, safety = "실계좌 차단") {
   return `✅ ${service} 연결 · ${botTag}\n${detail} · ${safety}`;
 }
@@ -333,6 +358,7 @@ module.exports = {
   formatDailyJournal,
   formatDeferredBuy,
   formatExecutorError,
+  formatUncreatedOrder,
   formatOrderStatus,
   formatTradeJournal,
   formatWebhookRecord,

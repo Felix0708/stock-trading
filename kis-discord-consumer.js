@@ -21,7 +21,7 @@ const {
   usSessionClock,
 } = require("./paper-order-executor");
 const { calculateWebhookPositionPreview, inferPositionProfitable } = require("./position-sizer");
-const { formatBrokerStartup, formatDeferredBuy, formatExecutorError, formatOrderStatus, formatTradeJournal } = require("./webhook-discord");
+const { formatBrokerStartup, formatDeferredBuy, formatExecutorError, formatOrderStatus, formatTradeJournal, formatUncreatedOrder } = require("./webhook-discord");
 
 function shouldConsumeMessage(message, config) {
   return message?.author?.bot === true
@@ -138,6 +138,25 @@ function accountPortfolioSyncMinutes(env = process.env) {
   const minutes = Number(env.ACCOUNT_PORTFOLIO_SYNC_MINUTES || 1440);
   if (!Number.isInteger(minutes) || minutes < 1 || minutes > 1440) throw new Error("ACCOUNT_PORTFOLIO_SYNC_MINUTES는 1~1440 범위여야 합니다.");
   return minutes;
+}
+
+function discordMessagePayload(message) {
+  return message.embed ? { embeds: [message.embed] } : { content: message.text || String(message) };
+}
+
+function orderNeedsResultReport(order) {
+  if (order.source !== "USER_SCHEDULED_EXIT" || order.executorReportable !== true || order.status === "ACCEPTED") return false;
+  return order.executionReportedStatus !== order.status
+    || (order.status === "FILLED" && order.journalReportedStatus !== order.status);
+}
+
+function orderNeedsPortfolioSync(order) {
+  return ["FILLED", "PARTIALLY_FILLED"].includes(order.status)
+    && Number(order.filledQuantity || 0) > Number(order.portfolioSyncedFilledQuantity || 0);
+}
+
+function errorReportDue(previousAt, now = Date.now(), cooldownMs = 30 * 60_000) {
+  return !Number.isFinite(previousAt) || now - previousAt >= cooldownMs;
 }
 
 function accountCommand(content, executorName = "") {
@@ -294,6 +313,7 @@ async function start() {
   const deferredTtlMs = 5 * 24 * 60 * 60_000;
   const portfolioSyncMinutes = accountPortfolioSyncMinutes();
   const brokers = [];
+  const errorReports = new Map();
   if (brokerIds.includes("KIWOOM")) {
     brokers.push({
       id: "KIWOOM", label: "키움", environment: environments.KIWOOM,
@@ -325,23 +345,18 @@ async function start() {
 
   async function send(channelName, message) {
     const channel = await targetChannel(channelName);
-    return channel.send(message.embed ? { content: message.text, embeds: [message.embed] } : { content: message.text || String(message) });
-  }
-
-  async function updateOrderCard(order) {
-    if (!order.statusMessageId) return;
-    const channel = await targetChannel(channels.order);
-    const message = await channel.messages.fetch(order.statusMessageId);
-    const formatted = formatOrderStatus(order);
-    await message.edit({ content: formatted.text, embeds: [formatted.embed] });
+    return channel.send(discordMessagePayload(message));
   }
 
   const brokerAccountLabel = (broker) => `${broker.label} ${broker.environment === "live" ? "실계좌" : "모의계좌"}`;
   const accountSummary = () => brokers.map(brokerAccountLabel).join(" + ");
 
   async function reportError(title, error, record) {
+    const reportKey = [title, error?.message || error, record?.payload?.ticker || record?.symbol || ""].join("\n");
+    if (!errorReportDue(errorReports.get(reportKey))) return;
     try {
       await send(channels.system, formatExecutorError(title, error, record));
+      errorReports.set(reportKey, Date.now());
     } catch (reportingError) {
       console.error(`${title}: ${error.message}; Discord 오류: ${reportingError.message}`);
     }
@@ -370,6 +385,19 @@ async function start() {
     });
   }
 
+  async function reportOrderResult(broker, order) {
+    let reported = { ...order, resultAt: order.resultAt || order.updatedAt };
+    if (reported.executionReportedStatus !== reported.status) {
+      await send(channels.execution, formatOrderStatus(reported));
+      reported = broker.tracker.record({ ...reported, executionReportedStatus: reported.status });
+    }
+    if (reported.status === "FILLED" && reported.journalReportedStatus !== reported.status) {
+      await send(channels.journal, formatTradeJournal(reported));
+      reported = broker.tracker.record({ ...reported, journalReportedStatus: reported.status });
+    }
+    return reported;
+  }
+
   async function execute(broker, record) {
     record.positionPreview = (await previewFor(broker, record)).preview;
     if (record.payload?.paper_order_test === true) {
@@ -384,7 +412,10 @@ async function start() {
       partialExit2Ratio: Number(process.env.PARTIAL_EXIT_2_RATIO || 0.5),
     });
     if (!order || order.status === "BLOCKED") {
-      await send(channels.order, { text: `🛑 **${brokerAccountLabel(broker)} 주문 차단**\n**종목**: ${formatInstrumentLabel(record.payload)}\n**사유**: ${order?.reason || record.positionPreview?.reason || "주문 조건 불충족"}` });
+      await send(channels.execution, formatUncreatedOrder(brokerAccountLabel(broker), record, {
+        title: "주문 차단",
+        reason: order?.reason || record.positionPreview?.reason || "주문 조건 불충족",
+      }));
       return null;
     }
     const statusMessage = await send(channels.order, formatOrderStatus(order));
@@ -397,12 +428,15 @@ async function start() {
           return final;
         });
       }
-      await updateOrderCard(final).catch((error) => reportError(`${broker.label} 주문 상태 카드 갱신 실패`, error, record));
-      await send(channels.execution, formatOrderStatus(final));
+      final = await reportOrderResult(broker, final);
     }
-    if (["FILLED", "PARTIALLY_FILLED"].includes(final.status)) {
-      await send(channels.journal, formatTradeJournal(final));
-      await syncPortfolio().catch((error) => reportError("포트폴리오 주문 후 갱신 실패", error));
+    if (orderNeedsPortfolioSync(final)) {
+      try {
+        await syncPortfolio();
+        final = broker.tracker.record({ ...final, portfolioSyncedFilledQuantity: final.filledQuantity });
+      } catch (error) {
+        await reportError("포트폴리오 주문 후 갱신 실패", error);
+      }
     }
     return final;
   }
@@ -426,15 +460,34 @@ async function start() {
             await reportError(`${broker.label} 체결 비중 조회 실패`, error, { payload: current });
           }
         }
-        await updateOrderCard(reported).catch((error) => reportError(`${broker.label} 주문 상태 카드 갱신 실패`, error));
-        await send(channels.execution, formatOrderStatus(reported));
-        if (current.filledQuantity > previous.filledQuantity) {
-          await send(channels.journal, formatTradeJournal(reported));
-          portfolioChanged = true;
+        reported = await reportOrderResult(broker, reported);
+        if (orderNeedsPortfolioSync(reported)) portfolioChanged = true;
+      }
+      for (const order of broker.tracker.list().filter(orderNeedsResultReport)) {
+        let reported = order;
+        if (order.filledQuantity > 0 && !Number.isFinite(order.positionRatio)) {
+          reported = await withPortfolioMetrics(broker, order).catch(async (error) => {
+            await reportError(`${broker.label} 체결 비중 조회 실패`, error, { payload: order });
+            return order;
+          });
         }
+        reported = await reportOrderResult(broker, reported);
+        if (orderNeedsPortfolioSync(reported)) portfolioChanged = true;
+      }
+      if (broker.tracker.list().some(orderNeedsPortfolioSync)) portfolioChanged = true;
+    }
+    if (portfolioChanged) {
+      try {
+        await syncPortfolio();
+        for (const broker of brokers) {
+          for (const order of broker.tracker.list().filter(orderNeedsPortfolioSync)) {
+            broker.tracker.record({ ...order, portfolioSyncedFilledQuantity: order.filledQuantity });
+          }
+        }
+      } catch (error) {
+        await reportError("포트폴리오 체결 후 갱신 실패", error);
       }
     }
-    if (portfolioChanged) await syncPortfolio().catch((error) => reportError("포트폴리오 체결 후 갱신 실패", error));
     return portfolioChanged;
   }
 
@@ -455,6 +508,10 @@ async function start() {
         return null;
       }
       const action = record.payload.action === "BUY" ? "매수" : "매도";
+      await send(channels.execution, formatUncreatedOrder(brokerAccountLabel(broker), record, {
+        title: "주문 실패",
+        reason: "계좌 조회 또는 주문 요청 실패",
+      }));
       await reportError(`${broker.label} 자동 ${action} 실패`, error, record);
       return null;
     }
@@ -495,6 +552,10 @@ async function start() {
       } catch (error) {
         if (shouldDeferEntry(record, error)) continue;
         receipts.markDeferredFailure(deferred.key, error);
+        await send(channels.execution, formatUncreatedOrder(brokerAccountLabel(broker), record, {
+          title: "예약 매수 실패",
+          reason: "계좌 조회 또는 주문 요청 실패",
+        }));
         await reportError(`${broker.label} 예약 매수 재시도 실패`, error, record);
       }
     }
@@ -518,7 +579,11 @@ async function start() {
     }
     if (command.action === "CANCEL") {
       receipts.removePending(pending.key);
-      await message.reply(`취소했습니다: ${formatInstrumentLabel(pending.record.payload)}`);
+      await send(channels.execution, formatUncreatedOrder(accountSummary(), pending.record, {
+        title: "사용자 BUY 승인 거부",
+        reason: "사용자가 BUY 승인을 거부했습니다.",
+      }));
+      await message.reply(`BUY 승인을 거부했습니다: ${formatInstrumentLabel(pending.record.payload)}`);
       return true;
     }
     const selected = brokers.filter((broker) => command.brokers.includes(broker.id));
@@ -556,7 +621,7 @@ async function start() {
         return;
       }
       if (!entry && !receipts.autoTrading()) {
-        await send(channels.order, { text: `⏸️ **${accountLabel} 자동매매 OFF**\n**종목**: ${formatInstrumentLabel(record.payload)}\n신호는 수신했지만 주문하지 않았습니다.` });
+        await send(channels.system, { text: `⏸️ **${accountLabel} 자동매매 OFF**\n**종목**: ${formatInstrumentLabel(record.payload)}\n신호는 수신했지만 주문하지 않았습니다.` });
         return;
       }
       for (const broker of brokers) {
@@ -637,4 +702,4 @@ async function start() {
 
 if (require.main === module) start().catch((error) => { console.error(error); process.exitCode = 1; });
 
-module.exports = { SignalReceiptStore, accountCommand, accountContext, accountPortfolioSyncMinutes, approvalText, brokerEnvironments, enabledBrokerIds, enforceOwnAccountRules, reconcilePendingBrokerOrders, shouldConsumeMessage, signalExchange, start };
+module.exports = { SignalReceiptStore, accountCommand, accountContext, accountPortfolioSyncMinutes, approvalText, brokerEnvironments, discordMessagePayload, enabledBrokerIds, enforceOwnAccountRules, errorReportDue, orderNeedsPortfolioSync, orderNeedsResultReport, reconcilePendingBrokerOrders, shouldConsumeMessage, signalExchange, start };

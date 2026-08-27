@@ -13,6 +13,7 @@ const {
   formatBuyApproval,
   formatDailyJournal,
   formatOrderStatus,
+  formatTradeJournal,
   formatWebhookRecord,
 } = require("./webhook-discord");
 const { createWebhookService, loadOrCreateWebhookToken } = require("./webhook-server");
@@ -1240,35 +1241,9 @@ async function appendDailyJournal(order) {
   if (order.status !== "FILLED" || order.source === "TRADINGVIEW_TEST" || state.journaledOrders[order.orderNo]) return;
   const channel = findTextChannelByName(JOURNAL_CHANNEL);
   if (!channel) return;
-  const clock = zonedClock(new Date(order.updatedAt));
-  const currency = order.market === "KRX" ? "KRW" : "USD";
-  const fillPrice = Number(order.fillPrice);
-  const price = Number.isFinite(fillPrice)
-    ? currency === "KRW"
-      ? `${fillPrice.toLocaleString("ko-KR")}원`
-      : `$${fillPrice.toLocaleString("en-US", { maximumFractionDigits: 2 })}`
-    : "체결가 미확인";
   const [instrument] = await enrichInstrumentNames([{ exchange: order.market, ticker: order.symbol, name: order.name }]);
-  const identity = formatInstrumentLabel(instrument);
-  const details = [order.signalType, order.conviction && `등급 ${order.conviction}`];
-  if (Number.isFinite(order.stopPrice)) details.push(`SL ${order.stopPrice}`);
-  const line = `- ${clock.time} · **${order.side}** · ${identity} · ${order.filledQuantity}주 @ ${price}${details.filter(Boolean).length ? ` · ${details.filter(Boolean).join(" · ")}` : ""}`;
-  const journal = state.dailyJournals[clock.date] || { messageId: "", entries: [] };
-  journal.entries.push(line);
-  let message = null;
-  if (journal.messageId) {
-    try { message = await channel.messages.fetch(journal.messageId); } catch {}
-  }
-  const formatted = formatDailyJournal(clock.date, journal.entries);
-  const messagePayload = { embeds: [formatted.embed], allowedMentions: { parse: [] } };
-  if (message) await message.edit(messagePayload);
-  else {
-    message = await channel.send(messagePayload);
-    journal.messageId = message.id;
-  }
-  state.dailyJournals[clock.date] = journal;
+  await sendFormattedWebhook(channel, formatTradeJournal({ ...order, name: instrument.name || order.name }));
   state.journaledOrders[order.orderNo] = order.updatedAt;
-  for (const oldDate of Object.keys(state.dailyJournals).sort().slice(0, -60)) delete state.dailyJournals[oldDate];
   saveState();
 }
 
@@ -1313,10 +1288,15 @@ async function submitAndTrackOrder(record) {
   let tracking = null;
   if (record.orderAttempt?.status === "ACCEPTED") {
     const approvalChannel = findTextChannelByName(ORDER_APPROVAL_CHANNEL);
-    if (approvalChannel) {
-      await sendFormattedWebhook(approvalChannel, formatOrderStatus(record.orderAttempt))
-        .catch((error) => console.error("키움 모의주문 접수 알림 실패:", error.message));
-    }
+    const statusMessage = approvalChannel
+      ? await sendFormattedWebhook(approvalChannel, formatOrderStatus(record.orderAttempt))
+        .catch((error) => console.error("키움 모의주문 접수 알림 실패:", error.message))
+      : null;
+    record.orderAttempt = orderTracker.record({
+      ...record.orderAttempt,
+      ...(record.orderAttempt.source === "USER_SCHEDULED_EXIT" ? { executorReportable: true } : {}),
+      ...(statusMessage?.id ? { statusMessageId: statusMessage.id } : {}),
+    });
     tracking = record.payload?.paper_order_test === true
       ? trackPaperTestOrder(record.orderAttempt, { client: getDomesticKiwoomClient(), tracker: orderTracker })
       : trackPaperOrder(record.orderAttempt, {
