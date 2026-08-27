@@ -9,7 +9,7 @@ const {
   domesticSession, isDomesticBuySession, isDomesticOrderSession,
   isUsBuySession, isUsMarketClosedError, isUsOrderSession, isUsRegularSession,
   shouldDeferEntry, shouldDeferUsEntry, shouldDelayEntry, shouldDelayUsEntry, usSession,
-  partialExitQuantity, partialExitRatio,
+  partialExitQuantity, partialExitRatio, partialExitStage,
   refreshPaperOrder, submitPaperOrder, trackPaperOrder, submitPaperTestOrder, trackPaperTestOrder,
 } = require("./paper-order-executor");
 
@@ -79,6 +79,8 @@ const record = {
   assert.equal(partialExitQuantity(8, 0.25), 2);
   assert.equal(partialExitQuantity(1, 0.25), 0);
   assert.equal(partialExitRatio({ outcome: { signal: { signalCode: "TAKE_PROFIT", tpLevel: 2 } } }, {}), 0.5);
+  assert.equal(partialExitStage({ outcome: { signal: { signalCode: "EXIT_PARTIAL_1" } } }), "TP1");
+  assert.equal(partialExitStage({ outcome: { signal: { signalCode: "TAKE_PROFIT", tpLevel: 2 } } }), "TP2");
   assert.equal((await submitPaperTestOrder({ ...record, payload: { ...record.payload, ticker: "000001" } }, options)).status, "BLOCKED");
   const accepted = await submitPaperTestOrder(record, options);
   assert.equal(accepted.orderQuantity, 1);
@@ -147,6 +149,7 @@ const record = {
   });
   assert.equal(domesticPartial.orderQuantity, 2);
   assert.equal(domesticPartial.partialExitRatio, 0.25);
+  assert.equal(domesticPartial.partialExitStage, "TP1");
   assert.equal(domesticPartial.orderStyle, "PROTECTED");
   assert.equal(domesticPartial.marketFallbackAllowed, false);
   assert.equal(domesticPartial.koreanName, "삼성전자");

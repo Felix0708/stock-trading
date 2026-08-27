@@ -12,6 +12,7 @@ const { OrderTracker } = require("./order-tracker");
 const {
   domesticSession,
   domesticSessionClock,
+  partialExitStage,
   refreshPaperOrder,
   shouldDeferEntry,
   shouldDelayEntry,
@@ -37,6 +38,7 @@ class SignalReceiptStore {
       : { requestIds: [], messageIds: [], pending: {} };
     this.state.pending ||= {};
     this.state.deferred ||= {};
+    this.state.partialExits ||= {};
     this.state.autoTrading ??= defaultAutoTrading;
   }
 
@@ -48,9 +50,9 @@ class SignalReceiptStore {
     return true;
   }
 
-  putPending(record, messageId, ttlMs) {
+  putPending(record, messageId, ttlMs, brokerIds) {
     const key = `${record.payload.exchange}:${record.payload.ticker}`;
-    this.state.pending[key] = { key, record, messageId, createdAt: Date.now(), expiresAt: Date.now() + ttlMs };
+    this.state.pending[key] = { key, record, messageId, brokerIds, createdAt: Date.now(), expiresAt: Date.now() + ttlMs };
     this.write();
     return this.state.pending[key];
   }
@@ -97,6 +99,44 @@ class SignalReceiptStore {
 
   removeDeferred(key) {
     delete this.state.deferred[key];
+    this.write();
+  }
+
+  partialExitKey(brokerId, market, symbol, stage) {
+    return [brokerId, market, symbol, stage].map((value) => String(value || "").toUpperCase()).join(":");
+  }
+
+  partialExitBlocked(brokerId, record) {
+    const stage = partialExitStage(record);
+    if (!stage) return false;
+    return Boolean(this.state.partialExits[this.partialExitKey(brokerId, record.payload.exchange, record.payload.ticker, stage)]);
+  }
+
+  reservePartialExit(brokerId, order) {
+    if (!order.partialExitStage) return;
+    const key = this.partialExitKey(brokerId, order.market, order.symbol, order.partialExitStage);
+    this.state.partialExits[key] = { status: "PENDING", orderNo: order.orderNo };
+    this.write();
+  }
+
+  reconcileTradeStage(brokerId, order) {
+    if (order.fullExit && order.status === "FILLED") {
+      this.resetPartialExits(brokerId, order.market, order.symbol);
+      return;
+    }
+    if (!order.partialExitStage) return;
+    const key = this.partialExitKey(brokerId, order.market, order.symbol, order.partialExitStage);
+    if (Number(order.filledQuantity || 0) > 0) this.state.partialExits[key] = { status: "EXECUTED", orderNo: order.orderNo };
+    else if (["CANCELLED", "REJECTED", "EXPIRED"].includes(order.status)) delete this.state.partialExits[key];
+    else return;
+    this.write();
+  }
+
+  resetPartialExits(brokerId, market, symbol) {
+    const prefix = this.partialExitKey(brokerId, market, symbol, "");
+    for (const key of Object.keys(this.state.partialExits)) {
+      if (key.startsWith(prefix)) delete this.state.partialExits[key];
+    }
     this.write();
   }
 
@@ -157,6 +197,20 @@ function orderNeedsPortfolioSync(order) {
 
 function errorReportDue(previousAt, now = Date.now(), cooldownMs = 30 * 60_000) {
   return !Number.isFinite(previousAt) || now - previousAt >= cooldownMs;
+}
+
+function liveAutoBuyEligible(record) {
+  const payload = record?.payload || {};
+  return payload.action === "BUY"
+    && ["A", "S"].includes(payload.conviction)
+    && payload.daily_trend === "BULL"
+    && payload.daily_ema_aligned === true
+    && payload.daily_above_200ma === true;
+}
+
+function buyApprovalRequiredForBroker(broker, record, autoTrading) {
+  if (!autoTrading) return true;
+  return broker.environment === "live" && !liveAutoBuyEligible(record);
 }
 
 function accountCommand(content, executorName = "") {
@@ -270,15 +324,18 @@ async function holdingLines(account) {
     : "보유 종목 없음";
 }
 
-function approvalText(record, previews) {
+function approvalText(record, previews, brokerIds = Object.keys(previews)) {
   const lines = Object.values(previews).map(({ label, preview }) => preview.blocked
     ? `**${label}**: 불가 · ${preview.reason}`
     : `**${label}**: ${preview.quantity}주 · 예상 ${preview.currency === "KRW" ? `${Math.round(preview.positionValue).toLocaleString("ko-KR")}원` : `$${preview.positionValue.toLocaleString("en-US", { maximumFractionDigits: 2 })}`} · 주문 후 계좌 비중 ${preview.projectedPositionRatio.toFixed(2)}% / 최대 ${preview.positionLimitRatio * 100}%`);
+  const commands = brokerIds.length === 2
+    ? "`사줘`·`둘다` / `키움만` / `한투만` / `안 사`"
+    : `${brokerIds[0] === "KIWOOM" ? "`키움만`" : "`한투만`"} / \`안 사\``;
   return [
     "⏳ **BUY 승인 대기**",
     `**종목**: ${formatInstrumentLabel(record.payload)}`,
     ...lines,
-    "`사줘`·`둘다` / `키움만` / `한투만` / `안 사`",
+    commands,
   ].join("\n");
 }
 
@@ -387,6 +444,7 @@ async function start() {
 
   async function reportOrderResult(broker, order) {
     let reported = { ...order, resultAt: order.resultAt || order.updatedAt };
+    receipts.reconcileTradeStage(broker.id, reported);
     if (reported.executionReportedStatus !== reported.status) {
       await send(channels.execution, formatOrderStatus(reported));
       reported = broker.tracker.record({ ...reported, executionReportedStatus: reported.status });
@@ -404,6 +462,14 @@ async function start() {
       await send(channels.order, { text: `✅ **${brokerAccountLabel(broker)} 자동매매 연동 테스트 통과**\n**종목**: ${formatInstrumentLabel(record.payload)}\n계좌 조회 정상 · 주문 생성 없음` });
       return null;
     }
+    const stage = partialExitStage(record);
+    if (stage && receipts.partialExitBlocked(broker.id, record)) {
+      await send(channels.execution, formatUncreatedOrder(brokerAccountLabel(broker), record, {
+        title: "부분청산 중복 차단",
+        reason: `${stage}은 현재 포지션에서 이미 실행 또는 주문 대기 중`,
+      }));
+      return null;
+    }
     let order = await submitPaperOrder(record, {
       enabled: true, environment: broker.environment,
       domesticClient: broker.domesticClient, overseasClient: broker.overseasClient,
@@ -418,9 +484,12 @@ async function start() {
       }));
       return null;
     }
+    if (order.entryType === "PAPER_ENTRY") receipts.resetPartialExits(broker.id, order.market, order.symbol);
+    if (order.partialExitStage) receipts.reservePartialExit(broker.id, order);
     const statusMessage = await send(channels.order, formatOrderStatus(order));
     order = broker.tracker.record({ ...order, statusMessageId: statusMessage.id });
     let final = await trackPaperOrder(order, { domesticClient: broker.domesticClient, overseasClient: broker.overseasClient, tracker: broker.tracker, attempts: 5, delayMs: 2_000 });
+    receipts.reconcileTradeStage(broker.id, final);
     if (final.status !== order.status || final.filledQuantity !== order.filledQuantity) {
       if (final.filledQuantity > order.filledQuantity) {
         final = await withPortfolioMetrics(broker, final).catch(async (error) => {
@@ -586,7 +655,8 @@ async function start() {
       await message.reply(`BUY 승인을 거부했습니다: ${formatInstrumentLabel(pending.record.payload)}`);
       return true;
     }
-    const selected = brokers.filter((broker) => command.brokers.includes(broker.id));
+    const allowedBrokerIds = pending.brokerIds || command.brokers;
+    const selected = brokers.filter((broker) => command.brokers.includes(broker.id) && allowedBrokerIds.includes(broker.id));
     if (!selected.length) {
       await message.reply("선택한 증권사 실행기가 연결되어 있지 않습니다.");
       return true;
@@ -613,18 +683,19 @@ async function start() {
       record.source = "DISCORD_SIGNAL";
       [record.payload] = await enrichInstrumentNames([record.payload]);
       const entry = ["PAPER_ENTRY", "PAPER_ADD"].includes(record.risk?.verdict) && record.payload.action === "BUY";
-      if (entry && (!receipts.autoTrading() || brokers.some((broker) => broker.environment === "live"))) {
-        const previews = Object.fromEntries(await Promise.all(brokers.map(async (broker) => [broker.id, await previewFor(broker, structuredClone(record))])));
+      const approvalBrokers = entry ? brokers.filter((broker) => buyApprovalRequiredForBroker(broker, record, receipts.autoTrading())) : [];
+      if (approvalBrokers.length) {
+        const previews = Object.fromEntries(await Promise.all(approvalBrokers.map(async (broker) => [broker.id, await previewFor(broker, structuredClone(record))])));
         const channel = await targetChannel(channels.order);
-        const approval = await channel.send(approvalText(record, previews));
-        receipts.putPending(record, approval.id, approvalTtlMs);
-        return;
+        const brokerIds = approvalBrokers.map((broker) => broker.id);
+        const approval = await channel.send(approvalText(record, previews, brokerIds));
+        receipts.putPending(record, approval.id, approvalTtlMs, brokerIds);
       }
       if (!entry && !receipts.autoTrading()) {
         await send(channels.system, { text: `⏸️ **${accountLabel} 자동매매 OFF**\n**종목**: ${formatInstrumentLabel(record.payload)}\n신호는 수신했지만 주문하지 않았습니다.` });
         return;
       }
-      for (const broker of brokers) {
+      for (const broker of brokers.filter((item) => !approvalBrokers.includes(item))) {
         try {
           await executeOrDefer(broker, structuredClone(record));
         } catch (error) {
@@ -644,10 +715,10 @@ async function start() {
     if (command === "HELP") {
       await message.reply(["🧾 **계좌 주문 실행기 명령어**", "`!account status`", "`!account orders`", "`!account auto on` / `!account auto off` / `!account auto status`", "수동 BUY 승인: `사줘`·`둘다` / `키움만` / `한투만` / `안 사`"].join("\n"));
     } else if (command === "STATUS") {
-      await message.reply([`🧭 **${accountLabel} 주문 실행기 상태**`, `증권사: ${accountSummary()}`, `신뢰 채널: ${sourceChannelIds.size}개`, `자동매매: ${receipts.autoTrading() ? "ON" : "OFF"}`, `실계좌: ${brokers.some((broker) => broker.environment === "live") ? "활성 · BUY는 승인 후 주문" : "지원 · 현재 잠금"}`].join("\n"));
+      await message.reply([`🧭 **${accountLabel} 주문 실행기 상태**`, `증권사: ${accountSummary()}`, `신뢰 채널: ${sourceChannelIds.size}개`, `자동매매: ${receipts.autoTrading() ? "ON" : "OFF"}`, `실계좌: ${brokers.some((broker) => broker.environment === "live") ? "활성 · 강한 BUY 자동, 축소 BUY 승인" : "지원 · 현재 잠금"}`].join("\n"));
     } else if (["AUTO_ON", "AUTO_OFF", "AUTO_STATUS"].includes(command)) {
       if (command !== "AUTO_STATUS") receipts.setAutoTrading(command === "AUTO_ON");
-      await message.reply(`🤖 **${accountLabel} 자동매매 ${receipts.autoTrading() ? "ON" : "OFF"}**\n${receipts.autoTrading() ? "계좌별로 다시 계산하며, 실계좌 BUY는 항상 사용자 승인 후 주문합니다." : "신호는 수신하지만 자동 주문하지 않습니다."}\n실계좌 기능은 지원하며 현재 계좌 설정의 잠금 상태를 따릅니다.`);
+      await message.reply(`🤖 **${accountLabel} 자동매매 ${receipts.autoTrading() ? "ON" : "OFF"}**\n${receipts.autoTrading() ? "모의계좌는 BUY를 자동 주문하고, 실계좌는 강한 BUY만 자동·축소 BUY는 승인 후 주문합니다." : "신호는 수신하지만 자동 주문하지 않습니다."}\n실계좌 기능은 지원하며 현재 계좌 설정의 잠금 상태를 따릅니다.`);
     } else {
       const orders = brokers.flatMap((broker) => broker.tracker.list().slice(0, 5).map((order) => `${broker.label} · ${order.name || order.symbol} (${order.symbol}) · ${order.side} · ${order.status}`)).slice(0, 10);
       await message.reply(["📋 **계좌별 최근 주문**", ...(orders.length ? orders : ["저장된 주문 없음"])].join("\n"));
@@ -674,7 +745,7 @@ async function start() {
       `${accountLabel} 주문 실행기`,
       client.user.tag,
       `${accountSummary()} · 신뢰 채널 ${sourceChannelIds.size}개 · 자동매매 ${receipts.autoTrading() ? "ON" : "OFF"}`,
-      brokers.some((broker) => broker.environment === "live") ? "실계좌 활성 · BUY 승인 필수" : "실계좌 지원 · 현재 잠금",
+      brokers.some((broker) => broker.environment === "live") ? "실계좌 활성 · 강한 BUY 자동, 축소 BUY 승인" : "실계좌 지원 · 현재 잠금",
     ) });
     const reconciled = await reconcileOrders().catch(async (error) => {
       await reportError("미완료 주문 시작 조회 실패", error);
@@ -702,4 +773,4 @@ async function start() {
 
 if (require.main === module) start().catch((error) => { console.error(error); process.exitCode = 1; });
 
-module.exports = { SignalReceiptStore, accountCommand, accountContext, accountPortfolioSyncMinutes, approvalText, brokerEnvironments, discordMessagePayload, enabledBrokerIds, enforceOwnAccountRules, errorReportDue, orderNeedsPortfolioSync, orderNeedsResultReport, reconcilePendingBrokerOrders, shouldConsumeMessage, signalExchange, start };
+module.exports = { SignalReceiptStore, accountCommand, accountContext, accountPortfolioSyncMinutes, approvalText, brokerEnvironments, buyApprovalRequiredForBroker, discordMessagePayload, enabledBrokerIds, enforceOwnAccountRules, errorReportDue, liveAutoBuyEligible, orderNeedsPortfolioSync, orderNeedsResultReport, reconcilePendingBrokerOrders, shouldConsumeMessage, signalExchange, start };

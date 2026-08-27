@@ -124,6 +124,14 @@ function partialExitRatio(record, options) {
   return null;
 }
 
+function partialExitStage(record) {
+  const code = record.outcome?.signal?.signalCode;
+  const level = record.outcome?.signal?.tpLevel;
+  if (code === "EXIT_PARTIAL_1" || (code === "TAKE_PROFIT" && level === 1)) return "TP1";
+  if (code === "EXIT_PARTIAL_2" || (code === "TAKE_PROFIT" && level === 2)) return "TP2";
+  return null;
+}
+
 function partialExitQuantity(tradableQuantity, ratio) {
   if (!Number.isInteger(tradableQuantity) || tradableQuantity < 1 || !Number.isFinite(ratio) || ratio <= 0 || ratio >= 1) return 0;
   return Math.floor(tradableQuantity * ratio);
@@ -212,6 +220,9 @@ async function submitPaperOrder(record, options) {
     signalType: payload.type, signalPrice: payload.price, stopPrice: payload.sl,
     conviction: payload.conviction, requestId: record.requestId,
     partialExitRatio: partialExit ? partialExitRatio(record, options) : null,
+    partialExitStage: partialExit ? partialExitStage(record) : null,
+    fullExit: exit,
+    entryType: entry ? risk.verdict : null,
     plannedInvestment: positionPreview?.positionValue,
     projectedPositionRatio: positionPreview?.projectedPositionRatio,
     positionLimitRatio: positionPreview?.positionLimitRatio,
@@ -266,6 +277,7 @@ module.exports = {
   isUsRegularSession,
   partialExitQuantity,
   partialExitRatio,
+  partialExitStage,
   protectedUsBuyLimit,
   refreshPaperOrder,
   shouldDeferUsEntry,

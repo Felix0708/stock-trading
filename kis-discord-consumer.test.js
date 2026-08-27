@@ -1,7 +1,7 @@
 "use strict";
 
 const assert = require("node:assert/strict");
-const { accountCommand, accountContext, accountPortfolioSyncMinutes, approvalText, brokerEnvironments, discordMessagePayload, enabledBrokerIds, enforceOwnAccountRules, errorReportDue, orderNeedsPortfolioSync, orderNeedsResultReport, reconcilePendingBrokerOrders, shouldConsumeMessage, SignalReceiptStore } = require("./kis-discord-consumer");
+const { accountCommand, accountContext, accountPortfolioSyncMinutes, approvalText, brokerEnvironments, buyApprovalRequiredForBroker, discordMessagePayload, enabledBrokerIds, enforceOwnAccountRules, errorReportDue, liveAutoBuyEligible, orderNeedsPortfolioSync, orderNeedsResultReport, reconcilePendingBrokerOrders, shouldConsumeMessage, SignalReceiptStore } = require("./kis-discord-consumer");
 
 assert.deepEqual(enabledBrokerIds({ ACCOUNT_EXECUTOR_ENABLED: "true", EXECUTOR_KIWOOM_ENABLED: "true", EXECUTOR_KIS_ENABLED: "true" }), ["KIWOOM", "KIS"]);
 assert.deepEqual(enabledBrokerIds({ ACCOUNT_EXECUTOR_ENABLED: "true", EXECUTOR_KIWOOM_ENABLED: "true", EXECUTOR_KIS_ENABLED: "false" }), ["KIWOOM"]);
@@ -54,7 +54,8 @@ assert.equal(store.autoTrading(), true);
 assert.equal(store.claim("request-1", "message-1"), true);
 assert.equal(store.claim("request-1", "message-2"), false);
 assert.equal(store.claim("request-2", "message-1"), false);
-const pending = store.putPending({ payload: { exchange: "NASDAQ", ticker: "PLTR" } }, "approval-1", 60_000);
+const pending = store.putPending({ payload: { exchange: "NASDAQ", ticker: "PLTR" } }, "approval-1", 60_000, ["KIS"]);
+assert.deepEqual(pending.brokerIds, ["KIS"]);
 assert.equal(store.findPending({ ticker: "PLTR" }).key, pending.key);
 assert.equal(store.findPending({ messageId: "approval-1" }).key, pending.key);
 store.removePending(pending.key);
@@ -68,6 +69,28 @@ assert.equal(store.listDeferred()[0].lastError, "temporary auth failure");
 assert.equal(store.listDeferred().length, 1);
 store.removeDeferred(deferred.key);
 assert.equal(store.listDeferred().length, 0);
+
+const strongBuy = { payload: { action: "BUY", conviction: "A", daily_trend: "BULL", daily_ema_aligned: true, daily_above_200ma: true } };
+const mixedBuy = { payload: { ...strongBuy.payload, daily_trend: "MIXED", daily_ema_aligned: false } };
+assert.equal(liveAutoBuyEligible(strongBuy), true);
+assert.equal(liveAutoBuyEligible({ payload: { ...strongBuy.payload, conviction: "B" } }), false);
+assert.equal(liveAutoBuyEligible(mixedBuy), false);
+assert.equal(buyApprovalRequiredForBroker({ environment: "mock" }, mixedBuy, true), false);
+assert.equal(buyApprovalRequiredForBroker({ environment: "live" }, strongBuy, true), false);
+assert.equal(buyApprovalRequiredForBroker({ environment: "live" }, mixedBuy, true), true);
+assert.equal(buyApprovalRequiredForBroker({ environment: "mock" }, strongBuy, false), true);
+
+const tp1 = { payload: { exchange: "NYSE", ticker: "SE" }, outcome: { signal: { signalCode: "EXIT_PARTIAL_1" } } };
+assert.equal(store.partialExitBlocked("KIS", tp1), false);
+store.reservePartialExit("KIS", { market: "NYSE", symbol: "SE", partialExitStage: "TP1", orderNo: "3001" });
+assert.equal(store.partialExitBlocked("KIS", tp1), true);
+store.reconcileTradeStage("KIS", { market: "NYSE", symbol: "SE", partialExitStage: "TP1", orderNo: "3001", status: "CANCELLED", filledQuantity: 0 });
+assert.equal(store.partialExitBlocked("KIS", tp1), false);
+store.reservePartialExit("KIS", { market: "NYSE", symbol: "SE", partialExitStage: "TP1", orderNo: "3002" });
+store.reconcileTradeStage("KIS", { market: "NYSE", symbol: "SE", partialExitStage: "TP1", orderNo: "3002", status: "CANCELLED", filledQuantity: 2 });
+assert.equal(store.partialExitBlocked("KIS", tp1), true);
+store.resetPartialExits("KIS", "NYSE", "SE");
+assert.equal(store.partialExitBlocked("KIS", tp1), false);
 
 const preview = { blocked: false, quantity: 10 };
 assert.deepEqual(
@@ -94,8 +117,10 @@ assert.equal(orderNeedsPortfolioSync({ status: "CANCELLED", filledQuantity: 2, p
 
   const approval = approvalText({ payload: { ticker: "SE", name: "Sea Limited" } }, {
     KIS: { label: "한투", preview: { blocked: false, quantity: 63, currency: "USD", positionValue: 7634.655, projectedPositionRatio: 7.64, positionLimitRatio: 0.2 } },
-  });
+  }, ["KIS"]);
   assert.match(approval, /주문 후 계좌 비중 7\.64% \/ 최대 20%/);
+  assert.match(approval, /`한투만` \/ `안 사`/);
+  assert.doesNotMatch(approval, /둘다/);
 
   const changes = await reconcilePendingBrokerOrders({
     tracker: {
