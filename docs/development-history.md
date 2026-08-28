@@ -362,7 +362,7 @@ npm run self-test
 - 수집한 Markdown을 기존 PDF와 같은 브리핑 참고자료로 처리
 - 자동 브리핑 재사용 방지 기록은 기존 `reviewedResearch` 구조를 그대로 사용
 - 동영상 원본 다운로드와 과거 전체 백필은 현재 범위에서 제외
-- 실제 Telegram 로그인·채널 조회는 API ID와 API Hash 입력 후 확인 필요
+- 이후 API ID·Hash와 로그인 세션을 설정해 실제 채널 조회와 일일 Markdown 수집까지 완료
 
 ## 8. 다음 개발 순서
 
