@@ -4,12 +4,12 @@
     "strict": true
   },
   "files": [
-    "order-tracker.ts",
-    "order-tracking.ts",
-    "paper-order-executor.ts",
-    "position-sizer.ts",
-    "kiwoom-client.ts",
-    "kis-client.ts"
+    "src/trading/order-tracker.ts",
+    "src/trading/order-tracking.ts",
+    "src/trading/paper-order-executor.ts",
+    "src/trading/position-sizer.ts",
+    "src/brokers/kiwoom-client.ts",
+    "src/brokers/kis-client.ts"
   ],
   "include": []
 }

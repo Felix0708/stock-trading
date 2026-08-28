@@ -65,7 +65,7 @@ Cloudflare Quick Tunnel
 
 ### 2단계 — Discord 채널과 자동 브리핑
 
-채널 구조를 코드로 생성할 수 있도록 `setup-discord.ts`를 만들었습니다.
+채널 구조를 코드로 생성할 수 있도록 `scripts/setup-discord.ts`를 만들었습니다.
 
 - 투자위원회: 라운지, 시장-브리핑, 종목-토론, 라운드테이블
 - 미국주식: 미국-전체신호, 미국-관찰신호, 미국-진입신호, 미국-청산신호, 미국-매매신호
@@ -299,22 +299,25 @@ Discord 전달 흐름은 다음과 같습니다. 기존 `#매매신호`는 `#매
 
 | 파일 | 역할 |
 |---|---|
-| `bot.ts` | Discord 봇 5개, 대화 라우팅, 브리핑, 명령어, 전체 연결 |
-| `conversation-router.ts` | 채널 공용 문맥의 응답자 선택과 자연어 대화 명령 |
-| `webhook-schema.ts` | Webhook v6.2 필드 검증 |
-| `signal-normalizer.ts` | 표시 문자열을 안정적인 내부 코드로 변환 |
-| `signal-state-machine.ts` | 신호 상태와 중복·진입·청산 판정 |
-| `webhook-server.ts` | 비밀 경로 HTTP 수신기와 비동기 큐 |
-| `webhook-discord.ts` | 신호·위험·주문 상태 Discord 표시 |
-| `signal-review.ts` | 진입 전 CHECK 워치리스트 신호 AI 배치 검토 |
-| `trade-controller.ts` | SHADOW/PAPER 상태와 5종목 위험 게이트 |
-| `position-sizer.ts` | 위험 예산과 손절 거리 기반 수량 계산 |
-| `kiwoom-client.ts` | 키움 국내·해외 모의투자 REST 연결 |
-| `order-tracker.ts` | 주문 상태 저장, 변경 추적, 재시작 복구 |
-| `telegram-collector.ts` | Telegram 뉴스·시황 채널의 일일 글을 Markdown으로 저장 |
-| `recent-research.ts` | 최근 PDF·Telegram Markdown을 브리핑 참고자료로 읽기 |
+| `src/app/bot.ts` | Discord 봇 5개, 대화 라우팅, 브리핑, 명령어, 전체 연결 |
+| `src/ai/conversation-router.ts` | 채널 공용 문맥의 응답자 선택과 자연어 대화 명령 |
+| `src/signals/webhook-schema.ts` | Webhook v6.2 필드 검증 |
+| `src/signals/signal-normalizer.ts` | 표시 문자열을 안정적인 내부 코드로 변환 |
+| `src/signals/signal-state-machine.ts` | 신호 상태와 중복·진입·청산 판정 |
+| `src/signals/webhook-server.ts` | 비밀 경로 HTTP 수신기와 비동기 큐 |
+| `src/discord/webhook-discord.ts` | 신호·위험·주문 상태 Discord 표시 |
+| `src/ai/signal-review.ts` | 진입 전 CHECK 워치리스트 신호 AI 배치 검토 |
+| `src/trading/trade-controller.ts` | SHADOW/PAPER 상태와 5종목 위험 게이트 |
+| `src/trading/position-sizer.ts` | 위험 예산과 손절 거리 기반 수량 계산 |
+| `src/brokers/kiwoom-client.ts` | 키움 국내·해외 모의·실계좌 REST 연결 |
+| `src/brokers/kis-client.ts` | 한국투자증권 국내·해외 모의·실계좌 REST 연결 |
+| `src/executor/account-executor.ts` | 공통 매매신호를 사용자별 계좌 정책으로 재검증·실행 |
+| `src/trading/order-tracker.ts` | 주문 상태 저장, 변경 추적, 재시작 복구 |
+| `src/research/telegram-collector.ts` | Telegram 뉴스·시황 채널의 일일 글을 Markdown으로 저장 |
+| `src/research/recent-research.ts` | 최근 PDF·Telegram Markdown을 브리핑 참고자료로 읽기 |
 | `start-all.sh` | 봇과 Cloudflare 터널 통합 실행 |
-| `send-test-webhook.ts` | 주문 없는 로컬 연결 테스트 |
+| `scripts/send-test-webhook.ts` | 주문 없는 로컬 연결 테스트 |
+| `tests/*.test.ts` | 기능별 자동 회귀 검증 |
 
 ## 7. 검증 상태
 
