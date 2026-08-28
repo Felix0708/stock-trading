@@ -265,7 +265,7 @@ npm run self-test
 
 ## 키움 모의투자 연결 확인
 
-키움 REST API 사용신청과 모의투자 참가신청을 마친 뒤 `.env.account`의 국내·해외 App Key와 App Secret을 입력합니다. 다음 명령은 국내 모의 서버의 토큰과 계좌번호만 확인하며 주문은 전송하지 않습니다.
+키움 REST API 사용신청과 모의투자 참가신청을 마친 뒤 `.env.account`의 국내·해외 App Key와 App Secret을 입력합니다. 모의투자는 국내·해외 키가 별도이지만, 실전 포털에서 등록 계좌의 키 한 쌍만 발급됐다면 같은 App Key·Secret을 국내·해외 두 칸에 입력합니다. 다음 명령은 인증과 계좌 연결만 확인하며 주문은 전송하지 않습니다.
 
 ```bash
 npm run kiwoom:check
