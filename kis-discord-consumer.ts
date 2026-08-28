@@ -31,6 +31,9 @@ function shouldConsumeMessage(message, config) {
 }
 
 class SignalReceiptStore {
+  file: string;
+  state: any;
+
   constructor(file, defaultAutoTrading = false) {
     this.file = file;
     this.state = file && fs.existsSync(file)
@@ -59,7 +62,7 @@ class SignalReceiptStore {
   }
 
   findPending({ ticker = "", messageId = "", now = Date.now() } = {}) {
-    const rows = Object.values(this.state.pending)
+    const rows: any[] = (Object.values(this.state.pending) as any[])
       .filter((item) => item.expiresAt > now)
       .filter((item) => !ticker || item.record.payload.ticker === ticker)
       .filter((item) => !messageId || item.messageId === messageId)
@@ -84,7 +87,7 @@ class SignalReceiptStore {
   }
 
   listInvalidations() {
-    return Object.values(this.state.invalidations);
+    return Object.values(this.state.invalidations) as any[];
   }
 
   removeInvalidation(key) {
@@ -114,7 +117,7 @@ class SignalReceiptStore {
   }
 
   listDeferred() {
-    return Object.values(this.state.deferred);
+    return Object.values(this.state.deferred) as any[];
   }
 
   markDeferredAttempt(key, marketDate) {
@@ -395,7 +398,7 @@ function trackedPortfolio(orders, domesticHoldings, usHoldings, usdExchangeRate 
   return { deployedKrw, openRiskKrw, hasUsExposure };
 }
 
-async function accountContext(clients, record, maxOpenPositions, options = {}) {
+async function accountContext(clients, record, maxOpenPositions, options: any = {}) {
   const domesticClient = clients.domesticClient || clients;
   const overseasClient = clients.overseasClient || clients;
   const domestic = await domesticClient.getDomesticBalance();
@@ -634,7 +637,7 @@ async function start() {
     });
     brokers.push({ id: "KIS", label: "한투", environment: environments.KIS, domesticClient: kis, overseasClient: kis, tracker: new OrderTracker(process.env.KIS_ORDER_STATE_FILE || "kis-orders.json") });
   }
-  let queue = Promise.resolve();
+  let queue: Promise<any> = Promise.resolve();
 
   async function targetChannel(configured) {
     const guild = await client.guilds.fetch(targetGuildId);
@@ -652,7 +655,7 @@ async function start() {
   const brokerAccountLabel = (broker) => `${broker.label} ${broker.environment === "live" ? "실계좌" : "모의계좌"}`;
   const accountSummary = () => brokers.map(brokerAccountLabel).join(" + ");
 
-  async function reportError(title, error, record) {
+  async function reportError(title, error, record = null) {
     const reportKey = [title, error?.message || error, record?.payload?.ticker || record?.symbol || ""].join("\n");
     if (!errorReportDue(errorReports.get(reportKey))) return;
     try {
@@ -864,10 +867,6 @@ async function start() {
       const broker = brokers.find((item) => item.id === deferred.brokerId);
       if (!broker) {
         receipts.removeDeferred(deferred.key);
-        continue;
-      }
-      if (broker.tracker.list().some((order) => order.requestId === pending.guardRequestId)) {
-        receipts.removeInvalidation(pending.key);
         continue;
       }
       try {

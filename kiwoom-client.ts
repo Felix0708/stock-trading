@@ -7,40 +7,40 @@ const path = require("node:path");
 const MOCK_BASE_URL = "https://mockapi.kiwoom.com";
 const LIVE_BASE_URL = "https://api.kiwoom.com";
 
-function toNumber(value, field) {
+function toNumber(value: unknown, field: string) {
   const number = Number(String(value ?? "0").replaceAll(",", ""));
   if (!Number.isFinite(number)) throw new Error(`키움 ${field} 값이 숫자가 아닙니다.`);
   return number;
 }
 
-function toOptionalNumber(value, field, absolute = false) {
+function toOptionalNumber(value: unknown, field: string, absolute = false) {
   if (value === undefined || value === null || value === "") return null;
   const number = toNumber(value, field);
   return absolute ? Math.abs(number) : number;
 }
 
-function tokenExpiry(expiresDt) {
+function tokenExpiry(expiresDt: unknown) {
   const match = String(expiresDt || "").match(/^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})$/);
   return match ? Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]), Number(match[4]) - 9, Number(match[5]), Number(match[6])) : 0;
 }
 
-function responseErrorCode(data) {
+function responseErrorCode(data: any) {
   const embedded = String(data?.return_msg || "").match(/\[(\d+):/);
   return embedded ? Number(embedded[1]) : Number(data?.return_code);
 }
 
 class KiwoomClient {
-  #appKey;
-  #secretKey;
-  #fetch;
-  #baseUrl;
-  #environmentLabel;
-  #timeoutMs;
-  #tokenCacheFile;
-  #token = null;
-  #expiresDt = null;
+  #appKey: string;
+  #secretKey: string;
+  #fetch: typeof fetch;
+  #baseUrl: string;
+  #environmentLabel: string;
+  #timeoutMs: number;
+  #tokenCacheFile: string;
+  #token: string | null = null;
+  #expiresDt: string | null = null;
 
-  #useCachedToken(rejectedToken = "") {
+  #useCachedToken(rejectedToken: string | null = "") {
     if (!this.#tokenCacheFile || !fs.existsSync(this.#tokenCacheFile)) return false;
     const cached = JSON.parse(fs.readFileSync(this.#tokenCacheFile, "utf8"));
     if (typeof cached.token !== "string" || cached.token === rejectedToken || tokenExpiry(cached.expiresDt) <= Date.now() + 60_000) return false;
@@ -49,7 +49,7 @@ class KiwoomClient {
     return true;
   }
 
-  async #refreshAccessToken(rejectedToken = "") {
+  async #refreshAccessToken(rejectedToken: string | null = "") {
     if (!this.#tokenCacheFile) {
       await this.authenticate();
       return;
@@ -62,7 +62,7 @@ class KiwoomClient {
         lock = fs.openSync(lockFile, "wx", 0o600);
         break;
       } catch (error) {
-        if (error.code !== "EEXIST") throw error;
+        if (!(error instanceof Error) || !("code" in error) || error.code !== "EEXIST") throw error;
         await new Promise((resolve) => setTimeout(resolve, 100));
         if (this.#useCachedToken(rejectedToken)) return;
       }
@@ -79,7 +79,7 @@ class KiwoomClient {
     }
   }
 
-  constructor({ appKey, secretKey, environment = "mock", fetchImpl = fetch, timeoutMs = 5000, tokenCacheFile } = {}) {
+  constructor({ appKey, secretKey, environment = "mock", fetchImpl = fetch, timeoutMs = 5000, tokenCacheFile }: any = {}) {
     if (!["mock", "live"].includes(environment)) throw new Error("KIWOOM_ENV는 mock 또는 live여야 합니다.");
     if (!appKey || !secretKey) throw new Error("키움 App Key와 App Secret이 필요합니다.");
     if (!Number.isInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > 30000) {
@@ -97,12 +97,12 @@ class KiwoomClient {
       : tokenCacheFile || "";
   }
 
-  async post(path, { apiId, body = {}, authorization = false, retryAuthorization = true, retryRateLimit = true } = {}) {
-    const headers = { "content-type": "application/json;charset=UTF-8" };
+  async post(path: string, { apiId, body = {}, authorization = false, retryAuthorization = true, retryRateLimit = true }: any = {}): Promise<any> {
+    const headers: Record<string, string> = { "content-type": "application/json;charset=UTF-8" };
     if (apiId) headers["api-id"] = apiId;
     if (authorization) headers.authorization = `Bearer ${await this.getAccessToken()}`;
 
-    let response;
+    let response: Response;
     try {
       response = await this.#fetch(`${this.#baseUrl}${path}`, {
         method: "POST",
@@ -111,7 +111,7 @@ class KiwoomClient {
         signal: AbortSignal.timeout(this.#timeoutMs),
       });
     } catch (error) {
-      throw new Error(`키움 ${this.#environmentLabel} 통신 실패: ${error.message}`);
+      throw new Error(`키움 ${this.#environmentLabel} 통신 실패: ${error instanceof Error ? error.message : String(error)}`);
     }
 
     const text = await response.text();
@@ -187,7 +187,7 @@ class KiwoomClient {
       estimatedAssets: toNumber(data.prsm_dpst_aset_amt, "추정예탁자산"),
       totalEvaluation: toNumber(data.tot_evlt_amt, "총평가금액"),
       totalProfitLoss: toNumber(data.tot_evlt_pl, "총평가손익"),
-      holdings: holdings.map((item) => ({
+      holdings: holdings.map((item: any) => ({
         code: String(item.stk_cd || ""),
         name: String(item.stk_nm || ""),
         quantity: toNumber(item.rmnd_qty, "보유수량"),
@@ -215,7 +215,7 @@ class KiwoomClient {
     };
   }
 
-  async getDomesticQuote({ symbol } = {}) {
+  async getDomesticQuote({ symbol }: any = {}) {
     symbol = String(symbol || "");
     if (!/^\d{6}$/.test(symbol)) throw new Error("국내주식 종목코드는 6자리 숫자여야 합니다.");
     const data = await this.post("/api/dostk/stkinfo", {
@@ -235,7 +235,7 @@ class KiwoomClient {
     };
   }
 
-  async getDomesticMarketClose({ date } = {}) {
+  async getDomesticMarketClose({ date }: any = {}) {
     date = String(date || "");
     if (!/^\d{8}$/.test(date)) throw new Error("국내장 마감 기준일은 YYYYMMDD 형식이어야 합니다.");
     await this.getAccessToken();
@@ -270,14 +270,14 @@ class KiwoomClient {
     return { date, markets };
   }
 
-  async placeDomesticMarketOrder({ side, symbol, quantity, price, session = "REGULAR", orderStyle = "MARKET" } = {}) {
+  async placeDomesticMarketOrder({ side, symbol, quantity, price, session = "REGULAR", orderStyle = "MARKET" }: any = {}) {
     side = String(side || "").toUpperCase();
     symbol = String(symbol || "");
     if (!["BUY", "SELL"].includes(side)) throw new Error("국내주식 주문 side는 BUY 또는 SELL이어야 합니다.");
     if (!/^\d{6}$/.test(symbol)) throw new Error("국내주식 종목코드는 6자리 숫자여야 합니다.");
     if (!Number.isInteger(quantity) || quantity < 1) throw new Error("국내주식 주문수량은 1 이상의 정수여야 합니다.");
     if (!["MARKET", "PROTECTED"].includes(orderStyle)) throw new Error("국내주식 주문방식이 올바르지 않습니다.");
-    const orderType = session === "REGULAR" && orderStyle === "PROTECTED" ? "16" : { PRE: "61", REGULAR: "3", AFTER_CLOSE: "81", AFTER_SINGLE: "62" }[session];
+    const orderType = session === "REGULAR" && orderStyle === "PROTECTED" ? "16" : ({ PRE: "61", REGULAR: "3", AFTER_CLOSE: "81", AFTER_SINGLE: "62" } as Record<string, string>)[session];
     if (!orderType) throw new Error("국내주식 주문 가능 시간이 아닙니다.");
     if (session === "AFTER_SINGLE" && (!Number.isFinite(price) || price <= 0)) throw new Error("시간외 단일가 주문 가격이 필요합니다.");
 
@@ -297,7 +297,7 @@ class KiwoomClient {
     return { status: "ACCEPTED", orderNo: String(data.ord_no), side, symbol, orderQuantity: quantity };
   }
 
-  async getDomesticOrderExecutions({ side = "ALL", symbol = "" } = {}) {
+  async getDomesticOrderExecutions({ side = "ALL", symbol = "" }: any = {}) {
     side = String(side).toUpperCase();
     symbol = String(symbol || "");
     if (!["ALL", "BUY", "SELL"].includes(side)) throw new Error("주문조회 side는 ALL, BUY, SELL 중 하나여야 합니다.");
@@ -306,10 +306,10 @@ class KiwoomClient {
     const data = await this.post("/api/dostk/acnt", {
       apiId: "ka10076",
       authorization: true,
-      body: { stk_cd: symbol, qry_tp: symbol ? "1" : "0", sell_tp: { ALL: "0", SELL: "1", BUY: "2" }[side], ord_no: "", stex_tp: "1" },
+      body: { stk_cd: symbol, qry_tp: symbol ? "1" : "0", sell_tp: ({ ALL: "0", SELL: "1", BUY: "2" } as Record<string, string>)[side], ord_no: "", stex_tp: "1" },
     });
     const rows = Array.isArray(data.cntr) ? data.cntr : [];
-    return rows.map((item) => {
+    return rows.map((item: any) => {
       const filledQuantity = toNumber(item.cntr_qty, "국내주식 체결수량");
       const remainingQuantity = toNumber(item.oso_qty, "국내주식 미체결수량");
       const rawStatus = String(item.ord_stt || "");
@@ -344,7 +344,7 @@ class KiwoomClient {
       currency: String(data.crnc_code || "USD"),
       totalEvaluation: toNumber(data.tot_evlt_amt, "미국주식 총평가금액"),
       totalProfitLoss: toNumber(data.tot_pl_amt, "미국주식 총손익"),
-      holdings: holdings.map((item) => ({
+      holdings: holdings.map((item: any) => ({
         code: String(item.stk_cd || ""),
         name: String(item.frgn_stk_nm || ""),
         exchange: String(item.stex_nm || ""),
@@ -376,7 +376,7 @@ class KiwoomClient {
     return (await this.getUsCash()).usdExchangeRate;
   }
 
-  async getUsQuote({ exchange, symbol } = {}) {
+  async getUsQuote({ exchange, symbol }: any = {}) {
     exchange = String(exchange || "").toUpperCase();
     symbol = String(symbol || "").toUpperCase();
     if (!["ND", "NY", "NA"].includes(exchange)) throw new Error("미국주식 거래소는 ND, NY, NA 중 하나여야 합니다.");
@@ -400,7 +400,7 @@ class KiwoomClient {
     };
   }
 
-  async placeUsLimitOrder({ side, exchange, symbol, quantity, price } = {}) {
+  async placeUsLimitOrder({ side, exchange, symbol, quantity, price }: any = {}) {
     side = String(side || "").toUpperCase();
     exchange = String(exchange || "").toUpperCase();
     symbol = String(symbol || "").toUpperCase();
@@ -410,7 +410,7 @@ class KiwoomClient {
     if (!Number.isInteger(quantity) || quantity < 1) throw new Error("미국주식 주문수량은 1 이상의 정수여야 합니다.");
     if (!Number.isFinite(price) || price <= 0) throw new Error("미국주식 지정가는 0보다 커야 합니다.");
 
-    const body = {
+    const body: Record<string, string> = {
       stex_tp: exchange,
       stk_cd: symbol,
       ord_qty: String(quantity),
@@ -427,7 +427,7 @@ class KiwoomClient {
     return { status: "ACCEPTED", orderNo: String(data.ord_no), side, symbol };
   }
 
-  async cancelUsOrder({ orderNo, exchange, symbol } = {}) {
+  async cancelUsOrder({ orderNo, exchange, symbol }: any = {}) {
     orderNo = String(orderNo || "");
     exchange = String(exchange || "").toUpperCase();
     symbol = String(symbol || "").toUpperCase();
@@ -443,7 +443,7 @@ class KiwoomClient {
     return { status: "CANCEL_REQUESTED", orderNo, cancellationOrderNo: String(data.ord_no), symbol };
   }
 
-  async getUsOrderExecutions({ side = "ALL", exchange = "", symbol = "" } = {}) {
+  async getUsOrderExecutions({ side = "ALL", exchange = "", symbol = "" }: any = {}) {
     side = String(side).toUpperCase();
     exchange = String(exchange).toUpperCase();
     symbol = String(symbol).toUpperCase();
@@ -454,11 +454,11 @@ class KiwoomClient {
     const data = await this.post("/api/us/acnt", {
       apiId: "ust21510",
       authorization: true,
-      body: { slby_tp: { ALL: "0", SELL: "1", BUY: "2" }[side], stex_tp: exchange, stk_cd: symbol },
+      body: { slby_tp: ({ ALL: "0", SELL: "1", BUY: "2" } as Record<string, string>)[side], stex_tp: exchange, stk_cd: symbol },
     });
     const rows = data.result_list || data.result_lsit || [];
     if (!Array.isArray(rows)) throw new Error("키움 미국주식 주문체결 목록 형식이 올바르지 않습니다.");
-    return rows.map((item) => {
+    return rows.map((item: any) => {
       const filledQuantity = toNumber(item.cntr_qty, "미국주식 체결수량");
       const remainingQuantity = toNumber(item.ord_remnq, "미국주식 주문잔량");
       const rawStatus = String(item.ord_stat || "");

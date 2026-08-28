@@ -2,25 +2,29 @@
 
 const { setTimeout: delay } = require("node:timers/promises");
 
-function normalizedOrderNo(value) {
+type Order = { orderNo: string | number; status: string; market: string; symbol: string; exchange?: string; side?: string; orderQuantity: number; filledQuantity?: number; remainingQuantity?: number; fillPrice?: number; activeOrderNo?: string | number; activeOrderQuantity?: number; priorFilledQuantity?: number; priorFilledValue?: number; marketFallbackAllowed?: boolean; orderStyle?: string; [key: string]: any };
+type Fill = { quantity: number; price: number };
+type TrackingOptions = { domesticClient: any; overseasClient: any; tracker: { record(order: Order): Order }; attempts?: number; delayMs?: number; protectionDelayMs?: number; protectionQueryAttempts?: number };
+
+function normalizedOrderNo(value: unknown) {
   return String(value).replace(/^0+(?=\d)/, "");
 }
 
-async function currentExecution(order, options) {
+async function currentExecution(order: Order, options: TrackingOptions): Promise<Order | undefined> {
   const client = order.market === "KRX" ? options.domesticClient : options.overseasClient;
   const rows = order.market === "KRX"
     ? await client.getDomesticOrderExecutions({ symbol: order.symbol })
     : await client.getUsOrderExecutions({ exchange: order.exchange, symbol: order.symbol });
-  return rows.find((item) => normalizedOrderNo(item.orderNo) === normalizedOrderNo(order.activeOrderNo || order.orderNo));
+  return rows.find((item: Order) => normalizedOrderNo(item.orderNo) === normalizedOrderNo(order.activeOrderNo || order.orderNo));
 }
 
-async function refreshPaperOrder(order, options) {
+async function refreshPaperOrder(order: Order, options: TrackingOptions): Promise<Order> {
   const current = await currentExecution(order, options);
   if (!current) return order;
   if (order.activeOrderNo) {
-    const activeQuantity = Math.min(order.activeOrderQuantity, Math.max(0, Number(current.filledQuantity) || 0));
-    const filledQuantity = order.priorFilledQuantity + activeQuantity;
-    const filledValue = order.priorFilledValue + activeQuantity * (Number(current.fillPrice) || 0);
+    const activeQuantity = Math.min(order.activeOrderQuantity || 0, Math.max(0, Number(current.filledQuantity) || 0));
+    const filledQuantity = (order.priorFilledQuantity || 0) + activeQuantity;
+    const filledValue = (order.priorFilledValue || 0) + activeQuantity * (Number(current.fillPrice) || 0);
     current.filledQuantity = filledQuantity;
     current.remainingQuantity = Math.max(0, order.orderQuantity - filledQuantity);
     current.fillPrice = filledQuantity ? filledValue / filledQuantity : 0;
@@ -31,7 +35,7 @@ async function refreshPaperOrder(order, options) {
   return changed ? options.tracker.record({ ...order, ...current, orderNo: order.orderNo }) : order;
 }
 
-async function trackOrdinaryOrder(order, options) {
+async function trackOrdinaryOrder(order: Order, options: TrackingOptions): Promise<Order> {
   for (let attempt = 0; attempt < (options.attempts ?? 15); attempt += 1) {
     order = await refreshPaperOrder(order, options);
     if (["FILLED", "CANCELLED", "REJECTED"].includes(order.status)) return order;
@@ -40,7 +44,7 @@ async function trackOrdinaryOrder(order, options) {
   return order;
 }
 
-async function pollOrder(order, options) {
+async function pollOrder(order: Order, options: TrackingOptions): Promise<Order> {
   for (let attempt = 0; attempt < (options.attempts ?? 15); attempt += 1) {
     const current = await currentExecution(order, options);
     if (current) order = { ...order, ...current, orderNo: order.orderNo };
@@ -50,7 +54,7 @@ async function pollOrder(order, options) {
   return order;
 }
 
-async function waitForIocResult(order, options) {
+async function waitForIocResult(order: Order, options: TrackingOptions): Promise<Order | null> {
   await delay(options.protectionDelayMs ?? 3000);
   for (let attempt = 0; attempt < (options.protectionQueryAttempts ?? 3); attempt += 1) {
     const current = await currentExecution(order, options);
@@ -60,7 +64,7 @@ async function waitForIocResult(order, options) {
   return null;
 }
 
-function aggregate(base, fills, brokerOrderNos, marketFallback, status, tracking = {}) {
+function aggregate(base: Order, fills: Fill[], brokerOrderNos: Array<string | number>, marketFallback: boolean, status: string, tracking: Partial<Order> = {}): Order {
   const filledQuantity = fills.reduce((sum, fill) => sum + fill.quantity, 0);
   const filledValue = fills.reduce((sum, fill) => sum + fill.quantity * fill.price, 0);
   return {
@@ -76,9 +80,9 @@ function aggregate(base, fills, brokerOrderNos, marketFallback, status, tracking
   };
 }
 
-async function trackProtectedDomesticOrder(order, options) {
+async function trackProtectedDomesticOrder(order: Order, options: TrackingOptions): Promise<Order> {
   let active = order;
-  const fills = [];
+  const fills: Fill[] = [];
   const brokerOrderNos = [order.orderNo];
   const protectedAttempts = 2;
 
@@ -114,7 +118,7 @@ async function trackProtectedDomesticOrder(order, options) {
   return order;
 }
 
-async function trackPaperOrder(order, options) {
+async function trackPaperOrder(order: Order, options: TrackingOptions): Promise<Order> {
   return order.market === "KRX" && order.orderStyle === "PROTECTED"
     ? trackProtectedDomesticOrder(order, options)
     : trackOrdinaryOrder(order, options);

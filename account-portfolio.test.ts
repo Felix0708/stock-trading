@@ -3,7 +3,7 @@
 const assert = require("node:assert/strict");
 const { syncAccountPortfolio } = require("./account-portfolio");
 
-const emptyBroker = (id, label) => ({
+const emptyBroker = (id, label): any => ({
   id, label, environment: id === "KIS" ? "live" : "mock",
   domesticClient: { getDomesticBalance: async () => ({ estimatedAssets: 100_000, holdings: [] }) },
   overseasClient: {

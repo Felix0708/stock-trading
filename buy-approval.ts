@@ -42,7 +42,7 @@ function createBuyApproval(record, ttlMs, now = Date.now()) {
 }
 
 function findBuyApproval(approvals, ticker, now = Date.now()) {
-  const matches = Object.values(approvals || {})
+  const matches = Object.values<any>(approvals || {})
     .filter((item) => item.ticker === String(ticker || "").toUpperCase())
     .sort((a, b) => b.createdAt - a.createdAt);
   if (!matches.length) return { status: "NOT_FOUND", approval: null };

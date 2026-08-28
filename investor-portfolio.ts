@@ -43,7 +43,7 @@ async function responseBody(response, kind, url) {
   return response[kind]();
 }
 
-async function loadLatest13f({ cik, fetchImpl = fetch, userAgent = "stock-trading-local/0.1 personal-research" } = {}) {
+async function loadLatest13f({ cik, fetchImpl = fetch, userAgent = "stock-trading-local/0.1 personal-research" }: any = {}) {
   const normalizedCik = String(Number(cik));
   const submissionsUrl = `https://data.sec.gov/submissions/CIK${normalizedCik.padStart(10, "0")}.json`;
   const archives = `https://www.sec.gov/Archives/edgar/data/${normalizedCik}`;
@@ -74,7 +74,7 @@ async function loadLatest13f({ cik, fetchImpl = fetch, userAgent = "stock-tradin
   };
 }
 
-function loadLatestDuquesne13f(options = {}) {
+function loadLatestDuquesne13f(options: any = {}) {
   return loadLatest13f({ cik: 1536411, ...options });
 }
 
@@ -93,11 +93,11 @@ function topHoldings(filing, limit, minimumWeight = 0) {
   return [...merged.values()]
     .map((holding) => ({ ...holding, weight: total > 0 ? holding.valueThousands / total * 100 : 0 }))
     .filter((holding) => holding.weight >= minimumWeight)
-    .toSorted((a, b) => b.valueThousands - a.valueThousands)
+    .sort((a, b) => b.valueThousands - a.valueThousands)
     .slice(0, limit);
 }
 
-async function loadManager13fFilings(managers, options = {}) {
+async function loadManager13fFilings(managers, options: any = {}) {
   const filings = [];
   for (const manager of managers) {
     try {
@@ -126,7 +126,7 @@ function formatManager13fContexts(filings, limit = Number.POSITIVE_INFINITY, min
   }).join("\n\n");
 }
 
-async function loadManager13fContexts(managers, limit, options = {}) {
+async function loadManager13fContexts(managers, limit, options: any = {}) {
   return formatManager13fContexts(
     await loadManager13fFilings(managers, options),
     limit,

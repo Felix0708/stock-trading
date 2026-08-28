@@ -184,9 +184,9 @@ const PERSONAS = [
   },
 ];
 
-let state = loadState();
-let stateBaseline = structuredClone(state);
-let codexQueue = Promise.resolve();
+let state: any = loadState();
+let stateBaseline: any = structuredClone(state);
+let codexQueue: Promise<any> = Promise.resolve();
 let briefingInProgress = false;
 let telegramCollectionInProgress = false;
 let investorPortfolioRefreshInProgress = false;
@@ -330,7 +330,7 @@ function duquesne13fEvidence(persona, question) {
   return `<duquesne-13f-full-evidence>\n${state.duquesne13fContext}\n</duquesne-13f-full-evidence>`;
 }
 
-function enqueueCodex(work) {
+function enqueueCodex<T>(work: () => Promise<T>): Promise<T> {
   const next = codexQueue.then(work, work);
   codexQueue = next.catch(() => {});
   return next;
@@ -342,7 +342,7 @@ function conversationVersion(channelId) {
 
 function stoppedConversationError() {
   const error = new Error("사용자가 AI 대화를 중지했습니다.");
-  error.code = "CODEX_STOPPED";
+  (error as any).code = "CODEX_STOPPED";
   return error;
 }
 
@@ -358,7 +358,7 @@ function stopConversation(channelId) {
   return stopped;
 }
 
-function runCodex(persona, prompt, imagePaths = [], channelId = "global", expectedVersion = conversationVersion(channelId)) {
+function runCodex(persona, prompt, imagePaths = [], channelId = "global", expectedVersion = conversationVersion(channelId)): Promise<string> {
   return enqueueCodex(async () => {
     if (expectedVersion !== conversationVersion(channelId)) throw stoppedConversationError();
     fs.mkdirSync(CHAT_DIR, { recursive: true });
@@ -375,12 +375,12 @@ function runCodex(persona, prompt, imagePaths = [], channelId = "global", expect
   });
 }
 
-function shouldRetryCodex(error, sessionId) {
+function shouldRetryCodex(error: any, sessionId) {
   return Boolean(sessionId) && !["CODEX_TIMEOUT", "CODEX_STOPPED"].includes(error.code);
 }
 
-function invokeCodex(persona, sessionId, prompt, imagePaths, key, channelId, expectedVersion) {
-  return new Promise((resolve, reject) => {
+function invokeCodex(persona, sessionId, prompt, imagePaths, key, channelId, expectedVersion): Promise<string> {
+  return new Promise<string>((resolve, reject) => {
     if (expectedVersion !== conversationVersion(channelId)) {
       reject(stoppedConversationError());
       return;
@@ -426,7 +426,7 @@ function invokeCodex(persona, sessionId, prompt, imagePaths, key, channelId, exp
     const timer = setTimeout(() => {
       child.kill("SIGTERM");
       const error = new Error(`Codex 응답 시간이 ${CODEX_TIMEOUT_MS / 1000}초를 초과했습니다.`);
-      error.code = "CODEX_TIMEOUT";
+      (error as any).code = "CODEX_TIMEOUT";
       finish(reject, error);
     }, CODEX_TIMEOUT_MS);
 
@@ -571,7 +571,7 @@ function loadStoredWebhookContext(topic) {
   }
 }
 
-async function sendChunks(channel, text, allowedMentions) {
+async function sendChunks(channel, text, allowedMentions = null) {
   const remaining = text.trim();
   if (!remaining) return;
   const chunks = splitDiscordText(remaining);
@@ -580,7 +580,7 @@ async function sendChunks(channel, text, allowedMentions) {
 
 async function sendFormattedWebhook(channel, formatted, content = "") {
   if (!formatted.embed) return sendChunks(channel, `${content}${content ? "\n" : ""}${formatted.text}`, { parse: [] });
-  const message = { embeds: [formatted.embed], allowedMentions: { parse: [] } };
+  const message: any = { embeds: [formatted.embed], allowedMentions: { parse: [] } };
   if (content) message.content = content.trim();
   return channel.send(message);
 }
@@ -717,7 +717,7 @@ function mentionsTicker(text, ticker) {
 function findWatchlistInstruments(text) {
   const normalized = normalizeName(text);
   const seen = new Set();
-  return [...Object.values(state.watchlist || {}), ...Object.values(state.alertRegistry || {})]
+  return ([...Object.values(state.watchlist || {}), ...Object.values(state.alertRegistry || {})] as any[])
     .filter((item) => mentionsTicker(text, item.ticker)
       || Boolean(item.name && normalized.includes(normalizeName(item.name))))
     .filter((item) => {
@@ -1074,15 +1074,15 @@ async function fetchSharedWatchlist(url = TRADINGVIEW_WATCHLIST_URL) {
   const response = await fetch(url, { signal: AbortSignal.timeout(20_000) });
   if (!response.ok) throw new Error(`TradingView 워치리스트 HTTP ${response.status}`);
   const list = parseSharedWatchlist(await response.text());
-  const symbols = [...new Set(list.symbols.filter((symbol) => /^[A-Z0-9_.-]+:[A-Z0-9_.-]+$/.test(symbol)))];
+  const symbols: string[] = [...new Set<string>(list.symbols.filter((symbol: string) => /^[A-Z0-9_.-]+:[A-Z0-9_.-]+$/.test(symbol)))];
   const metadataResponse = await fetch("https://scanner.tradingview.com/global/scan", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ symbols: { tickers: symbols, query: { types: [] } }, columns: ["name", "description", "exchange"] }),
     signal: AbortSignal.timeout(20_000),
   });
-  const metadata = metadataResponse.ok ? await metadataResponse.json() : { data: [] };
-  const names = new Map((metadata.data || []).map((item) => [item.s, item.d?.[1] || item.d?.[0] || ""]));
+  const metadata: any = metadataResponse.ok ? await metadataResponse.json() : { data: [] };
+  const names = new Map<string, string>((metadata.data || []).map((item: any) => [item.s, item.d?.[1] || item.d?.[0] || ""]));
   return { symbols, names, modified: list.modified };
 }
 
@@ -1115,7 +1115,7 @@ function seedAlertRegistry() {
 async function syncAlertRegistryMessage() {
   const channel = findTextChannelByName(ALERTS_CHANNEL);
   if (!channel) return false;
-  const items = await enrichInstrumentNames(Object.values(state.alertRegistry));
+  const items = await enrichInstrumentNames(Object.values(state.alertRegistry) as any[]);
   state.alertRegistry = Object.fromEntries(items.map((item) => [`${item.exchange}:${item.ticker}`, item]));
   const chunks = splitDiscordText(formatAlertRegistry(items));
   const previous = [];
@@ -1172,7 +1172,7 @@ function startAlertRegistryScheduler() {
 async function syncWatchlistMessage() {
   const channel = findTextChannelByName(WATCHLIST_CHANNEL);
   if (!channel) return;
-  const items = await enrichInstrumentNames(Object.values(state.watchlist));
+  const items = await enrichInstrumentNames(Object.values(state.watchlist) as any[]);
   state.watchlist = Object.fromEntries(items.map((item) => [`${item.exchange}:${item.ticker}`, item]));
   const chunks = splitDiscordText(formatWatchlist(items));
   const previousIds = state.watchlistMessageIds.length ? state.watchlistMessageIds : [state.watchlistMessageId].filter(Boolean);
@@ -1346,7 +1346,7 @@ async function notifyDeferredUsEntry(message) {
 async function checkDeferredUsEntries(now = new Date()) {
   if (!isUsRegularSession(now)) return;
   const marketDate = usSessionClock(now).date;
-  for (const [key, entry] of Object.entries(state.deferredUsEntries)) {
+  for (const [key, entry] of Object.entries(state.deferredUsEntries) as [string, any][]) {
     if (entry.lastAttemptMarketDate === marketDate) continue;
     if (now.getTime() - new Date(entry.queuedAt).getTime() > DEFERRED_US_ENTRY_MAX_AGE_MS) {
       delete state.deferredUsEntries[key];
@@ -1389,7 +1389,7 @@ async function checkDeferredUsEntries(now = new Date()) {
 }
 
 function updateScheduledPaperExitFromOrder(order) {
-  const entry = Object.values(state.scheduledPaperExits).find((item) => item.orderNo === order.orderNo);
+  const entry = (Object.values(state.scheduledPaperExits) as any[]).find((item) => item.orderNo === order.orderNo);
   if (!entry || entry.status === order.status) return;
   entry.status = order.status;
   entry.updatedAt = order.updatedAt || new Date().toISOString();
@@ -1397,7 +1397,7 @@ function updateScheduledPaperExitFromOrder(order) {
 }
 
 async function checkScheduledPaperExits(now = new Date()) {
-  for (const entry of Object.values(state.scheduledPaperExits)) {
+  for (const entry of Object.values(state.scheduledPaperExits) as any[]) {
     const phase = scheduledPaperExitPhase(entry, now);
     if (phase === "WAITING" || !["DUE", "EXPIRED", "INVALID"].includes(phase)) continue;
     if (phase !== "DUE") {
@@ -1449,7 +1449,7 @@ async function checkScheduledPaperExits(now = new Date()) {
 }
 
 function startScheduledPaperExitScheduler() {
-  const pending = Object.values(state.scheduledPaperExits).filter((entry) => entry.status === "SCHEDULED");
+  const pending = (Object.values(state.scheduledPaperExits) as any[]).filter((entry) => entry.status === "SCHEDULED");
   if (pending.length) console.log(`키움 모의 예약 전량매도: ${pending.length}건`);
   void checkScheduledPaperExits().catch((error) => console.error("키움 모의 예약 매도 실패:", error.message));
   void checkDeferredUsEntries().catch((error) => console.error("키움 미국 모의 진입 재검증 실패:", error.message));
@@ -1461,7 +1461,7 @@ function startScheduledPaperExitScheduler() {
 
 async function queueBuyApproval(record) {
   const now = Date.now();
-  for (const [key, item] of Object.entries(state.buyApprovals)) {
+  for (const [key, item] of Object.entries(state.buyApprovals) as [string, any][]) {
     if (item.expiresAt <= now) delete state.buyApprovals[key];
   }
   const approval = createBuyApproval(record, BUY_APPROVAL_TTL_MINUTES * 60_000, now);
@@ -1473,7 +1473,7 @@ async function queueBuyApproval(record) {
   }
 }
 
-async function publishWebhookRecord(record, options = {}) {
+async function publishWebhookRecord(record, options: any = {}) {
   if (options.replayOnly) {
     const formatted = formatWebhookRecord(record);
     const channelNames = formatted.targetChannels || [formatted.targetChannel
@@ -1913,7 +1913,7 @@ async function startOrderStatusWatcher() {
   fs.watchFile(KIWOOM_ORDER_STATE_FILE, { interval: 1000 }, async () => {
     try {
       const snapshot = orderTracker.snapshot();
-      const changed = Object.values(snapshot.orders)
+      const changed = (Object.values(snapshot.orders) as any[])
         .filter((order) => order.revision > revision)
         .sort((a, b) => a.revision - b.revision);
       revision = snapshot.revision;

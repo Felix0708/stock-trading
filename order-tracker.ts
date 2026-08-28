@@ -2,40 +2,42 @@
 
 const fs = require("node:fs");
 
-/** @typedef {{ orderNo: string | number, status: string, revision?: number, updatedAt?: string, market?: string, [key: string]: unknown }} TrackedOrder */
-/** @typedef {{ revision: number, orders: Record<string, TrackedOrder>, recoveryNotifiedOrderNos?: string[] }} OrderState */
+type TrackedOrder = { orderNo: string | number; status: string; revision?: number; updatedAt?: string; market?: string; [key: string]: unknown };
+type OrderState = { revision: number; orders: Record<string, TrackedOrder>; recoveryNotifiedOrderNos?: string[] };
 
 const PENDING_STATUSES = new Set(["ACCEPTED", "CANCEL_REQUESTED", "PARTIALLY_FILLED"]);
 
 /** @param {Date} value @param {string | undefined} market */
-function tradingDate(value, market) {
+function tradingDate(value: Date, market?: string) {
   const parts = new Intl.DateTimeFormat("en-US", {
     timeZone: market === "KRX" ? "Asia/Seoul" : "America/New_York",
     year: "numeric", month: "2-digit", day: "2-digit",
   }).formatToParts(value);
   /** @param {Intl.DateTimeFormatPartTypes} type */
-  const part = (type) => parts.find((item) => item.type === type)?.value || "";
+  const part = (type: Intl.DateTimeFormatPartTypes) => parts.find((item) => item.type === type)?.value || "";
   return `${part("year")}-${part("month")}-${part("day")}`;
 }
 
 class OrderTracker {
   /** @param {string} file */
-  constructor(file) {
+  file: string;
+
+  constructor(file: string) {
     this.file = file;
   }
 
   /** @returns {OrderState} */
-  snapshot() {
+  snapshot(): OrderState {
     if (!fs.existsSync(this.file)) return { revision: 0, orders: {} };
     const state = JSON.parse(fs.readFileSync(this.file, "utf8"));
     if (!Number.isInteger(state.revision) || !state.orders || typeof state.orders !== "object") {
       throw new Error("주문 상태 파일 형식이 올바르지 않습니다.");
     }
-    return /** @type {OrderState} */ (state);
+    return state as OrderState;
   }
 
   /** @param {TrackedOrder} order */
-  record(order) {
+  record(order: TrackedOrder): TrackedOrder {
     if (!order?.orderNo) throw new Error("주문번호가 필요합니다.");
     if (!order.status) throw new Error("주문상태가 필요합니다.");
     const state = this.snapshot();
@@ -63,9 +65,9 @@ class OrderTracker {
     return this.list().filter((order) => PENDING_STATUSES.has(order.status));
   }
 
-  expirePreviousDayOrders(now = new Date()) {
+  expirePreviousDayOrders(now = new Date()): TrackedOrder[] {
     const state = this.snapshot();
-    const expired = [];
+    const expired: TrackedOrder[] = [];
     for (const order of Object.values(state.orders)) {
       const updatedAt = new Date(order.updatedAt || "");
       if (!PENDING_STATUSES.has(order.status) || Number.isNaN(updatedAt.getTime())) continue;
@@ -99,7 +101,7 @@ class OrderTracker {
   }
 
   /** @param {TrackedOrder[]} orders */
-  markRecoveryNotified(orders) {
+  markRecoveryNotified(orders: TrackedOrder[]) {
     const state = this.snapshot();
     const notified = new Set(state.recoveryNotifiedOrderNos || []);
     for (const order of orders) notified.add(String(order.orderNo));
@@ -108,7 +110,7 @@ class OrderTracker {
   }
 
   /** @param {OrderState} state */
-  write(state) {
+  write(state: OrderState) {
     const temporary = `${this.file}.tmp`;
     fs.writeFileSync(temporary, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
     fs.renameSync(temporary, this.file);

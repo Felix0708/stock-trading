@@ -7,4 +7,4 @@ env_file=${1:-${SIGNAL_ENV_FILE:-.env.signal}}
 lock_file=${TMPDIR:-/tmp}/stock-trading-signal.lock
 /usr/bin/shlock -f "$lock_file" -p "$$" || { printf '공통 신호 서버가 이미 실행 중입니다.\n'; exit 0; }
 
-exec node --env-file="$env_file" bot.js
+exec node --import tsx --env-file="$env_file" bot.ts

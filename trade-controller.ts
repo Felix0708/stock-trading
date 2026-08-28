@@ -16,7 +16,9 @@ function partialExitKey(outcome) {
 }
 
 class TradeController {
-  constructor(options = {}) {
+  [key: string]: any;
+
+  constructor(options: any = {}) {
     this.maxOpenPositions = options.maxOpenPositions ?? 5;
     this.buyApprovalRequired = Boolean(options.buyApprovalRequired);
     this.earlyEntryApprovalEnabled = Boolean(options.earlyEntryApprovalEnabled);

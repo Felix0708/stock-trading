@@ -40,7 +40,9 @@ function signalFingerprint(payload, normalized) {
 }
 
 class SignalStateMachine {
-  constructor(snapshot = {}, options = {}) {
+  [key: string]: any;
+
+  constructor(snapshot: any = {}, options: any = {}) {
     this.deduplicationMs = options.deduplicationMs ?? 5_000;
     this.instruments = new Map(Object.entries(snapshot.instruments || {}));
     this.recentFingerprints = new Map();

@@ -10,7 +10,7 @@ async function brokerPortfolio(broker) {
     domesticClient.getDomesticBalance(),
     overseasClient.getUsBalances ? overseasClient.getUsBalances() : overseasClient.getUsBalance().then((balance) => [balance]),
   ]);
-  const usHoldings = [...new Map(usBalances.flatMap((balance) => balance.holdings).map((holding) => [holding.code, holding])).values()];
+  const usHoldings: any[] = [...new Map<string, any>(usBalances.flatMap((balance: any) => balance.holdings).map((holding: any) => [holding.code, holding])).values()];
   const firstUsHolding = usHoldings[0];
   const usCash = firstUsHolding && overseasClient.getUsCash
     ? await overseasClient.getUsCash({

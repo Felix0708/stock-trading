@@ -4,18 +4,22 @@ const fs = require("node:fs");
 const { setTimeout: delay } = require("node:timers/promises");
 const { refreshPaperOrder, trackPaperOrder } = require("./order-tracking");
 
-function blocked(reason) {
+type SignalRecord = { payload: any; risk?: any; positionPreview?: any; outcome?: any; source?: string; requestId?: string; [key: string]: any };
+type ExecutorOptions = { enabled: boolean; environment: string; domesticClient: any; overseasClient: any; tracker: any; brokerLabel?: string; partialExit1Ratio?: number; partialExit2Ratio?: number; now?: Date; symbol?: string; lockFile?: string; client?: any; attempts?: number; delayMs?: number; [key: string]: any };
+type Session = "PRE" | "REGULAR" | "AFTER_CLOSE" | "AFTER_SINGLE" | "AFTER" | "CLOSED";
+
+function blocked(reason: string) {
   return { status: "BLOCKED", reason };
 }
 
-const US_EXCHANGE = {
+const US_EXCHANGE: Record<string, string> = {
   NASDAQ: "ND", ND: "ND",
   NYSE: "NY", NY: "NY",
   AMEX: "NA", NYSEARCA: "NA", ARCA: "NA", NA: "NA",
 };
 
-function isUsMarketClosedError(error) {
-  return /RC4058|장\s*종료/.test(String(error?.message || error || ""));
+function isUsMarketClosedError(error: unknown) {
+  return /RC4058|장\s*종료/.test(String(error instanceof Error ? error.message : error || ""));
 }
 
 function domesticSessionClock(value = new Date()) {
@@ -26,7 +30,7 @@ function domesticSessionClock(value = new Date()) {
   return { date: `${parts.year}-${parts.month}-${parts.day}`, weekday: parts.weekday, minutes: Number(parts.hour) * 60 + Number(parts.minute) };
 }
 
-function domesticSession(value = new Date()) {
+function domesticSession(value = new Date()): Session {
   const { weekday, minutes } = domesticSessionClock(value);
   if (["Sat", "Sun"].includes(weekday)) return "CLOSED";
   if (minutes >= 8 * 60 + 30 && minutes < 8 * 60 + 40) return "PRE";
@@ -83,7 +87,7 @@ function isUsBuySession(value = new Date()) {
   return ["REGULAR", "AFTER"].includes(usSession(value));
 }
 
-function isUsEntry(record) {
+function isUsEntry(record: SignalRecord) {
   const exchange = String(record?.payload?.exchange || "").toUpperCase();
   return record?.payload?.paper_order_test !== true
     && record?.payload?.action === "BUY"
@@ -91,32 +95,32 @@ function isUsEntry(record) {
     && Boolean(US_EXCHANGE[exchange]);
 }
 
-function shouldDeferUsEntry(record, error) {
+function shouldDeferUsEntry(record: SignalRecord, error: unknown) {
   return isUsEntry(record) && isUsMarketClosedError(error);
 }
 
-function shouldDelayUsEntry(record, value = new Date()) {
+function shouldDelayUsEntry(record: SignalRecord, value = new Date()) {
   return isUsEntry(record) && !isUsBuySession(value);
 }
 
-function isDomesticEntry(record) {
+function isDomesticEntry(record: SignalRecord) {
   return record?.payload?.paper_order_test !== true
     && record?.payload?.exchange === "KRX"
     && record?.payload?.action === "BUY"
     && ["PAPER_ENTRY", "PAPER_ADD"].includes(record?.risk?.verdict);
 }
 
-function shouldDeferEntry(record, error) {
+function shouldDeferEntry(record: SignalRecord, error: unknown) {
   return (isUsEntry(record) || isDomesticEntry(record)) && isUsMarketClosedError(error);
 }
 
-function shouldDelayEntry(record, value = new Date()) {
+function shouldDelayEntry(record: SignalRecord, value = new Date()) {
   if (isUsEntry(record)) return !isUsBuySession(value);
   if (isDomesticEntry(record)) return !isDomesticBuySession(value);
   return false;
 }
 
-function partialExitRatio(record, options) {
+function partialExitRatio(record: SignalRecord, options: ExecutorOptions) {
   const code = record.outcome?.signal?.signalCode;
   const level = record.outcome?.signal?.tpLevel;
   if (code === "EXIT_PARTIAL_1" || (code === "TAKE_PROFIT" && level === 1)) return options.partialExit1Ratio ?? 0.25;
@@ -124,7 +128,7 @@ function partialExitRatio(record, options) {
   return null;
 }
 
-function partialExitStage(record) {
+function partialExitStage(record: SignalRecord) {
   const code = record.outcome?.signal?.signalCode;
   const level = record.outcome?.signal?.tpLevel;
   if (code === "EXIT_PARTIAL_1" || (code === "TAKE_PROFIT" && level === 1)) return "TP1";
@@ -132,12 +136,12 @@ function partialExitStage(record) {
   return null;
 }
 
-function partialExitQuantity(tradableQuantity, ratio) {
-  if (!Number.isInteger(tradableQuantity) || tradableQuantity < 1 || !Number.isFinite(ratio) || ratio <= 0 || ratio >= 1) return 0;
+function partialExitQuantity(tradableQuantity: number, ratio: number | null) {
+  if (!Number.isInteger(tradableQuantity) || tradableQuantity < 1 || typeof ratio !== "number" || !Number.isFinite(ratio) || ratio <= 0 || ratio >= 1) return 0;
   return Math.floor(tradableQuantity * ratio);
 }
 
-function protectedUsBuyLimit(signalPrice, currentPrice) {
+function protectedUsBuyLimit(signalPrice: number, currentPrice: number) {
   if (!Number.isFinite(signalPrice) || signalPrice <= 0 || !Number.isFinite(currentPrice) || currentPrice <= 0) {
     throw new Error("미국주식 매수 상한가 계산에 유효한 신호가와 현재가가 필요합니다.");
   }
@@ -146,7 +150,7 @@ function protectedUsBuyLimit(signalPrice, currentPrice) {
   return Math.floor(raw * scale + Number.EPSILON) / scale;
 }
 
-async function submitPaperOrder(record, options) {
+async function submitPaperOrder(record: SignalRecord, options: ExecutorOptions) {
   if (record.payload?.paper_order_test === true) return null;
 
   const { payload, risk, positionPreview } = record;
@@ -172,7 +176,7 @@ async function submitPaperOrder(record, options) {
     if (!/^\d{6}$/.test(payload.ticker)) return blocked("국내주식 종목코드는 6자리여야 함");
     if (entry) quantity = positionPreview?.quantity;
     else {
-      const tradable = (await client.getDomesticBalance()).holdings.find((item) => item.code.replace(/^A/, "") === payload.ticker)?.tradableQuantity;
+      const tradable = (await client.getDomesticBalance()).holdings.find((item: any) => item.code.replace(/^A/, "") === payload.ticker)?.tradableQuantity;
       quantity = partialExit ? partialExitQuantity(tradable, partialExitRatio(record, options)) : tradable;
     }
     if (!Number.isInteger(quantity) || quantity < 1) return blocked("주문 가능한 국내주식 수량 없음");
@@ -181,7 +185,7 @@ async function submitPaperOrder(record, options) {
     marketFallbackAllowed = orderStyle === "PROTECTED" && record.outcome?.signal?.signalCode === "EXIT_CRASH";
     orderStrategy = session === "REGULAR"
       ? `최유리 IOC 최대 2회${marketFallbackAllowed ? " 후 급락 손절 잔량만 시장가" : " · 시장가 전환 없음"}`
-      : { PRE: "장전 시간외 종가", AFTER_CLOSE: "장후 시간외 종가", AFTER_SINGLE: "시간외 단일가 지정가" }[session];
+      : ({ PRE: "장전 시간외 종가", AFTER_CLOSE: "장후 시간외 종가", AFTER_SINGLE: "시간외 단일가 지정가", CLOSED: "장 종료" } as Record<string, string>)[session];
     order = await client.placeDomesticMarketOrder({
       side, symbol: payload.ticker, quantity, price: payload.price,
       session, orderStyle,
@@ -192,7 +196,7 @@ async function submitPaperOrder(record, options) {
     if (!kiwoomExchange) return blocked(`지원하지 않는 거래소: ${exchange || "없음"}`);
     if (entry) quantity = positionPreview?.quantity;
     else {
-      const tradable = (await client.getUsBalance({ exchange: kiwoomExchange })).holdings.find((item) => item.code === payload.ticker)?.tradableQuantity;
+      const tradable = (await client.getUsBalance({ exchange: kiwoomExchange })).holdings.find((item: any) => item.code === payload.ticker)?.tradableQuantity;
       quantity = partialExit ? partialExitQuantity(tradable, partialExitRatio(record, options)) : tradable;
     }
     if (!Number.isInteger(quantity) || quantity < 1) return blocked("주문 가능한 미국주식 수량 없음");
@@ -238,7 +242,7 @@ async function submitPaperOrder(record, options) {
   });
 }
 
-async function submitPaperTestOrder(record, options) {
+async function submitPaperTestOrder(record: SignalRecord, options: ExecutorOptions) {
   if (record.payload?.paper_order_test !== true) return null;
   if (!options.enabled) return blocked("PAPER_ORDER_TEST_ENABLED=false");
   if (record.risk?.verdict !== "PAPER_ENTRY") return blocked(`자동매매 게이트: ${record.risk?.verdict || "없음"}`);
@@ -250,7 +254,7 @@ async function submitPaperTestOrder(record, options) {
       flag: "wx", mode: 0o600,
     });
   } catch (error) {
-    if (error.code === "EEXIST") return blocked("모의주문 1회 테스트가 이미 실행됨");
+    if (error instanceof Error && "code" in error && error.code === "EEXIST") return blocked("모의주문 1회 테스트가 이미 실행됨");
     throw error;
   }
 
@@ -259,10 +263,10 @@ async function submitPaperTestOrder(record, options) {
   return options.tracker.record({ ...order, filledQuantity: 0, remainingQuantity: 1, source: "TRADINGVIEW_TEST" });
 }
 
-async function trackPaperTestOrder(order, options) {
+async function trackPaperTestOrder(order: any, options: ExecutorOptions) {
   for (let attempt = 0; attempt < (options.attempts ?? 15); attempt += 1) {
     const rows = await options.client.getDomesticOrderExecutions({ symbol: order.symbol });
-    const current = rows.find((item) => item.orderNo === order.orderNo);
+    const current = rows.find((item: any) => item.orderNo === order.orderNo);
     if (current) {
       const saved = options.tracker.record({ ...order, ...current });
       if (["FILLED", "CANCELLED", "REJECTED"].includes(saved.status)) return saved;

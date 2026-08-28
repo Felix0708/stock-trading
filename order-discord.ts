@@ -156,7 +156,7 @@ function formatDeferredBuy(record, brokerLabel, environment = "mock") {
   };
 }
 
-function formatExecutorError(title, error, record) {
+function formatExecutorError(title, error, record = null) {
   const payload = record?.payload;
   return {
     channel: "system",

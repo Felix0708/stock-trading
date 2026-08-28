@@ -51,7 +51,9 @@ function buildSignalReviewTopic(records) {
 }
 
 class SignalReviewBatcher {
-  constructor(onBatch, options = {}) {
+  [key: string]: any;
+
+  constructor(onBatch, options: any = {}) {
     this.onBatch = onBatch;
     this.onError = options.onError || ((error) => console.error("AI 신호 검토 실패:", error));
     this.windowMs = options.windowMs ?? 5_000;

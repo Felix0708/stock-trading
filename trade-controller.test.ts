@@ -3,7 +3,7 @@
 const assert = require("node:assert/strict");
 const { TradeController } = require("./trade-controller");
 
-function entry(index, overrides = {}) {
+function entry(index, overrides = {}): any {
   const ticker = String(index).padStart(6, "0");
   return {
     requestId: `request-${index}`,

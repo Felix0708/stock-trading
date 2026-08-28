@@ -204,7 +204,7 @@ async function main() {
     console.log(result.file ? `${result.messages}개 저장: ${result.file}` : `${result.title}: ${date} 메시지 없음`);
     return;
   }
-  throw new Error("사용법: telegram-collector.js login|list|collect [YYYY-MM-DD]");
+  throw new Error("사용법: telegram-collector.ts login|list|collect [YYYY-MM-DD]");
 }
 
 if (require.main === module) main().catch((error) => {

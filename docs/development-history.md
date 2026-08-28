@@ -65,7 +65,7 @@ Cloudflare Quick Tunnel
 
 ### 2단계 — Discord 채널과 자동 브리핑
 
-채널 구조를 코드로 생성할 수 있도록 `setup-discord.js`를 만들었습니다.
+채널 구조를 코드로 생성할 수 있도록 `setup-discord.ts`를 만들었습니다.
 
 - 투자위원회: 라운지, 시장-브리핑, 종목-토론, 라운드테이블
 - 미국주식: 미국-전체신호, 미국-관찰신호, 미국-진입신호, 미국-청산신호, 미국-매매신호
@@ -299,22 +299,22 @@ Discord 전달 흐름은 다음과 같습니다. 기존 `#매매신호`는 `#매
 
 | 파일 | 역할 |
 |---|---|
-| `bot.js` | Discord 봇 5개, 대화 라우팅, 브리핑, 명령어, 전체 연결 |
-| `conversation-router.js` | 채널 공용 문맥의 응답자 선택과 자연어 대화 명령 |
-| `webhook-schema.js` | Webhook v6.2 필드 검증 |
-| `signal-normalizer.js` | 표시 문자열을 안정적인 내부 코드로 변환 |
-| `signal-state-machine.js` | 신호 상태와 중복·진입·청산 판정 |
-| `webhook-server.js` | 비밀 경로 HTTP 수신기와 비동기 큐 |
-| `webhook-discord.js` | 신호·위험·주문 상태 Discord 표시 |
-| `signal-review.js` | 진입 전 CHECK 워치리스트 신호 AI 배치 검토 |
-| `trade-controller.js` | SHADOW/PAPER 상태와 5종목 위험 게이트 |
-| `position-sizer.js` | 위험 예산과 손절 거리 기반 수량 계산 |
-| `kiwoom-client.js` | 키움 국내·해외 모의투자 REST 연결 |
-| `order-tracker.js` | 주문 상태 저장, 변경 추적, 재시작 복구 |
-| `telegram-collector.js` | Telegram 뉴스·시황 채널의 일일 글을 Markdown으로 저장 |
-| `recent-research.js` | 최근 PDF·Telegram Markdown을 브리핑 참고자료로 읽기 |
+| `bot.ts` | Discord 봇 5개, 대화 라우팅, 브리핑, 명령어, 전체 연결 |
+| `conversation-router.ts` | 채널 공용 문맥의 응답자 선택과 자연어 대화 명령 |
+| `webhook-schema.ts` | Webhook v6.2 필드 검증 |
+| `signal-normalizer.ts` | 표시 문자열을 안정적인 내부 코드로 변환 |
+| `signal-state-machine.ts` | 신호 상태와 중복·진입·청산 판정 |
+| `webhook-server.ts` | 비밀 경로 HTTP 수신기와 비동기 큐 |
+| `webhook-discord.ts` | 신호·위험·주문 상태 Discord 표시 |
+| `signal-review.ts` | 진입 전 CHECK 워치리스트 신호 AI 배치 검토 |
+| `trade-controller.ts` | SHADOW/PAPER 상태와 5종목 위험 게이트 |
+| `position-sizer.ts` | 위험 예산과 손절 거리 기반 수량 계산 |
+| `kiwoom-client.ts` | 키움 국내·해외 모의투자 REST 연결 |
+| `order-tracker.ts` | 주문 상태 저장, 변경 추적, 재시작 복구 |
+| `telegram-collector.ts` | Telegram 뉴스·시황 채널의 일일 글을 Markdown으로 저장 |
+| `recent-research.ts` | 최근 PDF·Telegram Markdown을 브리핑 참고자료로 읽기 |
 | `start-all.sh` | 봇과 Cloudflare 터널 통합 실행 |
-| `send-test-webhook.js` | 주문 없는 로컬 연결 테스트 |
+| `send-test-webhook.ts` | 주문 없는 로컬 연결 테스트 |
 
 ## 7. 검증 상태
 
@@ -551,3 +551,11 @@ npm run self-test
 - `ACCOUNT_READ_ONLY=true`에서는 실주문 잠금을 열지 않고 실계좌 인증·잔고·현금·Discord 전달만 시험하며 일반 신호·승인·예약·미완료 주문 재처리는 건너뜀
 - 모의 주문 스모크가 `KIWOOM_ENV=live`에서 실행되지 않도록 코드 잠금과 회귀 테스트 추가
 - 실제 주문 접수·체결 조회·취소 검증은 금융 주문이므로 종목·수량·가격과 별도 실행 승인 전에는 수행하지 않음
+
+## 26. 2026-08-28 전체 TypeScript 전환
+
+- 런타임 30개와 테스트 23개를 모두 `.ts`로 전환하고 Node 20의 기존 CommonJS 동작은 `tsx`로 유지
+- 전체 TypeScript 컴파일 검사와 별도로 수량 계산·주문 추적·주문 실행·키움·한투 API 6개 핵심 모듈에 엄격 타입 검사 적용
+- 실행 스크립트와 npm 점검·연결·수집 명령을 모두 TypeScript 진입점으로 변경
+- 타입 검사에서 발견된 계좌 실행기의 예약 주문 재시도 시 미정의 변수 참조를 제거
+- 별도 빌드 폴더를 만들지 않아 상태 파일·문서·환경설정 경로는 기존과 동일하게 유지

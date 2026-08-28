@@ -1,18 +1,16 @@
 "use strict";
 
-/** @typedef {{ sl?: number | null, momentum_sl?: number | null, price: number, conviction?: string, daily_setup_stage?: string, atr_multiple?: number | null, atr_dot?: boolean, atr_dot_threshold?: number, sb_z_score?: number, daily_trend?: string, daily_ema_aligned?: boolean, daily_above_200ma?: boolean }} SignalPayload */
-/** @typedef {{ payload: SignalPayload, outcome?: { decision?: string, signal?: { signalCode?: string } } }} SignalRecord */
-/** @typedef {{ profitLoss?: number, purchaseAmount?: number, evaluationAmount?: number, profitRate?: number }} Holding */
-/** @typedef {{ fillPrice?: number }} TrackedPosition */
-/** @typedef {{ equity: number, availableCash?: number, entryPrice: number, stopPrice?: number | null, conviction?: string, dailySetupStage?: string, atrMultiple?: number | null, atrDot?: boolean, atrDotThreshold?: number, sbZScore?: number, openPositions?: number, maxOpenPositions?: number, currentPositionValue?: number, hasExistingPosition?: boolean, earlyEntry?: boolean, capitalOnly?: boolean }} PositionSizeInput */
-/** @typedef {{ equity: number, availableCash: number, openPositions: number, maxOpenPositions: number, currentPositionValue: number, currentPositionQuantity?: number, hasExistingPosition?: boolean, positionProfitable?: boolean | null, currency?: string, totalAccountEquity?: number | null, autoCapital?: number | null, autoCapitalRatio?: number, currentOpenRisk?: number | null, maxOpenRisk?: number | null, maxOpenRiskRatio?: number }} AccountSizingContext */
+type SignalPayload = { sl?: number | null; momentum_sl?: number | null; price: number; conviction?: string; daily_setup_stage?: string; atr_multiple?: number | null; atr_dot?: boolean; atr_dot_threshold?: number; sb_z_score?: number; daily_trend?: string; daily_ema_aligned?: boolean; daily_above_200ma?: boolean };
+type SignalRecord = { payload: SignalPayload; outcome?: { decision?: string; signal?: { signalCode?: string } } };
+type Holding = { profitLoss?: number; purchaseAmount?: number; evaluationAmount?: number; profitRate?: number };
+type TrackedPosition = { fillPrice?: number };
+type PositionSizeInput = { equity: number; availableCash?: number; entryPrice: number; stopPrice?: number | null; conviction?: string; dailySetupStage?: string; atrMultiple?: number | null; atrDot?: boolean; atrDotThreshold?: number; sbZScore?: number; openPositions?: number; maxOpenPositions?: number; currentPositionValue?: number; hasExistingPosition?: boolean; earlyEntry?: boolean; capitalOnly?: boolean };
+type AccountSizingContext = { equity: number; availableCash: number; openPositions: number; maxOpenPositions: number; currentPositionValue: number; currentPositionQuantity?: number; hasExistingPosition?: boolean; positionProfitable?: boolean | null; currency?: string; totalAccountEquity?: number | null; autoCapital?: number | null; autoCapitalRatio?: number; currentOpenRisk?: number | null; maxOpenRisk?: number | null; maxOpenRiskRatio?: number };
 
-/** @type {Record<string, number>} */
-const CONVICTION_MULTIPLIER = { S: 1.3, A: 1.1, B: 1, C: 0.7, D: 0 };
+const CONVICTION_MULTIPLIER: Record<string, number> = { S: 1.3, A: 1.1, B: 1, C: 0.7, D: 0 };
 
-/** @param {SignalRecord} record */
-function effectiveStopPrice(record) {
-  const payload = record?.payload || {};
+function effectiveStopPrice(record: SignalRecord) {
+  const payload: SignalPayload = record?.payload || ({} as SignalPayload);
   const signalCode = record?.outcome?.signal?.signalCode || "";
   if (typeof payload.sl === "number" && Number.isFinite(payload.sl) && payload.sl > 0 && payload.sl < payload.price) return payload.sl;
   if (["PEG_PULLBACK", "PEG_REBREAK"].includes(signalCode)
@@ -28,7 +26,7 @@ function effectiveStopPrice(record) {
  * @param {TrackedPosition | null} trackedPosition
  * @param {number | null} signalPrice
  */
-function inferPositionProfitable(holdings = [], trackedPosition = null, signalPrice = null) {
+function inferPositionProfitable(holdings: Holding[] = [], trackedPosition: TrackedPosition | null = null, signalPrice: number | null = null) {
   const profitLosses = holdings.flatMap((holding) => typeof holding.profitLoss === "number" && Number.isFinite(holding.profitLoss) ? [holding.profitLoss] : []);
   if (profitLosses.length) return profitLosses.reduce((sum, value) => sum + value, 0) > 0;
   const purchaseAmount = holdings.reduce((sum, holding) => sum + (typeof holding.purchaseAmount === "number" && Number.isFinite(holding.purchaseAmount) ? holding.purchaseAmount : 0), 0);
@@ -41,8 +39,7 @@ function inferPositionProfitable(holdings = [], trackedPosition = null, signalPr
   return null;
 }
 
-/** @param {PositionSizeInput} input */
-function calculatePositionSize(input = /** @type {PositionSizeInput} */ ({})) {
+function calculatePositionSize(input: PositionSizeInput = {} as PositionSizeInput) {
   const {
     equity, availableCash = equity, entryPrice, stopPrice, conviction = "B",
     dailySetupStage = "NONE", atrMultiple = null, atrDot = false,
@@ -118,11 +115,11 @@ function calculatePositionSize(input = /** @type {PositionSizeInput} */ ({})) {
  * @param {SignalRecord} record
  * @param {AccountSizingContext} account
  */
-function calculateWebhookPositionPreview(record, account) {
+function calculateWebhookPositionPreview(record: SignalRecord, account: AccountSizingContext) {
   const decision = record?.outcome?.decision;
   if (!["ENTRY_CANDIDATE", "ADD_CANDIDATE"].includes(decision || "")) return null;
 
-  const payload = record.payload || {};
+  const payload: SignalPayload = record.payload || ({} as SignalPayload);
   const stopPrice = effectiveStopPrice(record);
   const capitalOnly = ["PEG_PULLBACK", "PEG_REBREAK"].includes(record?.outcome?.signal?.signalCode || "") && stopPrice === null;
   const dailyProvided = payload.daily_trend !== undefined

@@ -9,7 +9,7 @@ lock_file=${TMPDIR:-/tmp}/stock-trading-executor.lock
 
 signal_env=${SIGNAL_ENV_FILE:-.env.signal}
 if [ -f "$signal_env" ] && [ "$signal_env" != "$env_file" ]; then
-  exec node --env-file="$signal_env" --env-file="$env_file" kis-discord-consumer.js
+  exec node --import tsx --env-file="$signal_env" --env-file="$env_file" kis-discord-consumer.ts
 fi
 
-exec node --env-file="$env_file" kis-discord-consumer.js
+exec node --import tsx --env-file="$env_file" kis-discord-consumer.ts

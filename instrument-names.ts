@@ -1,7 +1,9 @@
 "use strict";
 
-const instrumentNameCache = new Map();
-const KNOWN_13F_INSTRUMENTS = {
+type InstrumentName = { ticker?: string; name?: string; koreanName?: string; englishName?: string; exchange?: string; code?: string; [key: string]: any };
+
+const instrumentNameCache = new Map<string, Partial<InstrumentName>>();
+const KNOWN_13F_INSTRUMENTS: Record<string, InstrumentName> = {
   "02079K107": { ticker: "GOOG", koreanName: "알파벳 클래스 C", englishName: "Alphabet Class C" },
   "02079K305": { ticker: "GOOGL", koreanName: "알파벳", englishName: "Alphabet Class A" },
   "02079K602": { koreanName: "알파벳 클래스 B 예탁주", englishName: "Alphabet Depositary Shares Class B" },
@@ -18,7 +20,7 @@ const KNOWN_13F_INSTRUMENTS = {
   "81141R100": { ticker: "SE", koreanName: "씨", englishName: "Sea Limited" },
   "91307C102": { ticker: "UTHR", koreanName: "유나이티드 테라퓨틱스", englishName: "United Therapeutics" },
 };
-const knownByTicker = new Map(Object.values(KNOWN_13F_INSTRUMENTS)
+const knownByTicker = new Map<string, InstrumentName>(Object.values(KNOWN_13F_INSTRUMENTS)
   .filter((item) => item.ticker)
   .map((item) => [item.ticker, item]));
 
@@ -31,11 +33,11 @@ function exchangeCode(value) {
   return exchange;
 }
 
-function instrumentKey(item) {
+function instrumentKey(item: InstrumentName) {
   return `${exchangeCode(item.exchange)}:${item.ticker}`;
 }
 
-function formatInstrumentLabel({ ticker, name, koreanName, englishName } = {}) {
+function formatInstrumentLabel({ ticker, name, koreanName, englishName }: InstrumentName = {}) {
   const fallback = String(name || "").trim();
   const symbol = String(ticker || "").trim().toUpperCase();
   const known = knownByTicker.get(symbol) || {};
@@ -45,7 +47,7 @@ function formatInstrumentLabel({ ticker, name, koreanName, englishName } = {}) {
   return `${names.join(" / ")}${names.length && symbol ? " " : ""}${symbol ? `(${symbol})` : ""}` || "종목명 미확인";
 }
 
-async function enrichInstrumentNames(items, { fetchImpl = fetch } = {}) {
+async function enrichInstrumentNames(items: InstrumentName[], { fetchImpl = fetch }: { fetchImpl?: typeof fetch } = {}) {
   const rows = items.map((item) => {
     const name = String(item.name || "").trim();
     const exchange = String(item.exchange || "").toUpperCase();
@@ -59,7 +61,7 @@ async function enrichInstrumentNames(items, { fetchImpl = fetch } = {}) {
       englishName: String(known.englishName || item.englishName || (name && !/[가-힣]/.test(name) ? name : "")).trim(),
     };
   });
-  const missing = [...new Map(rows
+  const missing: InstrumentName[] = [...new Map<string, InstrumentName>(rows
     .filter((item) => item.ticker && (!item.koreanName || !item.englishName))
     .map((item) => [instrumentKey(item), item])).values()]
     .filter((item) => {
@@ -77,7 +79,7 @@ async function enrichInstrumentNames(items, { fetchImpl = fetch } = {}) {
         signal: AbortSignal.timeout(5_000),
       });
       if (response.ok) {
-        for (const item of (await response.json()).data || []) {
+        for (const item of ((await response.json()) as any).data || []) {
           instrumentNameCache.set(item.s, { englishName: String(item.d?.[0] || "").trim() });
         }
       }
@@ -94,7 +96,7 @@ async function enrichInstrumentNames(items, { fetchImpl = fetch } = {}) {
         try {
           const response = await fetchImpl(url, { signal: AbortSignal.timeout(5_000) });
           if (!response.ok) return;
-          const data = await response.json();
+          const data: any = await response.json();
           instrumentNameCache.set(key, {
             ...instrumentNameCache.get(key),
             koreanName: String(data.stockName || "").trim(),

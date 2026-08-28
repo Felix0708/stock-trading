@@ -1,0 +1,15 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "strict": true
+  },
+  "files": [
+    "order-tracker.ts",
+    "order-tracking.ts",
+    "paper-order-executor.ts",
+    "position-sizer.ts",
+    "kiwoom-client.ts",
+    "kis-client.ts"
+  ],
+  "include": []
+}

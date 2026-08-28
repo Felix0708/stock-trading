@@ -75,7 +75,7 @@ function createAsyncQueue(processor) {
   };
 }
 
-function createWebhookService(options = {}) {
+function createWebhookService(options: any = {}) {
   const token = options.token || "";
   if (token.length < 16) throw new Error("WEBHOOK_PATH_TOKEN은 16자 이상이어야 합니다.");
 
@@ -174,7 +174,7 @@ function createWebhookService(options = {}) {
     },
     close() {
       if (!server.listening) return Promise.resolve();
-      return new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+      return new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     },
   };
 }
