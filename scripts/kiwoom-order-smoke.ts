@@ -1,6 +1,6 @@
 "use strict";
 
-const { KiwoomClient } = require("../src/brokers/kiwoom-client");
+const { KiwoomClient, kiwoomCredentials } = require("../src/brokers/kiwoom-client");
 const path = require("node:path");
 const { OrderTracker } = require("../src/trading/order-tracker");
 
@@ -14,8 +14,7 @@ function assertMockSmokeOrder(env = process.env) {
 async function main() {
   assertMockSmokeOrder();
   const client = new KiwoomClient({
-    appKey: process.env.KIWOOM_OVERSEAS_APP_KEY,
-    secretKey: process.env.KIWOOM_OVERSEAS_SECRET_KEY,
+    ...kiwoomCredentials("mock", "overseas"),
     environment: process.env.KIWOOM_ENV || "mock",
     timeoutMs: Number(process.env.KIWOOM_TIMEOUT_MS || 5000),
   });

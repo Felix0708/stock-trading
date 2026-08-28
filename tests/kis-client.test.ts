@@ -4,7 +4,14 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { KisClient, LIVE_BASE_URL, MOCK_BASE_URL } = require("../src/brokers/kis-client");
+const { KisClient, LIVE_BASE_URL, MOCK_BASE_URL, kisCredentials } = require("../src/brokers/kis-client");
+
+assert.deepEqual(kisCredentials("mock", {
+  KIS_MOCK_APP_KEY: "mock", KIS_MOCK_APP_SECRET: "mock-secret", KIS_MOCK_ACCOUNT_NO: "12345678-01",
+}), { appKey: "mock", appSecret: "mock-secret", accountNo: "12345678-01" });
+assert.deepEqual(kisCredentials("live", {
+  KIS_LIVE_APP_KEY: "live", KIS_LIVE_APP_SECRET: "live-secret", KIS_LIVE_ACCOUNT_NO: "87654321-01",
+}), { appKey: "live", appSecret: "live-secret", accountNo: "87654321-01" });
 
 const calls = [];
 let activeRequests = 0;

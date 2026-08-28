@@ -7,6 +7,18 @@ const path = require("node:path");
 const MOCK_BASE_URL = "https://mockapi.kiwoom.com";
 const LIVE_BASE_URL = "https://api.kiwoom.com";
 
+function kiwoomCredentials(environment: string, market: "domestic" | "overseas", env: NodeJS.ProcessEnv = process.env) {
+  if (!["mock", "live"].includes(environment)) throw new Error("KIWOOM_ENV는 mock 또는 live여야 합니다.");
+  const scope = environment.toUpperCase();
+  const marketScope = market.toUpperCase();
+  const appKey = env[`KIWOOM_${scope}_${marketScope}_APP_KEY`]
+    || env[`KIWOOM_${scope}_APP_KEY`] || env[`KIWOOM_${marketScope}_APP_KEY`];
+  const secretKey = env[`KIWOOM_${scope}_${marketScope}_SECRET_KEY`]
+    || env[`KIWOOM_${scope}_SECRET_KEY`] || env[`KIWOOM_${marketScope}_SECRET_KEY`];
+  if (!appKey || !secretKey) throw new Error(`키움 ${environment === "live" ? "실계좌" : "모의투자"} ${market === "domestic" ? "국내" : "해외"} App Key와 App Secret이 필요합니다.`);
+  return { appKey, secretKey };
+}
+
 function toNumber(value: unknown, field: string) {
   const number = Number(String(value ?? "0").replaceAll(",", ""));
   if (!Number.isFinite(number)) throw new Error(`키움 ${field} 값이 숫자가 아닙니다.`);
@@ -483,4 +495,4 @@ class KiwoomClient {
   }
 }
 
-module.exports = { KiwoomClient, LIVE_BASE_URL, MOCK_BASE_URL };
+module.exports = { KiwoomClient, LIVE_BASE_URL, MOCK_BASE_URL, kiwoomCredentials };

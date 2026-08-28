@@ -5,8 +5,8 @@ const { Client, GatewayIntentBits } = require("discord.js");
 const { syncAccountPortfolio } = require("./account-portfolio");
 const { parseBuyApprovalCommand } = require("./buy-approval");
 const { decodeSignalEmbed } = require("../discord/discord-signal-envelope");
-const { KiwoomClient } = require("../brokers/kiwoom-client");
-const { KisClient } = require("../brokers/kis-client");
+const { KiwoomClient, kiwoomCredentials } = require("../brokers/kiwoom-client");
+const { KisClient, kisCredentials } = require("../brokers/kis-client");
 const { enrichInstrumentNames, formatInstrumentLabel } = require("../research/instrument-names");
 const { OrderTracker } = require("../trading/order-tracker");
 const {
@@ -619,18 +619,21 @@ async function start() {
   const brokers = [];
   const errorReports = new Map();
   if (brokerIds.includes("KIWOOM")) {
+    const domesticCredentials = kiwoomCredentials(environments.KIWOOM, "domestic");
+    const overseasCredentials = kiwoomCredentials(environments.KIWOOM, "overseas");
     brokers.push({
       id: "KIWOOM", label: "키움", environment: environments.KIWOOM,
-      domesticClient: new KiwoomClient({ appKey: process.env.KIWOOM_DOMESTIC_APP_KEY, secretKey: process.env.KIWOOM_DOMESTIC_SECRET_KEY, environment: environments.KIWOOM, timeoutMs: Number(process.env.KIWOOM_TIMEOUT_MS || 5_000) }),
-      overseasClient: new KiwoomClient({ appKey: process.env.KIWOOM_OVERSEAS_APP_KEY, secretKey: process.env.KIWOOM_OVERSEAS_SECRET_KEY, environment: environments.KIWOOM, timeoutMs: Number(process.env.KIWOOM_TIMEOUT_MS || 5_000) }),
+      domesticClient: new KiwoomClient({ ...domesticCredentials, environment: environments.KIWOOM, timeoutMs: Number(process.env.KIWOOM_TIMEOUT_MS || 5_000) }),
+      overseasClient: new KiwoomClient({ ...overseasCredentials, environment: environments.KIWOOM, timeoutMs: Number(process.env.KIWOOM_TIMEOUT_MS || 5_000) }),
       tracker: new OrderTracker(process.env.KIWOOM_ORDER_STATE_FILE || "kiwoom-orders.json"),
     });
   }
   if (brokerIds.includes("KIS")) {
-    const account = accountNumber(process.env.KIS_ACCOUNT_NO);
+    const credentials = kisCredentials(environments.KIS);
+    const account = accountNumber(credentials.accountNo);
     const kis = new KisClient({
-      appKey: process.env.KOREA_INVESTMENT_APP_KEY,
-      appSecret: process.env.KOREA_INVESTMENT_APP_SECRET,
+      appKey: credentials.appKey,
+      appSecret: credentials.appSecret,
       ...account,
       environment: environments.KIS,
       timeoutMs: Number(process.env.KIS_TIMEOUT_MS || 5_000),

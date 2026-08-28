@@ -4,7 +4,17 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { KiwoomClient, LIVE_BASE_URL, MOCK_BASE_URL } = require("../src/brokers/kiwoom-client");
+const { KiwoomClient, LIVE_BASE_URL, MOCK_BASE_URL, kiwoomCredentials } = require("../src/brokers/kiwoom-client");
+
+assert.deepEqual(kiwoomCredentials("mock", "domestic", {
+  KIWOOM_MOCK_DOMESTIC_APP_KEY: "mock-domestic", KIWOOM_MOCK_DOMESTIC_SECRET_KEY: "mock-domestic-secret",
+}), { appKey: "mock-domestic", secretKey: "mock-domestic-secret" });
+assert.deepEqual(kiwoomCredentials("live", "overseas", {
+  KIWOOM_LIVE_APP_KEY: "live", KIWOOM_LIVE_SECRET_KEY: "live-secret",
+}), { appKey: "live", secretKey: "live-secret" });
+assert.deepEqual(kiwoomCredentials("mock", "overseas", {
+  KIWOOM_OVERSEAS_APP_KEY: "legacy", KIWOOM_OVERSEAS_SECRET_KEY: "legacy-secret",
+}), { appKey: "legacy", secretKey: "legacy-secret" });
 
 const calls = [];
 async function fakeFetch(url, options) {

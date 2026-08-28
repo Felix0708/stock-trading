@@ -8,6 +8,16 @@ const MOCK_BASE_URL = "https://openapivts.koreainvestment.com:29443";
 const LIVE_BASE_URL = "https://openapi.koreainvestment.com:9443";
 const US_EXCHANGE: Record<string, string> = { ND: "NASD", NASDAQ: "NASD", NASD: "NASD", NY: "NYSE", NYSE: "NYSE", NA: "AMEX", AMEX: "AMEX", ARCA: "AMEX", NYSEARCA: "AMEX" };
 
+function kisCredentials(environment: string, env: NodeJS.ProcessEnv = process.env) {
+  if (!["mock", "live"].includes(environment)) throw new Error("KIS_ENV는 mock 또는 live여야 합니다.");
+  const scope = environment.toUpperCase();
+  const appKey = env[`KIS_${scope}_APP_KEY`] || env.KOREA_INVESTMENT_APP_KEY;
+  const appSecret = env[`KIS_${scope}_APP_SECRET`] || env.KOREA_INVESTMENT_APP_SECRET;
+  const accountNo = env[`KIS_${scope}_ACCOUNT_NO`] || env.KIS_ACCOUNT_NO;
+  if (!appKey || !appSecret || !accountNo) throw new Error(`한투 ${environment === "live" ? "실계좌" : "모의계좌"} App Key·App Secret·계좌번호가 필요합니다.`);
+  return { appKey, appSecret, accountNo };
+}
+
 function number(value: unknown) {
   const parsed = Number(String(value ?? "").replaceAll(",", ""));
   return Number.isFinite(parsed) ? parsed : 0;
@@ -290,4 +300,4 @@ class KisClient {
   }
 }
 
-module.exports = { KisClient, LIVE_BASE_URL, MOCK_BASE_URL, US_EXCHANGE };
+module.exports = { KisClient, LIVE_BASE_URL, MOCK_BASE_URL, US_EXCHANGE, kisCredentials };

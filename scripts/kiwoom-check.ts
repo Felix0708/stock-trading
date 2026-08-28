@@ -1,19 +1,17 @@
 "use strict";
 
-const { KiwoomClient } = require("../src/brokers/kiwoom-client");
+const { KiwoomClient, kiwoomCredentials } = require("../src/brokers/kiwoom-client");
 
 async function main() {
   const environment = process.env.KIWOOM_ENV || "mock";
   const environmentLabel = environment === "live" ? "실계좌" : "모의투자";
   const domestic = new KiwoomClient({
-    appKey: process.env.KIWOOM_DOMESTIC_APP_KEY,
-    secretKey: process.env.KIWOOM_DOMESTIC_SECRET_KEY,
+    ...kiwoomCredentials(environment, "domestic"),
     environment,
     timeoutMs: Number(process.env.KIWOOM_TIMEOUT_MS || 5000),
   });
   const overseas = new KiwoomClient({
-    appKey: process.env.KIWOOM_OVERSEAS_APP_KEY,
-    secretKey: process.env.KIWOOM_OVERSEAS_SECRET_KEY,
+    ...kiwoomCredentials(environment, "overseas"),
     environment,
     timeoutMs: Number(process.env.KIWOOM_TIMEOUT_MS || 5000),
   });

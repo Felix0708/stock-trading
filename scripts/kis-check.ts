@@ -1,6 +1,6 @@
 "use strict";
 
-const { KisClient } = require("../src/brokers/kis-client");
+const { KisClient, kisCredentials } = require("../src/brokers/kis-client");
 
 function account(value) {
   const match = String(value || "").match(/^(\d{8})(?:-(\d{2}))?$/);
@@ -11,10 +11,11 @@ function account(value) {
 (async () => {
   const environment = process.env.KIS_ENV || "mock";
   const environmentLabel = environment === "live" ? "실계좌" : "모의계좌";
+  const credentials = kisCredentials(environment);
   const client = new KisClient({
-    appKey: process.env.KOREA_INVESTMENT_APP_KEY,
-    appSecret: process.env.KOREA_INVESTMENT_APP_SECRET,
-    ...account(process.env.KIS_ACCOUNT_NO),
+    appKey: credentials.appKey,
+    appSecret: credentials.appSecret,
+    ...account(credentials.accountNo),
     environment,
   });
   const domestic = await client.getDomesticBalance();

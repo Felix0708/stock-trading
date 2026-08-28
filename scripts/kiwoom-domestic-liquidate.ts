@@ -1,7 +1,7 @@
 "use strict";
 
 const assert = require("node:assert/strict");
-const { KiwoomClient } = require("../src/brokers/kiwoom-client");
+const { KiwoomClient, kiwoomCredentials } = require("../src/brokers/kiwoom-client");
 const { domesticSession } = require("../src/trading/paper-order-executor");
 
 const dueAt = new Date(process.env.LIQUIDATE_AT || "");
@@ -20,8 +20,7 @@ async function liquidate() {
   if (!/^\d{6}$/.test(symbol)) throw new Error("LIQUIDATE_SYMBOL에 매도할 국내 종목코드 6자리가 필요합니다.");
 
   const client = new KiwoomClient({
-    appKey: process.env.KIWOOM_DOMESTIC_APP_KEY,
-    secretKey: process.env.KIWOOM_DOMESTIC_SECRET_KEY,
+    ...kiwoomCredentials("mock", "domestic"),
     environment: process.env.KIWOOM_ENV,
   });
   const balance = await client.getDomesticBalance();
