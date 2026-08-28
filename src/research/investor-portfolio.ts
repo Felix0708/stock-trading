@@ -211,7 +211,10 @@ function holdingLines(account, currency) {
   return holdings.map((holding) => {
     const code = String(holding.code || "").replace(/^A(?=\d{6}$)/, "");
     const ratio = account.equity > 0 ? holding.evaluationAmount / account.equity * 100 : 0;
-    return `**${formatInstrumentLabel({ ...holding, ticker: code })}**\n${holding.quantity}주 · ${money(holding.evaluationAmount, currency)} · ${ratio.toFixed(1)}%`;
+    const averagePrice = Number(holding.purchasePrice) > 0
+      ? Number(holding.purchasePrice) : Number(holding.purchaseAmount) / Number(holding.quantity);
+    const average = Number.isFinite(averagePrice) && averagePrice > 0 ? money(averagePrice, currency) : "확인 불가";
+    return `**${formatInstrumentLabel({ ...holding, ticker: code })}**\n${holding.quantity}주 · 평단 ${average} · 평가 ${money(holding.evaluationAmount, currency)} · ${ratio.toFixed(1)}%`;
   });
 }
 

@@ -141,18 +141,18 @@ const fetchImpl = async (url) => {
     updatedAt: "2026-08-21T00:00:00.000Z",
     domestic: {
       equity: 1_000_000,
-      holdingPositions: [{ code: "A005930", name: "삼성전자", koreanName: "삼성전자", englishName: "Samsung Electronics", quantity: 1, currentPrice: 80_000, evaluationAmount: 80_000, positionRatio: 8 }],
+      holdingPositions: [{ code: "A005930", name: "삼성전자", koreanName: "삼성전자", englishName: "Samsung Electronics", quantity: 1, currentPrice: 80_000, purchasePrice: 70_000, evaluationAmount: 80_000, positionRatio: 8 }],
     },
     overseas: {
       equity: 10_000,
-      holdingPositions: [{ code: "SE", name: "Sea Limited", koreanName: "씨", englishName: "Sea Limited", quantity: 2, currentPrice: 120, evaluationAmount: 240 }],
+      holdingPositions: [{ code: "SE", name: "Sea Limited", koreanName: "씨", englishName: "Sea Limited", quantity: 2, currentPrice: 120, purchaseAmount: 200, evaluationAmount: 240 }],
     },
   });
   const personalText = personalPayload.embeds[0].description;
   assert.match(personalText, /국내주식 · 1종목\*\*\n\n\*\*삼성전자 \/ Samsung Electronics/);
-  assert.match(personalText, /삼성전자 \/ Samsung Electronics \(005930\)\*\*\n1주 · 80,000원 · 8\.0%/);
+  assert.match(personalText, /삼성전자 \/ Samsung Electronics \(005930\)\*\*\n1주 · 평단 70,000원 · 평가 80,000원 · 8\.0%/);
   assert.match(personalText, /미국주식 · 1종목\*\*\n\n\*\*씨 \/ Sea Limited/);
-  assert.match(personalText, /씨 \/ Sea Limited \(SE\)\*\*\n2주 · \$240 · 2\.4%/);
+  assert.match(personalText, /씨 \/ Sea Limited \(SE\)\*\*\n2주 · 평단 \$100 · 평가 \$240 · 2\.4%/);
   assert.match(personalPayload.embeds[0].footer.text, /모의계좌/);
   const dualAccountPayload = formatMyPortfolioMessage({
     updatedAt: "2026-08-26T00:00:00.000Z",
