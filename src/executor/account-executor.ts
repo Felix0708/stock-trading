@@ -251,6 +251,10 @@ function errorReportDue(previousAt, now = Date.now(), cooldownMs = 30 * 60_000) 
   return !Number.isFinite(previousAt) || now - previousAt >= cooldownMs;
 }
 
+function orderStatusUnknown(error) {
+  return error?.orderStatusUnknown === true;
+}
+
 function liveAutoBuyEligible(record) {
   const payload = record?.payload || {};
   return payload.action === "BUY"
@@ -669,6 +673,21 @@ async function start() {
     }
   }
 
+  async function reportUnknownOrder(broker, record, error) {
+    const action = record.payload.action === "BUY" ? "매수" : "매도";
+    try {
+      await send(channels.execution, { text: [
+        `⚠️ **${brokerAccountLabel(broker)} ${action} 주문 상태 확인 필요**`,
+        `**종목**: ${formatInstrumentLabel(record.payload)}`,
+        "증권사 응답이 끊겨 주문 접수 여부를 확정할 수 없습니다.",
+        "중복 주문 방지를 위해 자동 재주문을 차단했습니다. 증권사 주문내역을 확인해 주세요.",
+      ].join("\n") });
+    } catch (notificationError) {
+      console.error(`${broker.label} 주문 상태 알림 실패: ${notificationError.message}`);
+    }
+    await reportError(`${broker.label} ${action} 주문 상태 불명`, error, record);
+  }
+
   async function syncPortfolio() {
     const result = await syncAccountPortfolio(await targetChannel(channels.portfolio), brokers);
     for (const failure of result.failures) {
@@ -836,6 +855,10 @@ async function start() {
     try {
       return await execute(broker, record);
     } catch (error) {
+      if (orderStatusUnknown(error)) {
+        await reportUnknownOrder(broker, record, error);
+        return { status: "UNKNOWN", orderStatusUnknown: true };
+      }
       if (shouldDeferEntry(record, error)) {
         if (!retry) {
           receipts.putDeferred(broker.id, record, deferredTtlMs);
@@ -886,6 +909,11 @@ async function start() {
         await execute(broker, record);
         receipts.removeDeferred(deferred.key);
       } catch (error) {
+        if (orderStatusUnknown(error)) {
+          receipts.removeDeferred(deferred.key);
+          await reportUnknownOrder(broker, record, error);
+          continue;
+        }
         if (shouldDeferEntry(record, error)) continue;
         receipts.markDeferredFailure(deferred.key, error);
         await send(channels.execution, formatUncreatedOrder(brokerAccountLabel(broker), record, {
@@ -1156,4 +1184,4 @@ async function start() {
 
 if (require.main === module) start().catch((error) => { console.error(error); process.exitCode = 1; });
 
-module.exports = { SignalReceiptStore, accountCommand, accountContext, accountPortfolioSyncMinutes, accountRiskPolicy, accountSymbol, applyPyramidSizing, approvalText, approvedEntryVerdict, brokerEnvironments, buyApprovalRequiredForBroker, discordMessagePayload, enabledBrokerIds, enforceOpenRiskLimit, enforceOwnAccountRules, errorReportDue, invalidationExitReason, liveAutoBuyEligible, momentumExitRecommendation, orderNeedsPortfolioSync, orderNeedsResultReport, pyramidPlan, readOnlySignalAllowed, reconcilePendingBrokerOrders, shouldConsumeMessage, signalExchange, start, trackedPortfolio };
+module.exports = { SignalReceiptStore, accountCommand, accountContext, accountPortfolioSyncMinutes, accountRiskPolicy, accountSymbol, applyPyramidSizing, approvalText, approvedEntryVerdict, brokerEnvironments, buyApprovalRequiredForBroker, discordMessagePayload, enabledBrokerIds, enforceOpenRiskLimit, enforceOwnAccountRules, errorReportDue, invalidationExitReason, liveAutoBuyEligible, momentumExitRecommendation, orderNeedsPortfolioSync, orderNeedsResultReport, orderStatusUnknown, pyramidPlan, readOnlySignalAllowed, reconcilePendingBrokerOrders, shouldConsumeMessage, signalExchange, start, trackedPortfolio };

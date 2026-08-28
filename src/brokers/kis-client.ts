@@ -29,6 +29,16 @@ function status(orderQuantity: number, filledQuantity: number, remainingQuantity
   return "ACCEPTED";
 }
 
+function uncertainOrderError(message: string) {
+  const error: any = new Error(`${message} 주문 처리 여부를 확인할 수 없어 자동 재전송하지 않습니다.`);
+  error.orderStatusUnknown = true;
+  return error;
+}
+
+function transientHttpStatus(status: number) {
+  return [408, 425, 429, 500, 502, 503, 504].includes(status);
+}
+
 class KisClient {
   appKey: string;
   appSecret: string;
@@ -78,20 +88,35 @@ class KisClient {
 
   async accessToken() {
     if (!this.token && this.tokenCacheFile && fs.existsSync(this.tokenCacheFile)) {
-      const cached = JSON.parse(fs.readFileSync(this.tokenCacheFile, "utf8"));
-      if (typeof cached.token === "string" && Number(cached.expiresAt) > Date.now() + 60_000) {
-        this.token = cached.token;
-        this.tokenExpiresAt = Number(cached.expiresAt);
+      try {
+        const cached = JSON.parse(fs.readFileSync(this.tokenCacheFile, "utf8"));
+        if (typeof cached.token === "string" && Number(cached.expiresAt) > Date.now() + 60_000) {
+          this.token = cached.token;
+          this.tokenExpiresAt = Number(cached.expiresAt);
+        }
+      } catch {
+        // 손상된 캐시는 무시하고 새 토큰을 받습니다.
       }
     }
     if (this.token && Date.now() < this.tokenExpiresAt) return this.token;
-    const response = await this.fetch(`${this.baseUrl}/oauth2/tokenP`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ grant_type: "client_credentials", appkey: this.appKey, appsecret: this.appSecret }),
-      signal: AbortSignal.timeout(this.timeoutMs),
-    });
-    const result = await response.json();
+    let response;
+    try {
+      response = await this.fetch(`${this.baseUrl}/oauth2/tokenP`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ grant_type: "client_credentials", appkey: this.appKey, appsecret: this.appSecret }),
+        signal: AbortSignal.timeout(this.timeoutMs),
+      });
+    } catch (error) {
+      throw new Error(`한투 ${this.environment === "live" ? "실계좌" : "모의"} 인증 통신 실패: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    const text = await response.text();
+    let result;
+    try {
+      result = text ? JSON.parse(text) : {};
+    } catch {
+      throw new Error(`한투 ${this.environment === "live" ? "실계좌" : "모의"} 인증 응답이 JSON이 아닙니다. (HTTP ${response.status})`);
+    }
     if (!response.ok || !result.access_token) throw new Error(`한투 ${this.environment === "live" ? "실계좌" : "모의"} 인증 실패: ${result.error_description || result.msg1 || response.status}`);
     this.token = result.access_token;
     this.tokenExpiresAt = Date.now() + Math.max(60, number(result.expires_in) - 60) * 1_000;
@@ -103,32 +128,56 @@ class KisClient {
     return this.token;
   }
 
-  async request(path: string, { method = "GET", trId, params, body }: any = {}): Promise<any> {
+  async request(path: string, { method = "GET", trId, params, body, retryTransient = method === "GET" }: any = {}): Promise<any> {
     const sharedTrId = trId === "HHDFS00000300";
     if (!trId || (!sharedTrId && (this.environment === "mock" ? !trId.startsWith("V") : trId.startsWith("V")))) throw new Error(`한투 ${this.environment === "live" ? "실계좌" : "모의"} TR ID가 올바르지 않습니다.`);
     const queued = this.requestQueue.then(async () => {
       const query = params ? `?${new URLSearchParams(params)}` : "";
       let authorizationRetried = false;
       let rateLimitRetried = false;
-      for (let attempt = 0; attempt < 3; attempt += 1) {
+      let transientRetried = false;
+      for (let attempt = 0; attempt < 4; attempt += 1) {
         const token = await this.accessToken();
         const waitMs = this.requestIntervalMs - (Date.now() - this.lastRequestAt);
         if (waitMs > 0) await new Promise((resolve) => setTimeout(resolve, waitMs));
         this.lastRequestAt = Date.now();
-        const response = await this.fetch(`${this.baseUrl}${path}${query}`, {
-          method,
-          headers: {
-            authorization: `Bearer ${token}`,
-            appkey: this.appKey,
-            appsecret: this.appSecret,
-            tr_id: trId,
-            custtype: "P",
-            ...(body ? { "content-type": "application/json" } : {}),
-          },
-          ...(body ? { body: JSON.stringify(body) } : {}),
-          signal: AbortSignal.timeout(this.timeoutMs),
-        });
-        const result = await response.json();
+        let response;
+        try {
+          response = await this.fetch(`${this.baseUrl}${path}${query}`, {
+            method,
+            headers: {
+              authorization: `Bearer ${token}`,
+              appkey: this.appKey,
+              appsecret: this.appSecret,
+              tr_id: trId,
+              custtype: "P",
+              ...(body ? { "content-type": "application/json" } : {}),
+            },
+            ...(body ? { body: JSON.stringify(body) } : {}),
+            signal: AbortSignal.timeout(this.timeoutMs),
+          });
+        } catch (error) {
+          if (retryTransient && !transientRetried) {
+            transientRetried = true;
+            await new Promise((resolve) => setTimeout(resolve, 500));
+            continue;
+          }
+          const message = `한투 ${this.environment === "live" ? "실계좌" : "모의"} 통신 실패 [${trId}]: ${error instanceof Error ? error.message : String(error)}.`;
+          throw retryTransient ? new Error(message) : uncertainOrderError(message);
+        }
+        const text = await response.text();
+        let result;
+        try {
+          result = text ? JSON.parse(text) : {};
+        } catch {
+          if (retryTransient && !transientRetried && transientHttpStatus(response.status)) {
+            transientRetried = true;
+            await new Promise((resolve) => setTimeout(resolve, 500));
+            continue;
+          }
+          const message = `한투 ${this.environment === "live" ? "실계좌" : "모의"} 응답이 JSON이 아닙니다 [${trId}] (HTTP ${response.status}).`;
+          throw retryTransient ? new Error(message) : uncertainOrderError(message);
+        }
         if (!authorizationRetried && result.msg_cd === "EGW00123") {
           authorizationRetried = true;
           this.token = null;
@@ -141,7 +190,15 @@ class KisClient {
           await new Promise((resolve) => setTimeout(resolve, this.rateLimitWaitMs));
           continue;
         }
-        if (!response.ok || result.rt_cd !== "0") throw new Error(`한투 ${this.environment === "live" ? "실계좌" : "모의"} API 실패 [${trId}]: ${result.msg1 || response.status}`);
+        if (retryTransient && !transientRetried && transientHttpStatus(response.status)) {
+          transientRetried = true;
+          await new Promise((resolve) => setTimeout(resolve, response.status === 429 ? this.rateLimitWaitMs : 500));
+          continue;
+        }
+        if (!response.ok || result.rt_cd !== "0") {
+          const message = `한투 ${this.environment === "live" ? "실계좌" : "모의"} API 실패 [${trId}]: ${result.msg1 || response.status}`;
+          throw !retryTransient && transientHttpStatus(response.status) ? uncertainOrderError(`${message}.`) : new Error(message);
+        }
         return result;
       }
       throw new Error("한투 인증 재시도에 실패했습니다.");
@@ -198,7 +255,9 @@ class KisClient {
       method: "POST", trId: side === "BUY" ? this.trId("VTTC0012U", "TTTC0012U") : this.trId("VTTC0011U", "TTTC0011U"),
       body: this.accountParams({ PDNO: symbol, ORD_DVSN: orderType, ORD_QTY: String(quantity), ORD_UNPR: session === "AFTER_SINGLE" ? String(price) : "0", EXCG_ID_DVSN_CD: "KRX", SLL_TYPE: "01", CNDT_PRIC: "0" }),
     });
-    return { orderNo: String(result.output?.ODNO || result.output?.odno), symbol, side, status: "ACCEPTED" };
+    const orderNo = result.output?.ODNO || result.output?.odno;
+    if (!orderNo) throw new Error("한투 국내주식 주문 접수 응답에 주문번호가 없습니다.");
+    return { orderNo: String(orderNo), symbol, side, status: "ACCEPTED" };
   }
 
   async getDomesticOrderExecutions({ symbol = "" } = {}) {
@@ -283,7 +342,9 @@ class KisClient {
       method: "POST", trId: side === "BUY" ? this.trId("VTTT1002U", "TTTT1002U") : this.trId("VTTT1001U", "TTTT1006U"),
       body: this.accountParams({ OVRS_EXCG_CD: this.kisExchange(exchange), PDNO: symbol, ORD_QTY: String(quantity), OVRS_ORD_UNPR: String(price), CTAC_TLNO: "", MGCO_APTM_ODNO: "", SLL_TYPE: "00", ORD_SVR_DVSN_CD: "0", ORD_DVSN: "00" }),
     });
-    return { orderNo: String(result.output?.ODNO || result.output?.odno), symbol, side, status: "ACCEPTED" };
+    const orderNo = result.output?.ODNO || result.output?.odno;
+    if (!orderNo) throw new Error("한투 미국주식 주문 접수 응답에 주문번호가 없습니다.");
+    return { orderNo: String(orderNo), symbol, side, status: "ACCEPTED" };
   }
 
   async getUsOrderExecutions({ exchange = "ND", symbol = "" }: any = {}) {

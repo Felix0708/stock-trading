@@ -41,6 +41,16 @@ function responseErrorCode(data: any) {
   return embedded ? Number(embedded[1]) : Number(data?.return_code);
 }
 
+function uncertainOrderError(message: string) {
+  const error: any = new Error(`${message} 주문 처리 여부를 확인할 수 없어 자동 재전송하지 않습니다.`);
+  error.orderStatusUnknown = true;
+  return error;
+}
+
+function transientHttpStatus(status: number) {
+  return [408, 425, 429, 500, 502, 503, 504].includes(status);
+}
+
 class KiwoomClient {
   #appKey: string;
   #secretKey: string;
@@ -54,11 +64,15 @@ class KiwoomClient {
 
   #useCachedToken(rejectedToken: string | null = "") {
     if (!this.#tokenCacheFile || !fs.existsSync(this.#tokenCacheFile)) return false;
-    const cached = JSON.parse(fs.readFileSync(this.#tokenCacheFile, "utf8"));
-    if (typeof cached.token !== "string" || cached.token === rejectedToken || tokenExpiry(cached.expiresDt) <= Date.now() + 60_000) return false;
-    this.#token = cached.token;
-    this.#expiresDt = cached.expiresDt;
-    return true;
+    try {
+      const cached = JSON.parse(fs.readFileSync(this.#tokenCacheFile, "utf8"));
+      if (typeof cached.token !== "string" || cached.token === rejectedToken || tokenExpiry(cached.expiresDt) <= Date.now() + 60_000) return false;
+      this.#token = cached.token;
+      this.#expiresDt = cached.expiresDt;
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   async #refreshAccessToken(rejectedToken: string | null = "") {
@@ -109,7 +123,10 @@ class KiwoomClient {
       : tokenCacheFile || "";
   }
 
-  async post(path: string, { apiId, body = {}, authorization = false, retryAuthorization = true, retryRateLimit = true }: any = {}): Promise<any> {
+  async post(path: string, {
+    apiId, body = {}, authorization = false, retryAuthorization = true,
+    retryRateLimit = true, retryTransient = true, transientAttempt = 0,
+  }: any = {}): Promise<any> {
     const headers: Record<string, string> = { "content-type": "application/json;charset=UTF-8" };
     if (apiId) headers["api-id"] = apiId;
     if (authorization) headers.authorization = `Bearer ${await this.getAccessToken()}`;
@@ -123,7 +140,12 @@ class KiwoomClient {
         signal: AbortSignal.timeout(this.#timeoutMs),
       });
     } catch (error) {
-      throw new Error(`키움 ${this.#environmentLabel} 통신 실패: ${error instanceof Error ? error.message : String(error)}`);
+      if (retryTransient && transientAttempt < 1) {
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        return this.post(path, { apiId, body, authorization, retryAuthorization, retryRateLimit, retryTransient, transientAttempt: transientAttempt + 1 });
+      }
+      const message = `키움 ${this.#environmentLabel} 통신 실패: ${error instanceof Error ? error.message : String(error)}.`;
+      throw retryTransient ? new Error(message) : uncertainOrderError(message);
     }
 
     const text = await response.text();
@@ -131,7 +153,12 @@ class KiwoomClient {
     try {
       data = text ? JSON.parse(text) : {};
     } catch {
-      throw new Error(`키움 ${this.#environmentLabel} 응답이 JSON이 아닙니다. (HTTP ${response.status})`);
+      if (retryTransient && transientAttempt < 1 && transientHttpStatus(response.status)) {
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        return this.post(path, { apiId, body, authorization, retryAuthorization, retryRateLimit, retryTransient, transientAttempt: transientAttempt + 1 });
+      }
+      const message = `키움 ${this.#environmentLabel} 응답이 JSON이 아닙니다. (HTTP ${response.status}).`;
+      throw retryTransient ? new Error(message) : uncertainOrderError(message);
     }
     const errorCode = responseErrorCode(data);
     if (authorization && retryAuthorization && errorCode === 8005) {
@@ -139,14 +166,19 @@ class KiwoomClient {
       this.#token = null;
       this.#expiresDt = null;
       await this.#refreshAccessToken(rejectedToken);
-      return this.post(path, { apiId, body, authorization, retryAuthorization: false });
+      return this.post(path, { apiId, body, authorization, retryAuthorization: false, retryRateLimit, retryTransient, transientAttempt });
     }
     if (authorization && retryRateLimit && errorCode === 1700) {
       await new Promise((resolve) => setTimeout(resolve, 1100));
-      return this.post(path, { apiId, body, authorization, retryAuthorization, retryRateLimit: false });
+      return this.post(path, { apiId, body, authorization, retryAuthorization, retryRateLimit: false, retryTransient, transientAttempt });
+    }
+    if (retryTransient && transientAttempt < 1 && transientHttpStatus(response.status)) {
+      await new Promise((resolve) => setTimeout(resolve, response.status === 429 ? 1100 : 500));
+      return this.post(path, { apiId, body, authorization, retryAuthorization, retryRateLimit, retryTransient, transientAttempt: transientAttempt + 1 });
     }
     if (!response.ok || data.return_code !== 0) {
-      throw new Error(`키움 ${this.#environmentLabel} 요청 실패: ${data.return_msg || `HTTP ${response.status}`}`);
+      const message = `키움 ${this.#environmentLabel} 요청 실패: ${data.return_msg || `HTTP ${response.status}`}`;
+      throw !retryTransient && transientHttpStatus(response.status) ? uncertainOrderError(`${message}.`) : new Error(message);
     }
     return data;
   }
@@ -296,6 +328,7 @@ class KiwoomClient {
     const data = await this.post("/api/dostk/ordr", {
       apiId: side === "BUY" ? "kt10000" : "kt10001",
       authorization: true,
+      retryTransient: false,
       body: {
         dmst_stex_tp: "KRX",
         stk_cd: symbol,
@@ -433,6 +466,7 @@ class KiwoomClient {
     const data = await this.post("/api/us/ordr", {
       apiId: side === "BUY" ? "ust20000" : "ust20001",
       authorization: true,
+      retryTransient: false,
       body,
     });
     if (!data.ord_no) throw new Error("키움 주문 접수 응답에 주문번호가 없습니다.");
@@ -449,6 +483,7 @@ class KiwoomClient {
     const data = await this.post("/api/us/ordr", {
       apiId: "ust20003",
       authorization: true,
+      retryTransient: false,
       body: { orig_ord_no: orderNo, stex_tp: exchange, stk_cd: symbol },
     });
     if (!data.ord_no) throw new Error("키움 취소 접수 응답에 주문번호가 없습니다.");

@@ -1,7 +1,7 @@
 "use strict";
 
 const assert = require("node:assert/strict");
-const { accountCommand, accountContext, accountPortfolioSyncMinutes, accountRiskPolicy, accountSymbol, applyPyramidSizing, approvalText, approvedEntryVerdict, brokerEnvironments, buyApprovalRequiredForBroker, discordMessagePayload, enabledBrokerIds, enforceOpenRiskLimit, enforceOwnAccountRules, errorReportDue, invalidationExitReason, liveAutoBuyEligible, momentumExitRecommendation, orderNeedsPortfolioSync, orderNeedsResultReport, pyramidPlan, readOnlySignalAllowed, reconcilePendingBrokerOrders, shouldConsumeMessage, SignalReceiptStore, trackedPortfolio } = require("../src/executor/account-executor");
+const { accountCommand, accountContext, accountPortfolioSyncMinutes, accountRiskPolicy, accountSymbol, applyPyramidSizing, approvalText, approvedEntryVerdict, brokerEnvironments, buyApprovalRequiredForBroker, discordMessagePayload, enabledBrokerIds, enforceOpenRiskLimit, enforceOwnAccountRules, errorReportDue, invalidationExitReason, liveAutoBuyEligible, momentumExitRecommendation, orderNeedsPortfolioSync, orderNeedsResultReport, orderStatusUnknown, pyramidPlan, readOnlySignalAllowed, reconcilePendingBrokerOrders, shouldConsumeMessage, SignalReceiptStore, trackedPortfolio } = require("../src/executor/account-executor");
 const { calculateWebhookPositionPreview } = require("../src/trading/position-sizer");
 
 assert.deepEqual(enabledBrokerIds({ ACCOUNT_EXECUTOR_ENABLED: "true", EXECUTOR_KIWOOM_ENABLED: "true", EXECUTOR_KIS_ENABLED: "true" }), ["KIWOOM", "KIS"]);
@@ -33,6 +33,8 @@ assert.equal(orderNeedsPortfolioSync({ status: "REJECTED", filledQuantity: 0 }),
 assert.equal(errorReportDue(undefined, 100_000), true);
 assert.equal(errorReportDue(90_000, 100_000), false);
 assert.equal(errorReportDue(0, 30 * 60_000), true);
+assert.equal(orderStatusUnknown({ orderStatusUnknown: true }), true);
+assert.equal(orderStatusUnknown(new Error("일반 오류")), false);
 
 assert.equal(accountCommand("계좌 상태 보여줘"), "STATUS");
 assert.equal(accountCommand("계좌 상태"), "STATUS");

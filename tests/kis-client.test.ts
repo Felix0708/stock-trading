@@ -120,6 +120,34 @@ async function fakeFetch(url, options) {
   assert.equal((await limitedClient.getUsCash({ exchange: "ND", symbol: "AAPL", price: 250 })).usd, 100000);
   assert.equal(limitedRequestCount, 2);
 
+  let transientQueryCount = 0;
+  const transientQueryClient = new KisClient({
+    appKey: "a", appSecret: "b", accountNo: "12345678", requestIntervalMs: 0,
+    fetchImpl: async (url) => {
+      if (url.endsWith("/oauth2/tokenP")) return new Response(JSON.stringify({ access_token: "token", expires_in: 86400 }));
+      transientQueryCount += 1;
+      if (transientQueryCount === 1) throw new Error("temporary timeout");
+      return new Response(JSON.stringify({ rt_cd: "0", output1: [], output2: [{ nass_amt: "0" }] }));
+    },
+  });
+  assert.equal((await transientQueryClient.getDomesticBalance()).holdings.length, 0);
+  assert.equal(transientQueryCount, 2);
+
+  let uncertainOrderCount = 0;
+  const uncertainOrderClient = new KisClient({
+    appKey: "a", appSecret: "b", accountNo: "12345678", requestIntervalMs: 0,
+    fetchImpl: async (url) => {
+      if (url.endsWith("/oauth2/tokenP")) return new Response(JSON.stringify({ access_token: "token", expires_in: 86400 }));
+      uncertainOrderCount += 1;
+      throw new Error("response timeout");
+    },
+  });
+  await assert.rejects(
+    () => uncertainOrderClient.placeDomesticMarketOrder({ side: "BUY", symbol: "005930", quantity: 1 }),
+    (error) => error.orderStatusUnknown === true && /자동 재전송하지 않습니다/.test(error.message),
+  );
+  assert.equal(uncertainOrderCount, 1);
+
   const tokenDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "kis-token-cache-"));
   try {
     const tokenCacheFile = path.join(tokenDirectory, "token.json");
@@ -131,6 +159,10 @@ async function fakeFetch(url, options) {
     await new KisClient({ appKey: "cached-app", appSecret: "cached-secret", accountNo: "12345678", fetchImpl: cachedFetch, tokenCacheFile }).accessToken();
     assert.equal(await new KisClient({ appKey: "cached-app", appSecret: "cached-secret", accountNo: "12345678", fetchImpl: cachedFetch, tokenCacheFile }).accessToken(), "cached-token");
     assert.equal(cachedAuthCount, 1);
+
+    const brokenTokenCacheFile = path.join(tokenDirectory, "broken-token.json");
+    fs.writeFileSync(brokenTokenCacheFile, "{broken");
+    assert.equal(await new KisClient({ appKey: "broken-app", appSecret: "broken-secret", accountNo: "12345678", fetchImpl: cachedFetch, tokenCacheFile: brokenTokenCacheFile }).accessToken(), "cached-token");
   } finally {
     fs.rmSync(tokenDirectory, { recursive: true, force: true });
   }

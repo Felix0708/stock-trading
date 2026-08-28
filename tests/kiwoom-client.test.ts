@@ -331,6 +331,34 @@ async function fakeFetch(url, options) {
   });
   assert.equal(rateLimitedCount, 2);
 
+  let transientQueryCount = 0;
+  const transientQueryClient = new KiwoomClient({
+    appKey: "app-key", secretKey: "secret-key",
+    fetchImpl: async (url) => {
+      if (url.endsWith("/oauth2/token")) return new Response(JSON.stringify({ token: "token", expires_dt: "20991231235959", return_code: 0 }));
+      transientQueryCount += 1;
+      if (transientQueryCount === 1) throw new Error("temporary timeout");
+      return new Response(JSON.stringify({ acctNo: "1234567890", return_code: 0 }));
+    },
+  });
+  assert.equal(await transientQueryClient.getDomesticAccountNumber(), "1234567890");
+  assert.equal(transientQueryCount, 2);
+
+  let uncertainOrderCount = 0;
+  const uncertainOrderClient = new KiwoomClient({
+    appKey: "app-key", secretKey: "secret-key",
+    fetchImpl: async (url) => {
+      if (url.endsWith("/oauth2/token")) return new Response(JSON.stringify({ token: "token", expires_dt: "20991231235959", return_code: 0 }));
+      uncertainOrderCount += 1;
+      throw new Error("response timeout");
+    },
+  });
+  await assert.rejects(
+    () => uncertainOrderClient.placeDomesticMarketOrder({ side: "BUY", symbol: "005930", quantity: 1 }),
+    (error) => error.orderStatusUnknown === true && /자동 재전송하지 않습니다/.test(error.message),
+  );
+  assert.equal(uncertainOrderCount, 1);
+
   let expiringAuthCount = 0;
   const expiringClient = new KiwoomClient({
     appKey: "app-key", secretKey: "secret-key",
@@ -357,6 +385,10 @@ async function fakeFetch(url, options) {
     await new KiwoomClient({ appKey: "cached-app", secretKey: "cached-secret", fetchImpl: cachedFetch, tokenCacheFile }).getAccessToken();
     assert.equal(await new KiwoomClient({ appKey: "cached-app", secretKey: "cached-secret", fetchImpl: cachedFetch, tokenCacheFile }).getAccessToken(), "cached-token");
     assert.equal(cachedAuthCount, 1);
+
+    const brokenTokenCacheFile = path.join(tokenDirectory, "broken-token.json");
+    fs.writeFileSync(brokenTokenCacheFile, "{broken");
+    assert.equal(await new KiwoomClient({ appKey: "broken-app", secretKey: "broken-secret", fetchImpl: cachedFetch, tokenCacheFile: brokenTokenCacheFile }).getAccessToken(), "cached-token");
 
     const sharedTokenCacheFile = path.join(tokenDirectory, "shared-token.json");
     fs.writeFileSync(sharedTokenCacheFile, JSON.stringify({ token: "stale-token", expiresDt: "20991231235959" }));
