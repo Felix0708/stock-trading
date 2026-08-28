@@ -608,7 +608,7 @@ async function start() {
     portfolio: process.env.ACCOUNT_PORTFOLIO_CHANNEL || process.env.KIS_PORTFOLIO_CHANNEL,
     system: process.env.ACCOUNT_SYSTEM_CHANNEL || process.env.KIS_SYSTEM_CHANNEL,
   };
-  const maxAgeMs = Number(process.env.KIS_SIGNAL_MAX_AGE_MINUTES || 30) * 60_000;
+  const maxAgeMs = Number(process.env.ACCOUNT_SIGNAL_MAX_AGE_MINUTES || process.env.KIS_SIGNAL_MAX_AGE_MINUTES || 30) * 60_000;
   const maxOpenPositions = Number(process.env.MAX_OPEN_POSITIONS || 5);
   const riskPolicy = Object.values(environments).includes("live") ? accountRiskPolicy() : null;
   const ownerId = process.env.EXECUTOR_OWNER_ID || process.env.DISCORD_OWNER_ID;
