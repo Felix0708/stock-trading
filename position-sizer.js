@@ -1,30 +1,48 @@
 "use strict";
 
+/** @typedef {{ sl?: number | null, momentum_sl?: number | null, price: number, conviction?: string, daily_setup_stage?: string, atr_multiple?: number | null, atr_dot?: boolean, atr_dot_threshold?: number, sb_z_score?: number, daily_trend?: string, daily_ema_aligned?: boolean, daily_above_200ma?: boolean }} SignalPayload */
+/** @typedef {{ payload: SignalPayload, outcome?: { decision?: string, signal?: { signalCode?: string } } }} SignalRecord */
+/** @typedef {{ profitLoss?: number, purchaseAmount?: number, evaluationAmount?: number, profitRate?: number }} Holding */
+/** @typedef {{ fillPrice?: number }} TrackedPosition */
+/** @typedef {{ equity: number, availableCash?: number, entryPrice: number, stopPrice?: number | null, conviction?: string, dailySetupStage?: string, atrMultiple?: number | null, atrDot?: boolean, atrDotThreshold?: number, sbZScore?: number, openPositions?: number, maxOpenPositions?: number, currentPositionValue?: number, hasExistingPosition?: boolean, earlyEntry?: boolean, capitalOnly?: boolean }} PositionSizeInput */
+/** @typedef {{ equity: number, availableCash: number, openPositions: number, maxOpenPositions: number, currentPositionValue: number, currentPositionQuantity?: number, hasExistingPosition?: boolean, positionProfitable?: boolean | null, currency?: string, totalAccountEquity?: number | null, autoCapital?: number | null, autoCapitalRatio?: number, currentOpenRisk?: number | null, maxOpenRisk?: number | null, maxOpenRiskRatio?: number }} AccountSizingContext */
+
+/** @type {Record<string, number>} */
 const CONVICTION_MULTIPLIER = { S: 1.3, A: 1.1, B: 1, C: 0.7, D: 0 };
 
+/** @param {SignalRecord} record */
 function effectiveStopPrice(record) {
   const payload = record?.payload || {};
-  if (Number.isFinite(payload.sl) && payload.sl > 0 && payload.sl < payload.price) return payload.sl;
-  if (["PEG_PULLBACK", "PEG_REBREAK"].includes(record?.outcome?.signal?.signalCode)
-      && Number.isFinite(payload.momentum_sl) && payload.momentum_sl > 0 && payload.momentum_sl < payload.price) {
+  const signalCode = record?.outcome?.signal?.signalCode || "";
+  if (typeof payload.sl === "number" && Number.isFinite(payload.sl) && payload.sl > 0 && payload.sl < payload.price) return payload.sl;
+  if (["PEG_PULLBACK", "PEG_REBREAK"].includes(signalCode)
+      && typeof payload.momentum_sl === "number" && Number.isFinite(payload.momentum_sl)
+      && payload.momentum_sl > 0 && payload.momentum_sl < payload.price) {
     return payload.momentum_sl;
   }
   return null;
 }
 
+/**
+ * @param {Holding[]} holdings
+ * @param {TrackedPosition | null} trackedPosition
+ * @param {number | null} signalPrice
+ */
 function inferPositionProfitable(holdings = [], trackedPosition = null, signalPrice = null) {
-  const profitLosses = holdings.map((holding) => holding.profitLoss).filter(Number.isFinite);
+  const profitLosses = holdings.flatMap((holding) => typeof holding.profitLoss === "number" && Number.isFinite(holding.profitLoss) ? [holding.profitLoss] : []);
   if (profitLosses.length) return profitLosses.reduce((sum, value) => sum + value, 0) > 0;
-  const purchaseAmount = holdings.reduce((sum, holding) => sum + (Number.isFinite(holding.purchaseAmount) ? holding.purchaseAmount : 0), 0);
-  const evaluationAmount = holdings.reduce((sum, holding) => sum + (Number.isFinite(holding.evaluationAmount) ? holding.evaluationAmount : 0), 0);
+  const purchaseAmount = holdings.reduce((sum, holding) => sum + (typeof holding.purchaseAmount === "number" && Number.isFinite(holding.purchaseAmount) ? holding.purchaseAmount : 0), 0);
+  const evaluationAmount = holdings.reduce((sum, holding) => sum + (typeof holding.evaluationAmount === "number" && Number.isFinite(holding.evaluationAmount) ? holding.evaluationAmount : 0), 0);
   if (purchaseAmount > 0 && evaluationAmount > 0) return evaluationAmount > purchaseAmount;
-  const profitRate = holdings.find((holding) => Number.isFinite(holding.profitRate))?.profitRate;
-  if (Number.isFinite(profitRate)) return profitRate > 0;
-  if (Number.isFinite(trackedPosition?.fillPrice) && Number.isFinite(signalPrice)) return signalPrice > trackedPosition.fillPrice;
+  const profitRate = holdings.find((holding) => typeof holding.profitRate === "number" && Number.isFinite(holding.profitRate))?.profitRate;
+  if (typeof profitRate === "number" && Number.isFinite(profitRate)) return profitRate > 0;
+  if (typeof trackedPosition?.fillPrice === "number" && Number.isFinite(trackedPosition.fillPrice)
+      && typeof signalPrice === "number" && Number.isFinite(signalPrice)) return signalPrice > trackedPosition.fillPrice;
   return null;
 }
 
-function calculatePositionSize(input = {}) {
+/** @param {PositionSizeInput} input */
+function calculatePositionSize(input = /** @type {PositionSizeInput} */ ({})) {
   const {
     equity, availableCash = equity, entryPrice, stopPrice, conviction = "B",
     dailySetupStage = "NONE", atrMultiple = null, atrDot = false,
@@ -35,7 +53,8 @@ function calculatePositionSize(input = {}) {
   for (const [name, value] of Object.entries({ equity, availableCash, entryPrice })) {
     if (!Number.isFinite(value) || value <= 0) throw new Error(`${name}는 0보다 큰 숫자여야 합니다.`);
   }
-  if (!capitalOnly && (!Number.isFinite(stopPrice) || stopPrice <= 0 || stopPrice >= entryPrice)) {
+  const validStopPrice = typeof stopPrice === "number" ? stopPrice : Number.NaN;
+  if (!capitalOnly && (!Number.isFinite(validStopPrice) || validStopPrice <= 0 || validStopPrice >= entryPrice)) {
     throw new Error("손절가는 0보다 크고 진입가보다 낮아야 합니다.");
   }
   if (!Number.isInteger(openPositions) || !Number.isInteger(maxOpenPositions) || maxOpenPositions < 1) {
@@ -51,7 +70,7 @@ function calculatePositionSize(input = {}) {
   if (!hasExistingPosition && openPositions >= maxOpenPositions) {
     return { blocked: true, reason: `최대 ${maxOpenPositions}종목 보유`, quantity: 0 };
   }
-  if (atrDot || (Number.isFinite(atrMultiple) && atrMultiple > atrDotThreshold)) {
+  if (atrDot || (typeof atrMultiple === "number" && Number.isFinite(atrMultiple) && atrMultiple > atrDotThreshold)) {
     return { blocked: true, reason: "ATR 과열", quantity: 0 };
   }
   if (sbZScore > 2.5) return { blocked: true, reason: "Sigma 과열", quantity: 0 };
@@ -59,7 +78,7 @@ function calculatePositionSize(input = {}) {
   const setupMultiplier = dailySetupStage === "COMPLETE" ? 1.3 : 1;
   const qualityMultiplier = Math.min(1.3, CONVICTION_MULTIPLIER[grade] * setupMultiplier);
   let heatMultiplier = 1;
-  if (Number.isFinite(atrMultiple) && atrMultiple > atrDotThreshold * 0.7) heatMultiplier *= 0.7;
+  if (typeof atrMultiple === "number" && Number.isFinite(atrMultiple) && atrMultiple > atrDotThreshold * 0.7) heatMultiplier *= 0.7;
   if (sbZScore > 2) heatMultiplier *= 0.5;
   else if (sbZScore > 1.5) heatMultiplier *= 0.7;
 
@@ -75,7 +94,7 @@ function calculatePositionSize(input = {}) {
       currentPositionValue, positionLimit, positionLimitRatio, capitalLimit, earlyEntry,
     };
   }
-  const quantity = capitalOnly ? capitalQuantity : Math.min(Math.floor(riskBudget / (entryPrice - stopPrice)), capitalQuantity);
+  const quantity = capitalOnly ? capitalQuantity : Math.min(Math.floor(riskBudget / (entryPrice - validStopPrice)), capitalQuantity);
   if (quantity < 1) return { blocked: true, reason: "계산된 주문수량이 1주 미만", quantity: 0 };
   return {
     blocked: false,
@@ -87,7 +106,7 @@ function calculatePositionSize(input = {}) {
     currentPositionValue,
     projectedPositionValue: currentPositionValue + quantity * entryPrice,
     projectedPositionRatio: ((currentPositionValue + quantity * entryPrice) / equity) * 100,
-    stopLossAmount: capitalOnly ? null : quantity * (entryPrice - stopPrice),
+    stopLossAmount: capitalOnly ? null : quantity * (entryPrice - validStopPrice),
     riskBudget: capitalOnly ? null : riskBudget,
     capitalOnly,
     qualityMultiplier, positionLimitRatio, earlyEntry,
@@ -95,13 +114,17 @@ function calculatePositionSize(input = {}) {
   };
 }
 
+/**
+ * @param {SignalRecord} record
+ * @param {AccountSizingContext} account
+ */
 function calculateWebhookPositionPreview(record, account) {
   const decision = record?.outcome?.decision;
-  if (!["ENTRY_CANDIDATE", "ADD_CANDIDATE"].includes(decision)) return null;
+  if (!["ENTRY_CANDIDATE", "ADD_CANDIDATE"].includes(decision || "")) return null;
 
   const payload = record.payload || {};
   const stopPrice = effectiveStopPrice(record);
-  const capitalOnly = ["PEG_PULLBACK", "PEG_REBREAK"].includes(record?.outcome?.signal?.signalCode) && stopPrice === null;
+  const capitalOnly = ["PEG_PULLBACK", "PEG_REBREAK"].includes(record?.outcome?.signal?.signalCode || "") && stopPrice === null;
   const dailyProvided = payload.daily_trend !== undefined
     || payload.daily_ema_aligned !== undefined || payload.daily_above_200ma !== undefined;
   const earlyEntry = capitalOnly || (dailyProvided && (payload.daily_trend !== "BULL"

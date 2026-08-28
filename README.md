@@ -238,8 +238,11 @@ AI이름 !reset  해당 AI의 Codex 대화 세션 초기화
 ## 점검
 
 ```bash
+npm run typecheck
 npm run self-test
 ```
+
+TypeScript는 실행 환경을 바꾸지 않는 점진 전환 방식으로 적용합니다. 현재 `position-sizer.js`와 `order-tracker.js`를 엄격 검사하며, `self-test`가 타입 검사부터 통과해야 전체 회귀 테스트를 실행합니다. 다음 전환 순서는 주문 실행·체결 추적 → 증권사 API → 계좌 실행기 → 공통 봇입니다.
 
 ## 키움 모의투자 연결 확인
 
