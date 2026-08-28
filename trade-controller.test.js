@@ -45,8 +45,8 @@ const sizingBlockedController = new TradeController();
 assert.equal(sizingBlockedController.evaluate(sizingBlockedRecord).verdict, "BLOCKED_POSITION_SIZE");
 assert.equal(sizingBlockedController.status().openCount, 0);
 
-assert.equal(new TradeController().evaluate(entry(81, { daily_trend: "BEAR" })).verdict, "BLOCKED_DAILY_BEAR");
-assert.equal(new TradeController().evaluate(entry(82, { daily_above_200ma: false })).verdict, "BLOCKED_DAILY_200MA");
+assert.equal(new TradeController().evaluate(entry(81, { daily_trend: "BEAR" })).verdict, "REVIEW_DAILY_CONFIRMATION");
+assert.equal(new TradeController().evaluate(entry(82, { daily_above_200ma: false })).verdict, "REVIEW_DAILY_CONFIRMATION");
 assert.equal(new TradeController().evaluate(entry(83, { daily_trend: "MIXED" })).verdict, "REVIEW_DAILY_CONFIRMATION");
 assert.equal(new TradeController().evaluate(entry(84, { daily_ema_aligned: false })).verdict, "REVIEW_DAILY_CONFIRMATION");
 assert.equal(new TradeController().evaluate(entry(85, { daily_trend: undefined })).verdict, "BLOCKED_DAILY_DATA");
@@ -60,6 +60,18 @@ assert.equal(earlyPaper.evaluate(earlyEntry).verdict, "PAPER_ENTRY");
 assert.equal(earlyPaper.status().openCount, 1);
 earlyEntry.buyApproved = false;
 assert.equal(earlyPaper.evaluate(earlyEntry).verdict, "BLOCKED_PENDING_ORDER");
+
+const weakPaper = new TradeController({ initialMode: "PAPER_AUTO" });
+assert.equal(weakPaper.evaluate(entry(87, { daily_trend: "BEAR" })).verdict, "BUY_PENDING_APPROVAL");
+assert.equal(weakPaper.evaluate(entry(88, { daily_above_200ma: false })).verdict, "BUY_PENDING_APPROVAL");
+const pegEntry = entry(89, { sl: null, momentum_sl: null });
+pegEntry.outcome.signal.signalCode = "PEG_PULLBACK";
+assert.equal(weakPaper.evaluate(pegEntry).verdict, "BUY_PENDING_APPROVAL");
+pegEntry.buyApproved = true;
+assert.equal(weakPaper.evaluate(pegEntry).verdict, "PAPER_ENTRY");
+const pegWithMomentumStop = entry(90, { sl: null, momentum_sl: 94 });
+pegWithMomentumStop.outcome.signal.signalCode = "PEG_REBREAK";
+assert.equal(new TradeController({ initialMode: "PAPER_AUTO" }).evaluate(pegWithMomentumStop).verdict, "PAPER_ENTRY");
 
 const halted = new TradeController();
 halted.setHalted(true);
@@ -131,5 +143,12 @@ assert.equal(signalServer.evaluate(neutralAdd).verdict, "PAPER_ADD");
 const neutralExit = { ...entry(15), payload: { ...entry(15).payload, action: "SELL" }, outcome: { decision: "EXIT_CANDIDATE" } };
 assert.equal(signalServer.evaluate(neutralExit).verdict, "PAPER_EXIT");
 assert.equal(signalServer.status().openCount, 0);
+const neutralPeg = entry(16, { sl: null, momentum_sl: null });
+neutralPeg.outcome.signal.signalCode = "PEG_PULLBACK";
+assert.equal(signalServer.evaluate(neutralPeg).verdict, "BUY_PENDING_APPROVAL");
+const neutralMomentum = { ...entry(17), payload: { ...entry(17).payload, action: "SELL" }, outcome: { decision: "REVIEW_PARTIAL_EXIT", signal: { signalCode: "MOMENTUM_UP_ENDED" } } };
+assert.equal(signalServer.evaluate(neutralMomentum).verdict, "REVIEW_PARTIAL_EXIT");
+const neutralKeep = { ...entry(18), payload: { ...entry(18).payload, action: "CHECK" }, outcome: { decision: "KEEP_IF_FILLED", signal: { signalCode: "ENTRY_CONFIRMED" } } };
+assert.equal(signalServer.evaluate(neutralKeep).verdict, "KEEP");
 
 console.log("trade-controller test OK");

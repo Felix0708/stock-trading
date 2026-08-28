@@ -68,17 +68,38 @@ class SignalStateMachine {
 
     if (normalized.orderBlocked) {
       decision = "BLOCKED";
+    } else if (normalized.signalCode === "PEG_STARTED") {
+      current.pegActive = true;
+      current.pegStartedAt = timestamp.toISOString();
+      current.pegEntrySignals = [];
+    } else if (normalized.signalCode === "PEG_EXPIRED") {
+      current.pegActive = false;
     } else if (ENTRY_CODES.has(normalized.signalCode)) {
-      status = "ENTRY_SIGNALLED";
-      decision = "ENTRY_CANDIDATE";
+      const pegEntry = ["PEG_PULLBACK", "PEG_REBREAK"].includes(normalized.signalCode);
+      if (pegEntry && current.pegActive !== true) {
+        decision = "BLOCKED";
+        warnings.push("활성 PEG Start 없이 PEG 매수 신호를 받았습니다.");
+      } else if (pegEntry && current.pegEntrySignals?.includes(normalized.signalCode)) {
+        return this.result(key, normalized, "DUPLICATE_IGNORED", ["현재 PEG 사이클에서 같은 매수 신호를 이미 처리했습니다."], true);
+      } else {
+        status = "ENTRY_SIGNALLED";
+        decision = "ENTRY_CANDIDATE";
+        if (pegEntry) current.pegEntrySignals = [...(current.pegEntrySignals || []), normalized.signalCode];
+      }
     } else if (["ADD_PYRAMID", "ADD_STRONG_PULLBACK"].includes(normalized.signalCode)) {
       decision = "ADD_CANDIDATE";
     } else if (normalized.signalCode === "ENTRY_INVALIDATED") {
       if (!["ENTRY_SIGNALLED", "ENTRY_CONFIRMED", "ENTRY_INVALID_PENDING"].includes(current.status)) {
         warnings.push("선행 진입 신호를 현재 상태에서 찾지 못했습니다. 재시작 또는 신호 누락 여부를 확인해야 합니다.");
       }
-      status = "ENTRY_INVALID_PENDING";
-      decision = "WAIT_FOR_CONFIRMATION";
+      if (Number.isFinite(current.entrySignalPrice) && payload.price <= current.entrySignalPrice * 0.97) {
+        status = "ENTRY_EXPIRED";
+        decision = "EXIT_IF_FILLED";
+        warnings.push("진입 신호가 대비 3% 이상 하락해 즉시 청산 대상으로 전환했습니다.");
+      } else {
+        status = "ENTRY_INVALID_PENDING";
+        decision = "WAIT_FOR_CONFIRMATION";
+      }
     } else if (normalized.signalCode === "ENTRY_CONFIRMED") {
       status = "ENTRY_CONFIRMED";
       decision = "KEEP_IF_FILLED";
@@ -107,6 +128,8 @@ class SignalStateMachine {
       next.entrySignalAt = timestamp.toISOString();
     }
     if (status === "ENTRY_INVALID_PENDING") next.invalidatedAt = timestamp.toISOString();
+    if (["ENTRY_CONFIRMED", "ENTRY_EXPIRED"].includes(status)) delete next.invalidatedAt;
+    if (["PEG_INVALIDATED", "PEG_EXPIRED"].includes(normalized.signalCode)) next.pegActive = false;
     this.instruments.set(key, next);
 
     return this.result(key, normalized, decision, warnings, false);

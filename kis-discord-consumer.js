@@ -39,6 +39,7 @@ class SignalReceiptStore {
     this.state.pending ||= {};
     this.state.deferred ||= {};
     this.state.partialExits ||= {};
+    this.state.invalidations ||= {};
     this.state.autoTrading ??= defaultAutoTrading;
   }
 
@@ -69,6 +70,38 @@ class SignalReceiptStore {
   removePending(key) {
     delete this.state.pending[key];
     this.write();
+  }
+
+  putInvalidation(brokerId, record, entryPrice, now = Date.now()) {
+    const key = `${brokerId}:${record.payload.exchange}:${record.payload.ticker}`;
+    this.state.invalidations[key] = {
+      key, brokerId, record, entryPrice,
+      guardRequestId: `entry-invalidation-${brokerId}-${record.requestId}`,
+      createdAt: now, expiresAt: now + 30 * 60_000,
+    };
+    this.write();
+    return this.state.invalidations[key];
+  }
+
+  listInvalidations() {
+    return Object.values(this.state.invalidations);
+  }
+
+  removeInvalidation(key) {
+    delete this.state.invalidations[key];
+    this.write();
+  }
+
+  clearInvalidations(record) {
+    const suffix = `:${record.payload.exchange}:${record.payload.ticker}`;
+    let removed = 0;
+    for (const key of Object.keys(this.state.invalidations)) {
+      if (!key.endsWith(suffix)) continue;
+      delete this.state.invalidations[key];
+      removed += 1;
+    }
+    if (removed) this.write();
+    return removed;
   }
 
   putDeferred(brokerId, record, ttlMs) {
@@ -212,6 +245,41 @@ function liveAutoBuyEligible(record) {
     && payload.daily_above_200ma === true;
 }
 
+function approvedEntryVerdict(record) {
+  return record?.outcome?.decision === "ADD_CANDIDATE" ? "PAPER_ADD" : "PAPER_ENTRY";
+}
+
+function invalidationExitReason(pending, currentPrice, now = Date.now()) {
+  if (Number.isFinite(currentPrice) && currentPrice <= pending.entryPrice * 0.97) return "진입가 대비 3% 이상 하락";
+  if (now >= pending.expiresAt) return "진입 무효 확인 30분 초과";
+  return "";
+}
+
+function momentumExitRecommendation(account, payload) {
+  const profitRate = account.positionProfitRate;
+  if (!account.hasExistingPosition || account.currentPositionQuantity < 1) return null;
+  let label;
+  let range;
+  if (Number.isFinite(payload.momentum_tp) && payload.price >= payload.momentum_tp) {
+    label = "목표가 도달";
+    range = [0.4, 0.5];
+  } else if (Number.isFinite(profitRate) && profitRate > 0) {
+    label = "수익 중";
+    range = [0.2, 0.3];
+  } else if (Number.isFinite(profitRate) && profitRate < 0) {
+    label = "손실 중";
+    range = [0.3, 0.5];
+  } else if (Number.isFinite(profitRate)) {
+    label = "본전";
+    range = [0.1, 0.2];
+  } else {
+    return { label: "수익률 확인 불가", range: null, ratio: null, quantity: 0, profitRate: null };
+  }
+  const ratio = payload.daily_trend === "BULL" ? range[0]
+    : payload.daily_trend === "BEAR" ? range[1] : (range[0] + range[1]) / 2;
+  return { label, range, ratio, quantity: Math.floor(account.currentPositionQuantity * ratio), profitRate };
+}
+
 function buyApprovalRequiredForBroker(broker, record, autoTrading) {
   if (!autoTrading) return true;
   return broker.environment === "live" && !liveAutoBuyEligible(record);
@@ -282,15 +350,27 @@ async function accountContext(clients, record, maxOpenPositions) {
   const evaluation = holdings.reduce((sum, holding) => sum + holding.evaluationAmount, 0);
   const equity = market === "KRX" ? domestic.estimatedAssets || domestic.totalEvaluation : cash + evaluation;
   const currentPositionValue = current.reduce((sum, holding) => sum + holding.evaluationAmount, 0);
+  const currentPositionQuantity = current.reduce((sum, holding) => sum + holding.quantity, 0);
+  const purchaseAmount = current.reduce((sum, holding) => sum + (Number(holding.purchaseAmount) || 0), 0);
+  const profitLoss = current.reduce((sum, holding) => sum + (Number(holding.profitLoss) || 0), 0);
+  const weightedPurchasePrice = current.reduce(
+    (sum, holding) => sum + (Number(holding.purchasePrice) || 0) * holding.quantity, 0,
+  );
   return {
     equity, availableCash: cash, currency: market === "KRX" ? "KRW" : "USD",
     openPositions: domestic.holdings.length + usHoldings.length,
     maxOpenPositions,
     currentPositionValue,
     accountPositionRatio: equity > 0 ? currentPositionValue / equity * 100 : 0,
-    currentPositionQuantity: current.reduce((sum, holding) => sum + holding.quantity, 0),
+    currentPositionQuantity,
     hasExistingPosition: current.length > 0,
     positionProfitable: inferPositionProfitable(current, null, record.payload.price),
+    averageEntryPrice: purchaseAmount > 0 && currentPositionQuantity > 0
+      ? purchaseAmount / currentPositionQuantity
+      : weightedPurchasePrice > 0 && currentPositionQuantity > 0 ? weightedPurchasePrice / currentPositionQuantity : null,
+    positionProfitRate: purchaseAmount > 0 ? profitLoss / purchaseAmount * 100
+      : current.find((holding) => Number.isFinite(holding.profitRate))?.profitRate ?? null,
+    currentHoldings: current,
     domesticHoldings: domestic.holdings,
     usHoldings,
   };
@@ -397,6 +477,8 @@ function approvalText(record, previews, brokerIds = Object.keys(previews)) {
   return [
     "⏳ **BUY 승인 대기**",
     `**종목**: ${formatInstrumentLabel(record.payload)}`,
+    ...(Object.values(previews).some(({ preview }) => preview.capitalOnly)
+      ? ["⚠️ **PEG 손절가 없음** · 위험금액 계산 불가 · 종목 최대 10% 한도"] : []),
     ...lines,
     commands,
   ].join("\n");
@@ -492,9 +574,13 @@ async function start() {
   }
 
   async function previewFor(broker, record) {
-    const ownAccount = await accountContext(broker, record, maxOpenPositions);
-    const preview = applyPyramidSizing(record,
-      enforceOwnAccountRules(record, ownAccount, calculateWebhookPositionPreview(record, ownAccount)),
+    const sizingRecord = structuredClone(record);
+    if (sizingRecord.risk?.verdict === "BUY_PENDING_APPROVAL") {
+      sizingRecord.risk.verdict = approvedEntryVerdict(sizingRecord);
+    }
+    const ownAccount = await accountContext(broker, sizingRecord, maxOpenPositions);
+    const preview = applyPyramidSizing(sizingRecord,
+      enforceOwnAccountRules(sizingRecord, ownAccount, calculateWebhookPositionPreview(sizingRecord, ownAccount)),
       broker.tracker.list());
     return { label: broker.label, preview };
   }
@@ -680,6 +766,10 @@ async function start() {
         receipts.removeDeferred(deferred.key);
         continue;
       }
+      if (broker.tracker.list().some((order) => order.requestId === pending.guardRequestId)) {
+        receipts.removeInvalidation(pending.key);
+        continue;
+      }
       try {
         const quoteClient = domestic ? broker.domesticClient : broker.overseasClient;
         if (domestic && quoteClient?.getDomesticQuote) {
@@ -703,6 +793,101 @@ async function start() {
         await reportError(`${broker.label} 예약 매수 재시도 실패`, error, record);
       }
     }
+  }
+
+  async function currentSignalPrice(broker, payload) {
+    if (signalExchange(payload.exchange) === "KRX") {
+      return (await broker.domesticClient.getDomesticQuote({ symbol: payload.ticker })).currentPrice;
+    }
+    return (await broker.overseasClient.getUsQuote({
+      exchange: signalExchange(payload.exchange), symbol: payload.ticker,
+    })).currentPrice;
+  }
+
+  async function checkInvalidations(now = new Date()) {
+    if (!receipts.autoTrading()) return;
+    for (const pending of receipts.listInvalidations()) {
+      const broker = brokers.find((item) => item.id === pending.brokerId);
+      if (!broker) {
+        receipts.removeInvalidation(pending.key);
+        continue;
+      }
+      let currentPrice = null;
+      let reason = invalidationExitReason(pending, currentPrice, now.getTime());
+      if (!reason) {
+        try {
+          currentPrice = await currentSignalPrice(broker, pending.record.payload);
+          reason = invalidationExitReason(pending, currentPrice, now.getTime());
+        } catch (error) {
+          await reportError(`${broker.label} 진입 무효 가격 조회 실패`, error, pending.record);
+          continue;
+        }
+      }
+      if (!reason) continue;
+      const account = await accountContext(broker, pending.record, maxOpenPositions);
+      if (!account.hasExistingPosition) {
+        receipts.removeInvalidation(pending.key);
+        continue;
+      }
+      const record = structuredClone(pending.record);
+      record.requestId = pending.guardRequestId;
+      record.receivedAt = now.toISOString();
+      record.source = "ENTRY_INVALIDATION_GUARD";
+      record.payload.action = "SELL";
+      record.payload.type = reason;
+      if (Number.isFinite(currentPrice)) record.payload.price = currentPrice;
+      record.outcome = { decision: "EXIT_IF_FILLED", signal: { signalCode: "ENTRY_INVALIDATION_GUARD" } };
+      record.risk = { verdict: "PAPER_EXIT", reason };
+      const order = await executeOrDefer(broker, record);
+      if (order || broker.tracker.list().some((item) => item.requestId === pending.guardRequestId)) {
+        receipts.removeInvalidation(pending.key);
+      }
+    }
+  }
+
+  async function processLifecycle(record) {
+    if (record.risk?.verdict === "WAIT") {
+      let stored = 0;
+      for (const broker of brokers) {
+        const account = await accountContext(broker, record, maxOpenPositions);
+        if (!account.hasExistingPosition) continue;
+        const entryPrice = account.averageEntryPrice || record.outcome?.state?.entrySignalPrice || record.payload.price;
+        if (!Number.isFinite(entryPrice) || entryPrice <= 0) continue;
+        receipts.putInvalidation(broker.id, record, entryPrice);
+        stored += 1;
+      }
+      await send(channels.system, { text: stored
+        ? `⏳ **진입 무효 감시 시작**\n**종목**: ${formatInstrumentLabel(record.payload)}\n30초 간격 -3% 감시 · 확인/만료 대기 · 30분 초과 시 전량청산`
+        : `ℹ️ **진입 무효 수신**\n**종목**: ${formatInstrumentLabel(record.payload)}\n보유 계좌가 없어 감시를 시작하지 않았습니다.` });
+      return true;
+    }
+    if (record.risk?.verdict === "KEEP") {
+      receipts.clearInvalidations(record);
+      await send(channels.system, { text: `✅ **진입 확정**\n**종목**: ${formatInstrumentLabel(record.payload)}\n진입 무효 감시를 해제하고 보유를 유지합니다.` });
+      return true;
+    }
+    if (record.risk?.verdict === "REVIEW_PARTIAL_EXIT") {
+      for (const broker of brokers) {
+        const account = await accountContext(broker, record, maxOpenPositions);
+        const advice = momentumExitRecommendation(account, record.payload);
+        const range = advice?.range ? `${advice.range[0] * 100}~${advice.range[1] * 100}%` : "판단 보류";
+        const suggested = advice?.ratio === null || !advice ? "수익률 확인 필요"
+          : `${advice.ratio * 100}% · ${advice.quantity}주`;
+        await send(channels.order, { text: [
+          `📉 **${brokerAccountLabel(broker)} 상승 모멘텀 종료 검토**`,
+          `**종목**: ${formatInstrumentLabel(record.payload)}`,
+          `**현재 상태**: ${advice?.label || "보유 없음"}${Number.isFinite(advice?.profitRate) ? ` · ${advice.profitRate.toFixed(2)}%` : ""}`,
+          `**MD 권장 범위**: ${range}`,
+          `**일봉 반영 제안**: ${suggested}`,
+          "자동 주문은 생성하지 않습니다.",
+        ].join("\n") });
+      }
+      return true;
+    }
+    if (record.risk?.verdict === "PAPER_EXIT" && record.outcome?.decision === "EXIT_IF_FILLED") {
+      receipts.clearInvalidations(record);
+    }
+    return false;
   }
 
   async function processApproval(message) {
@@ -743,7 +928,11 @@ async function start() {
     receipts.removePending(pending.key);
     for (const broker of selected) {
       try {
-        await executeOrDefer(broker, structuredClone(pending.record));
+        const approved = structuredClone(pending.record);
+        if (approved.risk?.verdict === "BUY_PENDING_APPROVAL") {
+          approved.risk = { verdict: approvedEntryVerdict(approved), reason: "사용자 BUY 승인" };
+        }
+        await executeOrDefer(broker, approved);
       } catch (error) {
         await reportError(`${broker.label} 승인 주문 실패`, error, pending.record);
       }
@@ -762,8 +951,11 @@ async function start() {
     try {
       record.source = "DISCORD_SIGNAL";
       [record.payload] = await enrichInstrumentNames([record.payload]);
-      const entry = ["PAPER_ENTRY", "PAPER_ADD"].includes(record.risk?.verdict) && record.payload.action === "BUY";
-      const approvalBrokers = entry ? brokers.filter((broker) => buyApprovalRequiredForBroker(broker, record, receipts.autoTrading())) : [];
+      if (await processLifecycle(record)) return;
+      const pendingApproval = record.risk?.verdict === "BUY_PENDING_APPROVAL";
+      const entry = (pendingApproval || ["PAPER_ENTRY", "PAPER_ADD"].includes(record.risk?.verdict)) && record.payload.action === "BUY";
+      const approvalBrokers = pendingApproval ? brokers
+        : entry ? brokers.filter((broker) => buyApprovalRequiredForBroker(broker, record, receipts.autoTrading())) : [];
       if (approvalBrokers.length) {
         const previews = Object.fromEntries(await Promise.all(approvalBrokers.map(async (broker) => [broker.id, await previewFor(broker, structuredClone(record))])));
         const channel = await targetChannel(channels.order);
@@ -850,7 +1042,10 @@ async function start() {
         queue = queue.then(() => retryDeferred()).catch((error) => reportError("미국 예약 주문 재시도 실패", error));
       }, 15_000).unref();
       setInterval(() => {
-        queue = queue.then(() => reconcileOrders()).catch((error) => reportError("미완료 주문 체결 조회 실패", error));
+        queue = queue
+          .then(() => checkInvalidations())
+          .then(() => reconcileOrders())
+          .catch((error) => reportError("진입 무효 감시 또는 미완료 주문 체결 조회 실패", error));
       }, 30_000).unref();
     }
   });
@@ -859,4 +1054,4 @@ async function start() {
 
 if (require.main === module) start().catch((error) => { console.error(error); process.exitCode = 1; });
 
-module.exports = { SignalReceiptStore, accountCommand, accountContext, accountPortfolioSyncMinutes, applyPyramidSizing, approvalText, brokerEnvironments, buyApprovalRequiredForBroker, discordMessagePayload, enabledBrokerIds, enforceOwnAccountRules, errorReportDue, liveAutoBuyEligible, orderNeedsPortfolioSync, orderNeedsResultReport, pyramidPlan, readOnlySignalAllowed, reconcilePendingBrokerOrders, shouldConsumeMessage, signalExchange, start };
+module.exports = { SignalReceiptStore, accountCommand, accountContext, accountPortfolioSyncMinutes, applyPyramidSizing, approvalText, approvedEntryVerdict, brokerEnvironments, buyApprovalRequiredForBroker, discordMessagePayload, enabledBrokerIds, enforceOwnAccountRules, errorReportDue, invalidationExitReason, liveAutoBuyEligible, momentumExitRecommendation, orderNeedsPortfolioSync, orderNeedsResultReport, pyramidPlan, readOnlySignalAllowed, reconcilePendingBrokerOrders, shouldConsumeMessage, signalExchange, start };

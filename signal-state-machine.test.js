@@ -66,4 +66,17 @@ assert.equal(unknown.orderCreated, false);
 const restored = new SignalStateMachine(machine.snapshot());
 assert.equal(restored.snapshot().instruments["KRX:005930:240"].status, "ENTRY_CONFIRMED");
 
+const peg = new SignalStateMachine();
+assert.equal(peg.handle(signal("BUY", "PEG Pullback", 100)).decision, "BLOCKED");
+assert.equal(peg.handle(signal("CHECK", "PEG Start", 100)).decision, "INFO_ONLY");
+assert.equal(peg.handle(signal("BUY", "PEG Pullback", 99)).decision, "ENTRY_CANDIDATE");
+assert.equal(peg.handle(signal("BUY", "PEG Pullback", 98), "2026-08-10T05:00:10Z").decision, "DUPLICATE_IGNORED");
+assert.equal(peg.handle(signal("BUY", "PEG Rebreak", 101), "2026-08-10T05:00:20Z").decision, "ENTRY_CANDIDATE");
+assert.equal(peg.handle(signal("CHECK", "PEG Expired", 100), "2026-08-10T05:00:30Z").decision, "INFO_ONLY");
+assert.equal(peg.handle(signal("BUY", "PEG Rebreak", 102), "2026-08-10T05:00:40Z").decision, "BLOCKED");
+
+const crashGuard = new SignalStateMachine();
+crashGuard.handle(signal("BUY", "💰 정석 진입", 100), "2026-08-10T06:00:00Z");
+assert.equal(crashGuard.handle(signal("SELL", "🚫 진입 무효", 97), "2026-08-10T06:01:00Z").decision, "EXIT_IF_FILLED");
+
 console.log("signal-state-machine test OK");

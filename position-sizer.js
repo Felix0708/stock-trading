@@ -2,6 +2,16 @@
 
 const CONVICTION_MULTIPLIER = { S: 1.3, A: 1.1, B: 1, C: 0.7, D: 0 };
 
+function effectiveStopPrice(record) {
+  const payload = record?.payload || {};
+  if (Number.isFinite(payload.sl) && payload.sl > 0 && payload.sl < payload.price) return payload.sl;
+  if (["PEG_PULLBACK", "PEG_REBREAK"].includes(record?.outcome?.signal?.signalCode)
+      && Number.isFinite(payload.momentum_sl) && payload.momentum_sl > 0 && payload.momentum_sl < payload.price) {
+    return payload.momentum_sl;
+  }
+  return null;
+}
+
 function inferPositionProfitable(holdings = [], trackedPosition = null, signalPrice = null) {
   const profitLosses = holdings.map((holding) => holding.profitLoss).filter(Number.isFinite);
   if (profitLosses.length) return profitLosses.reduce((sum, value) => sum + value, 0) > 0;
@@ -20,11 +30,14 @@ function calculatePositionSize(input = {}) {
     dailySetupStage = "NONE", atrMultiple = null, atrDot = false,
     atrDotThreshold = 7, sbZScore = 0, openPositions = 0, maxOpenPositions = 5,
     currentPositionValue = 0, hasExistingPosition = false, earlyEntry = false,
+    capitalOnly = false,
   } = input;
-  for (const [name, value] of Object.entries({ equity, availableCash, entryPrice, stopPrice })) {
+  for (const [name, value] of Object.entries({ equity, availableCash, entryPrice })) {
     if (!Number.isFinite(value) || value <= 0) throw new Error(`${name}는 0보다 큰 숫자여야 합니다.`);
   }
-  if (stopPrice >= entryPrice) throw new Error("손절가는 진입가보다 낮아야 합니다.");
+  if (!capitalOnly && (!Number.isFinite(stopPrice) || stopPrice <= 0 || stopPrice >= entryPrice)) {
+    throw new Error("손절가는 0보다 크고 진입가보다 낮아야 합니다.");
+  }
   if (!Number.isInteger(openPositions) || !Number.isInteger(maxOpenPositions) || maxOpenPositions < 1) {
     throw new Error("보유종목 수가 올바르지 않습니다.");
   }
@@ -62,23 +75,21 @@ function calculatePositionSize(input = {}) {
       currentPositionValue, positionLimit, positionLimitRatio, capitalLimit, earlyEntry,
     };
   }
-  const quantity = Math.min(
-    Math.floor(riskBudget / (entryPrice - stopPrice)),
-    capitalQuantity,
-  );
+  const quantity = capitalOnly ? capitalQuantity : Math.min(Math.floor(riskBudget / (entryPrice - stopPrice)), capitalQuantity);
   if (quantity < 1) return { blocked: true, reason: "계산된 주문수량이 1주 미만", quantity: 0 };
   return {
     blocked: false,
     reason: "OK",
     quantity,
     baseRisk,
-    riskBudget,
     capitalLimit,
     positionValue: quantity * entryPrice,
     currentPositionValue,
     projectedPositionValue: currentPositionValue + quantity * entryPrice,
     projectedPositionRatio: ((currentPositionValue + quantity * entryPrice) / equity) * 100,
-    stopLossAmount: quantity * (entryPrice - stopPrice),
+    stopLossAmount: capitalOnly ? null : quantity * (entryPrice - stopPrice),
+    riskBudget: capitalOnly ? null : riskBudget,
+    capitalOnly,
     qualityMultiplier, positionLimitRatio, earlyEntry,
     heatMultiplier,
   };
@@ -89,14 +100,17 @@ function calculateWebhookPositionPreview(record, account) {
   if (!["ENTRY_CANDIDATE", "ADD_CANDIDATE"].includes(decision)) return null;
 
   const payload = record.payload || {};
-  const earlyEntry = payload.daily_above_200ma === true
-    && payload.daily_trend !== "BEAR"
-    && (payload.daily_trend !== "BULL" || payload.daily_ema_aligned !== true);
+  const stopPrice = effectiveStopPrice(record);
+  const capitalOnly = ["PEG_PULLBACK", "PEG_REBREAK"].includes(record?.outcome?.signal?.signalCode) && stopPrice === null;
+  const dailyProvided = payload.daily_trend !== undefined
+    || payload.daily_ema_aligned !== undefined || payload.daily_above_200ma !== undefined;
+  const earlyEntry = capitalOnly || (dailyProvided && (payload.daily_trend !== "BULL"
+    || payload.daily_ema_aligned !== true || payload.daily_above_200ma !== true));
   const result = calculatePositionSize({
     equity: account.equity,
     availableCash: account.availableCash,
     entryPrice: payload.price,
-    stopPrice: payload.sl,
+    stopPrice,
     conviction: payload.conviction,
     dailySetupStage: payload.daily_setup_stage,
     atrMultiple: payload.atr_multiple,
@@ -108,6 +122,7 @@ function calculateWebhookPositionPreview(record, account) {
     currentPositionValue: account.currentPositionValue,
     hasExistingPosition: account.hasExistingPosition,
     earlyEntry,
+    capitalOnly,
   });
   return {
     available: true,
@@ -115,7 +130,7 @@ function calculateWebhookPositionPreview(record, account) {
     equity: account.equity,
     availableCash: account.availableCash,
     entryPrice: payload.price,
-    stopPrice: payload.sl,
+    stopPrice,
     conviction: payload.conviction,
     currentPositionQuantity: account.currentPositionQuantity || 0,
     hasExistingPosition: Boolean(account.hasExistingPosition),
@@ -124,4 +139,4 @@ function calculateWebhookPositionPreview(record, account) {
   };
 }
 
-module.exports = { calculatePositionSize, calculateWebhookPositionPreview, inferPositionProfitable, CONVICTION_MULTIPLIER };
+module.exports = { calculatePositionSize, calculateWebhookPositionPreview, effectiveStopPrice, inferPositionProfitable, CONVICTION_MULTIPLIER };

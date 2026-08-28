@@ -1,7 +1,7 @@
 "use strict";
 
 const assert = require("node:assert/strict");
-const { accountCommand, accountContext, accountPortfolioSyncMinutes, applyPyramidSizing, approvalText, brokerEnvironments, buyApprovalRequiredForBroker, discordMessagePayload, enabledBrokerIds, enforceOwnAccountRules, errorReportDue, liveAutoBuyEligible, orderNeedsPortfolioSync, orderNeedsResultReport, pyramidPlan, readOnlySignalAllowed, reconcilePendingBrokerOrders, shouldConsumeMessage, SignalReceiptStore } = require("./kis-discord-consumer");
+const { accountCommand, accountContext, accountPortfolioSyncMinutes, applyPyramidSizing, approvalText, approvedEntryVerdict, brokerEnvironments, buyApprovalRequiredForBroker, discordMessagePayload, enabledBrokerIds, enforceOwnAccountRules, errorReportDue, invalidationExitReason, liveAutoBuyEligible, momentumExitRecommendation, orderNeedsPortfolioSync, orderNeedsResultReport, pyramidPlan, readOnlySignalAllowed, reconcilePendingBrokerOrders, shouldConsumeMessage, SignalReceiptStore } = require("./kis-discord-consumer");
 
 assert.deepEqual(enabledBrokerIds({ ACCOUNT_EXECUTOR_ENABLED: "true", EXECUTOR_KIWOOM_ENABLED: "true", EXECUTOR_KIS_ENABLED: "true" }), ["KIWOOM", "KIS"]);
 assert.deepEqual(enabledBrokerIds({ ACCOUNT_EXECUTOR_ENABLED: "true", EXECUTOR_KIWOOM_ENABLED: "true", EXECUTOR_KIS_ENABLED: "false" }), ["KIWOOM"]);
@@ -73,6 +73,15 @@ assert.equal(store.listDeferred()[0].lastError, "temporary auth failure");
 assert.equal(store.listDeferred().length, 1);
 store.removeDeferred(deferred.key);
 assert.equal(store.listDeferred().length, 0);
+const invalidationRecord = { payload: { exchange: "NYSE", ticker: "SE" } };
+const invalidation = store.putInvalidation("KIS", invalidationRecord, 100, 1_000);
+assert.equal(store.listInvalidations()[0].entryPrice, 100);
+assert.match(invalidation.guardRequestId, /^entry-invalidation-KIS-/);
+assert.equal(invalidationExitReason(invalidation, 97, 2_000), "진입가 대비 3% 이상 하락");
+assert.equal(invalidationExitReason(invalidation, 99, invalidation.expiresAt), "진입 무효 확인 30분 초과");
+assert.equal(invalidationExitReason(invalidation, 99, 2_000), "");
+assert.equal(store.clearInvalidations(invalidationRecord), 1);
+assert.equal(store.listInvalidations().length, 0);
 
 const strongBuy = { payload: { action: "BUY", conviction: "A", daily_trend: "BULL", daily_ema_aligned: true, daily_above_200ma: true } };
 const mixedBuy = { payload: { ...strongBuy.payload, daily_trend: "MIXED", daily_ema_aligned: false } };
@@ -83,6 +92,18 @@ assert.equal(buyApprovalRequiredForBroker({ environment: "mock" }, mixedBuy, tru
 assert.equal(buyApprovalRequiredForBroker({ environment: "live" }, strongBuy, true), false);
 assert.equal(buyApprovalRequiredForBroker({ environment: "live" }, mixedBuy, true), true);
 assert.equal(buyApprovalRequiredForBroker({ environment: "mock" }, strongBuy, false), true);
+assert.equal(approvedEntryVerdict({ outcome: { decision: "ENTRY_CANDIDATE" } }), "PAPER_ENTRY");
+assert.equal(approvedEntryVerdict({ outcome: { decision: "ADD_CANDIDATE" } }), "PAPER_ADD");
+
+assert.deepEqual(momentumExitRecommendation({
+  hasExistingPosition: true, currentPositionQuantity: 10, positionProfitRate: 3.2,
+}, { price: 100, momentum_tp: null, daily_trend: "BULL" }), {
+  label: "수익 중", range: [0.2, 0.3], ratio: 0.2, quantity: 2, profitRate: 3.2,
+});
+assert.equal(momentumExitRecommendation({
+  hasExistingPosition: true, currentPositionQuantity: 10, positionProfitRate: -2,
+}, { price: 100, momentum_tp: null, daily_trend: "BEAR" }).quantity, 5);
+assert.equal(momentumExitRecommendation({ hasExistingPosition: false, currentPositionQuantity: 0 }, {}), null);
 
 const tp1 = { payload: { exchange: "NYSE", ticker: "SE" }, outcome: { signal: { signalCode: "EXIT_PARTIAL_1" } } };
 assert.equal(store.partialExitBlocked("KIS", tp1), false);
@@ -148,6 +169,9 @@ assert.ok(Math.abs(pyramidSizing.projectedPositionRatio - 13.2) < 1e-9);
   assert.match(approval, /`한투만` \/ `안 사`/);
   assert.doesNotMatch(approval, /둘다/);
   assert.match(approval, /피라미딩 1차\(최초 8주의 50%\)/);
+  assert.match(approvalText({ payload: { ticker: "SE", name: "Sea Limited" } }, {
+    KIS: { label: "한투", preview: { blocked: false, capitalOnly: true, quantity: 8, currency: "USD", positionValue: 800, projectedPositionRatio: 10, positionLimitRatio: 0.1 } },
+  }, ["KIS"]), /PEG 손절가 없음/);
 
   const changes = await reconcilePendingBrokerOrders({
     tracker: {

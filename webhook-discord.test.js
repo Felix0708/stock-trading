@@ -102,7 +102,7 @@ const pendingApproval = formatWebhookRecord({
 assert.deepEqual(targetSignalChannels({
   ...base,
   risk: { verdict: "BUY_PENDING_APPROVAL" },
-}), ["국장-전체신호", "국장-진입신호"]);
+}), ["국장-전체신호", "국장-진입신호", "국장-매매신호"]);
 
 assert.deepEqual(targetSignalChannels({
   ...base,

@@ -1,7 +1,7 @@
 "use strict";
 
 const assert = require("node:assert/strict");
-const { calculatePositionSize, calculateWebhookPositionPreview, inferPositionProfitable } = require("./position-sizer");
+const { calculatePositionSize, calculateWebhookPositionPreview, effectiveStopPrice, inferPositionProfitable } = require("./position-sizer");
 
 const base = { equity: 100000, availableCash: 100000, entryPrice: 100, stopPrice: 95 };
 assert.equal(calculatePositionSize({ ...base, conviction: "B" }).quantity, 100);
@@ -38,6 +38,19 @@ const earlyPreview = calculateWebhookPositionPreview({
 assert.equal(earlyPreview.earlyEntry, true);
 assert.equal(earlyPreview.quantity, 55);
 assert.equal(earlyPreview.positionLimitRatio, 0.1);
+const pegRecord = {
+  ...record,
+  payload: { ...record.payload, sl: null, momentum_sl: null, daily_trend: "BULL", daily_ema_aligned: true, daily_above_200ma: true },
+  outcome: { decision: "ENTRY_CANDIDATE", signal: { signalCode: "PEG_PULLBACK" } },
+};
+const pegPreview = calculateWebhookPositionPreview(pegRecord, {
+  equity: 100000, availableCash: 100000, openPositions: 0, maxOpenPositions: 5,
+});
+assert.equal(pegPreview.capitalOnly, true);
+assert.equal(pegPreview.positionLimitRatio, 0.1);
+assert.equal(pegPreview.quantity, 100);
+assert.equal(pegPreview.riskBudget, null);
+assert.equal(effectiveStopPrice({ ...pegRecord, payload: { ...pegRecord.payload, momentum_sl: 94 } }), 94);
 const heldPreview = calculateWebhookPositionPreview({ ...record, outcome: { decision: "ADD_CANDIDATE" } }, {
   equity: 100000, availableCash: 100000, openPositions: 5, maxOpenPositions: 5,
   currentPositionValue: 19000, currentPositionQuantity: 190, hasExistingPosition: true,

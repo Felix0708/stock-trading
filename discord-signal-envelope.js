@@ -5,9 +5,13 @@ const zlib = require("node:zlib");
 
 const PREFIX = "LAZY_SIGNAL_V1:";
 const TRANSPORT_URL_PREFIX = "https://discord.com/#";
-const ALLOWED_VERDICTS = new Set(["PAPER_ENTRY", "PAPER_ADD", "PAPER_PARTIAL_EXIT", "PAPER_EXIT"]);
+const ALLOWED_VERDICTS = new Set([
+  "BUY_PENDING_APPROVAL", "PAPER_ENTRY", "PAPER_ADD", "PAPER_PARTIAL_EXIT", "PAPER_EXIT",
+  "WAIT", "KEEP", "REVIEW_PARTIAL_EXIT",
+]);
 const PAYLOAD_FIELDS = [
   "ticker", "name", "exchange", "timeframe", "action", "type", "price", "sl", "rr", "conviction",
+  "momentum_sl", "momentum_tp",
   "daily_above_200ma", "daily_trend", "daily_ema_aligned", "daily_setup_stage",
   "atr_multiple", "atr_dot", "atr_dot_threshold", "sb_z_score", "paper_order_test",
 ];
@@ -22,7 +26,14 @@ function encodeSignalEnvelope(record) {
     requestId: record.requestId,
     receivedAt: record.receivedAt,
     payload: Object.fromEntries(PAYLOAD_FIELDS.filter((key) => record.payload?.[key] !== undefined).map((key) => [key, record.payload[key]])),
-    outcome: { decision: record.outcome?.decision, signal: record.outcome?.signal },
+    outcome: {
+      decision: record.outcome?.decision,
+      signal: record.outcome?.signal,
+      state: record.outcome?.state && {
+        entrySignalPrice: record.outcome.state.entrySignalPrice,
+        entrySignalAt: record.outcome.state.entrySignalAt,
+      },
+    },
     risk: { verdict: record.risk?.verdict, reason: record.risk?.reason },
   };
   const body = zlib.deflateRawSync(JSON.stringify(value)).toString("base64url");

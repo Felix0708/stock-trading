@@ -22,6 +22,9 @@ const TRADE_GATE_VERDICTS = new Set([
   "PAPER_ADD",
   "PAPER_PARTIAL_EXIT",
   "PAPER_EXIT",
+  "WAIT",
+  "KEEP",
+  "REVIEW_PARTIAL_EXIT",
 ]);
 const DOMESTIC_EXCHANGES = new Set(["KRX", "KOSPI", "KOSDAQ"]);
 const ENTRY_DECISIONS = new Set(["ENTRY_CANDIDATE", "ADD_CANDIDATE"]);
@@ -120,7 +123,9 @@ function positionPreviewLines(preview) {
     ...(Number.isFinite(preview.projectedPositionRatio)
       ? [`**주문 후 종목 비중**: ${preview.projectedPositionRatio.toFixed(2)}% / 최대 ${(preview.positionLimitRatio ?? 0.2) * 100}%`]
       : []),
-    `**예상 위험**: 손절 시 ${money(preview.stopLossAmount, preview.currency)} / 적용 한도 ${money(preview.riskBudget, preview.currency)}`,
+    preview.capitalOnly
+      ? "**예상 위험**: 손절가 없음 · 위험금액 계산 불가 · 사용자 승인 필수"
+      : `**예상 위험**: 손절 시 ${money(preview.stopLossAmount, preview.currency)} / 적용 한도 ${money(preview.riskBudget, preview.currency)}`,
   ];
 }
 

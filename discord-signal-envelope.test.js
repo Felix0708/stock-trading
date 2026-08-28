@@ -26,6 +26,16 @@ assert.deepEqual(decodeSignalEnvelope(encoded), {
   risk: { verdict: record.risk.verdict, reason: record.risk.reason },
 });
 assert(encodeSignalEnvelope({ ...record, orderAttempt: { status: "BLOCKED" } }));
+const waitRecord = {
+  ...record,
+  payload: { ...record.payload, action: "SELL", type: "🚫 진입 무효" },
+  outcome: { decision: "WAIT_FOR_CONFIRMATION", signal: { signalCode: "ENTRY_INVALIDATED" }, state: { entrySignalPrice: 80000, entrySignalAt: record.receivedAt, ignored: "x" } },
+  risk: { verdict: "WAIT", reason: "확정/만료 대기" },
+};
+assert.deepEqual(decodeSignalEnvelope(encodeSignalEnvelope(waitRecord)).outcome.state, {
+  entrySignalPrice: 80000, entrySignalAt: record.receivedAt,
+});
+assert(encodeSignalEnvelope({ ...record, risk: { verdict: "BUY_PENDING_APPROVAL" } }));
 assert.equal(encodeSignalEnvelope({ ...record, risk: { verdict: "NO_ACTION" } }), null);
 assert.equal(decodeSignalEnvelope("Lazy Alpha"), null);
 assert.throws(() => decodeSignalEnvelope(`${encoded}broken`), /신호 봉투/);
