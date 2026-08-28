@@ -118,6 +118,19 @@ const sized = formatWebhookRecord({
   },
 });
 assert(sized.text.includes("55주"));
+const liveSized = formatWebhookRecord({
+  ...base,
+  positionPreview: {
+    available: true, blocked: false, equity: 5000000, availableCash: 5000000,
+    totalAccountEquity: 50000000, autoCapital: 5000000, autoCapitalRatio: 0.1,
+    currentOpenRisk: 50000, maxOpenRisk: 75000, maxOpenRiskRatio: 0.015,
+    quantity: 10, positionValue: 1000000, projectedPositionRatio: 20, positionLimitRatio: 0.2,
+    stopLossAmount: 25000, riskBudget: 25000, currency: "KRW",
+  },
+});
+assert(liveSized.text.includes("실계좌 안전한도"));
+assert(liveSized.text.includes("자동운용금 비중"));
+assert(liveSized.text.includes("동시 손절위험"));
 assert(sized.text.includes("$13,750"));
 const krwSized = formatWebhookRecord({
   ...base,
@@ -198,6 +211,12 @@ assert(acceptedSizing.text.includes("**주문 후 예상 계좌 비중**: 7.63% 
 assert(acceptedSizing.text.includes("**매수 상한가**: $121.18"));
 assert(acceptedSizing.embed.fields.some((field) => field.name === "주문 방식" && field.value.includes("상한 지정가")));
 assert(acceptedSizing.text.includes("피라미딩 2차 · 최초 진입 8주의 25%"));
+const liveAcceptedSizing = formatOrderStatus({
+  orderNo: "1904", symbol: "AAPL", side: "BUY", status: "ACCEPTED", market: "NASDAQ",
+  orderQuantity: 2, filledQuantity: 0, remainingQuantity: 2, plannedInvestment: 500,
+  projectedPositionRatio: 12.5, positionLimitRatio: 0.2, autoCapital: 4000, currency: "USD",
+});
+assert(liveAcceptedSizing.text.includes("**주문 후 예상 자동운용금 비중**"));
 const filledSizing = formatOrderStatus({
   orderNo: "1903", symbol: "SE", side: "BUY", status: "FILLED", market: "NYSE",
   orderQuantity: 63, filledQuantity: 63, remainingQuantity: 0, fillPrice: 120.95,

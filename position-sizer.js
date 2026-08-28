@@ -136,6 +136,12 @@ function calculateWebhookPositionPreview(record, account) {
     hasExistingPosition: Boolean(account.hasExistingPosition),
     positionProfitable: account.positionProfitable ?? null,
     currency: account.currency || "USD",
+    totalAccountEquity: account.totalAccountEquity,
+    autoCapital: account.autoCapital,
+    autoCapitalRatio: account.autoCapitalRatio,
+    currentOpenRisk: account.currentOpenRisk,
+    maxOpenRisk: account.maxOpenRisk,
+    maxOpenRiskRatio: account.maxOpenRiskRatio,
   };
 }
 

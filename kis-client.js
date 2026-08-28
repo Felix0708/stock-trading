@@ -229,6 +229,17 @@ class KisClient {
     return { usd: number(result.output?.ovrs_ord_psbl_amt || result.output?.frcr_ord_psbl_amt1) };
   }
 
+  async getUsdExchangeRate() {
+    const result = await this.request("/uapi/overseas-stock/v1/trading/inquire-present-balance", {
+      trId: this.trId("VTRP6504R", "CTRP6504R"),
+      params: this.accountParams({ WCRC_FRCR_DVSN_CD: "01", NATN_CD: "840", TR_MKET_CD: "00", INQR_DVSN_CD: "00" }),
+    });
+    const summary = Array.isArray(result.output2) ? result.output2[0] || {} : result.output2 || {};
+    const exchangeRate = number(summary.frst_bltn_exrt);
+    if (exchangeRate <= 0) throw new Error("한투 USD 환율 응답이 비어 있습니다.");
+    return exchangeRate;
+  }
+
   async getUsQuote({ exchange, symbol }) {
     const market = { NASD: "NAS", NYSE: "NYS", AMEX: "AMS" }[this.kisExchange(exchange)];
     const result = await this.request("/uapi/overseas-price/v1/quotations/price", {

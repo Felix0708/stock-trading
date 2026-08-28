@@ -93,7 +93,8 @@ const record = {
     risk: { verdict: "PAPER_ADD" },
     positionPreview: {
       quantity: 4, positionValue: 1000, projectedPositionRatio: 12.5,
-      positionLimitRatio: 0.2, equity: 8000, currentPositionValue: 0, currency: "USD",
+      positionLimitRatio: 0.2, equity: 8000, totalAccountEquity: 80_000, autoCapital: 8_000, autoCapitalRatio: 0.1,
+      currentPositionValue: 0, currency: "USD", stopPrice: 230, stopLossAmount: 80,
       pyramidStage: 1, pyramidRatio: 0.5, initialEntryQuantity: 8,
     },
   };
@@ -114,7 +115,11 @@ const record = {
   assert.equal(auto.exchange, "ND");
   assert.equal(auto.plannedInvestment, 1000);
   assert.equal(auto.projectedPositionRatio, 12.5);
-  assert.equal(auto.accountEquity, 8000);
+  assert.equal(auto.accountEquity, 80000);
+  assert.equal(auto.autoCapital, 8000);
+  assert.equal(auto.autoCapitalRatio, 0.1);
+  assert.equal(auto.stopPrice, 230);
+  assert.equal(auto.plannedRisk, 80);
   assert.equal(auto.pyramidStage, 1);
   assert.equal(auto.pyramidRatio, 0.5);
   assert.equal(auto.initialEntryQuantity, 8);

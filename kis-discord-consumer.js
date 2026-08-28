@@ -217,6 +217,18 @@ function accountPortfolioSyncMinutes(env = process.env) {
   return minutes;
 }
 
+function accountRiskPolicy(env = process.env) {
+  const autoCapitalRatio = Number(env.ACCOUNT_AUTO_CAP_RATIO || 0.10);
+  const maxOpenRiskRatio = Number(env.ACCOUNT_MAX_OPEN_RISK_RATIO || 0.015);
+  if (!Number.isFinite(autoCapitalRatio) || autoCapitalRatio <= 0 || autoCapitalRatio > 1) {
+    throw new Error("ACCOUNT_AUTO_CAP_RATIO는 0 초과 1 이하여야 합니다.");
+  }
+  if (!Number.isFinite(maxOpenRiskRatio) || maxOpenRiskRatio <= 0 || maxOpenRiskRatio > 1) {
+    throw new Error("ACCOUNT_MAX_OPEN_RISK_RATIO는 0 초과 1 이하여야 합니다.");
+  }
+  return { autoCapitalRatio, maxOpenRiskRatio };
+}
+
 function discordMessagePayload(message) {
   return message.embed ? { embeds: [message.embed] } : { content: message.text || String(message) };
 }
@@ -333,7 +345,57 @@ function signalExchange(exchange) {
   throw new Error(`지원하지 않는 거래소: ${exchange || "없음"}`);
 }
 
-async function accountContext(clients, record, maxOpenPositions) {
+function accountSymbol(symbol) {
+  const value = String(symbol || "").toUpperCase();
+  return /^A\d{6}$/.test(value) ? value.slice(1) : value;
+}
+
+function trackedPortfolio(orders, domesticHoldings, usHoldings, usdExchangeRate = 1) {
+  const positions = new Map();
+  const marketOf = (market) => String(market || "").toUpperCase() === "KRX" ? "KRX" : "US";
+  const keyOf = (market, symbol) => `${marketOf(market)}:${accountSymbol(symbol)}`;
+  const ordered = [...orders].sort((a, b) => Number(a.revision || 0) - Number(b.revision || 0));
+  for (const order of ordered) {
+    const key = keyOf(order.market, order.symbol);
+    if (order.fullExit && order.status === "FILLED") positions.delete(key);
+    else if (order.entryType && Number(order.filledQuantity || 0) > 0) {
+      positions.set(key, { market: marketOf(order.market), symbol: accountSymbol(order.symbol), stopPrice: Number(order.stopPrice) || null });
+    }
+  }
+
+  let deployedKrw = 0;
+  let openRiskKrw = 0;
+  let hasUsExposure = false;
+  for (const position of positions.values()) {
+    const holdings = position.market === "KRX" ? domesticHoldings : usHoldings;
+    const held = holdings.filter((holding) => accountSymbol(holding.code) === position.symbol);
+    const quantity = held.reduce((sum, holding) => sum + Number(holding.quantity || 0), 0);
+    const evaluation = held.reduce((sum, holding) => sum + Number(holding.evaluationAmount || 0), 0);
+    if (quantity <= 0 || evaluation <= 0) continue;
+    const purchaseAmount = held.reduce((sum, holding) => sum + Number(holding.purchaseAmount || 0), 0);
+    const purchasePrice = purchaseAmount > 0 ? purchaseAmount / quantity
+      : held.reduce((sum, holding) => sum + Number(holding.purchasePrice || 0) * Number(holding.quantity || 0), 0) / quantity;
+    const fx = position.market === "KRX" ? 1 : usdExchangeRate;
+    if (position.market === "US") hasUsExposure = true;
+    deployedKrw += evaluation * fx;
+    openRiskKrw += (position.stopPrice > 0 && purchasePrice > position.stopPrice
+      ? quantity * (purchasePrice - position.stopPrice) : evaluation) * fx;
+  }
+
+  for (const order of ordered.filter((item) => item.entryType && PENDING_ORDER_STATUSES.has(item.status))) {
+    const orderQuantity = Number(order.orderQuantity || 0);
+    const remainingRatio = orderQuantity > 0 ? Math.max(0, Number(order.remainingQuantity || 0)) / orderQuantity : 1;
+    const fx = marketOf(order.market) === "KRX" ? 1 : usdExchangeRate;
+    const remainingInvestment = Number(order.plannedInvestment || 0) * remainingRatio;
+    const plannedRisk = Number(order.plannedRisk);
+    if (marketOf(order.market) === "US" && remainingRatio > 0) hasUsExposure = true;
+    deployedKrw += remainingInvestment * fx;
+    openRiskKrw += (Number.isFinite(plannedRisk) && plannedRisk > 0 ? plannedRisk * remainingRatio : remainingInvestment) * fx;
+  }
+  return { deployedKrw, openRiskKrw, hasUsExposure };
+}
+
+async function accountContext(clients, record, maxOpenPositions, options = {}) {
   const domesticClient = clients.domesticClient || clients;
   const overseasClient = clients.overseasClient || clients;
   const domestic = await domesticClient.getDomesticBalance();
@@ -343,12 +405,31 @@ async function accountContext(clients, record, maxOpenPositions) {
   const usHoldings = [...new Map(usBalances.flatMap((balance) => balance.holdings).map((holding) => [holding.code, holding])).values()];
   const market = signalExchange(record.payload.exchange);
   const holdings = market === "KRX" ? domestic.holdings : usHoldings;
-  const current = holdings.filter((holding) => holding.code === record.payload.ticker);
-  const cash = market === "KRX"
-    ? (await domesticClient.getDomesticCash({ symbol: record.payload.ticker, price: record.payload.price })).orderableAmount
-    : (await overseasClient.getUsCash({ exchange: market, symbol: record.payload.ticker, price: record.payload.price })).usd;
+  const current = holdings.filter((holding) => accountSymbol(holding.code) === accountSymbol(record.payload.ticker));
+  const cashResult = market === "KRX"
+    ? await domesticClient.getDomesticCash({ symbol: record.payload.ticker, price: record.payload.price })
+    : await overseasClient.getUsCash({ exchange: market, symbol: record.payload.ticker, price: record.payload.price });
+  const cash = market === "KRX" ? cashResult.orderableAmount : cashResult.usd;
   const evaluation = holdings.reduce((sum, holding) => sum + holding.evaluationAmount, 0);
-  const equity = market === "KRX" ? domestic.estimatedAssets || domestic.totalEvaluation : cash + evaluation;
+  const policy = options.riskPolicy || null;
+  const orders = policy ? options.orders || [] : [];
+  const previewPortfolio = policy ? trackedPortfolio(orders, domestic.holdings, usHoldings, 1) : null;
+  let usdExchangeRate = Number(cashResult.usdExchangeRate || 0);
+  if (policy && (market !== "KRX" || previewPortfolio.hasUsExposure) && usdExchangeRate <= 0) {
+    usdExchangeRate = Number(await overseasClient.getUsdExchangeRate());
+  }
+  if (policy && (market !== "KRX" || previewPortfolio.hasUsExposure) && usdExchangeRate <= 0) throw new Error("USD 환율을 확인할 수 없어 신규매수를 차단합니다.");
+  const portfolio = policy ? trackedPortfolio(orders, domestic.holdings, usHoldings, usdExchangeRate || 1) : { deployedKrw: 0, openRiskKrw: 0 };
+  const domesticEquity = Number(domestic.estimatedAssets || domestic.totalEvaluation || 0);
+  const currencyFactor = market === "KRX" ? 1 : usdExchangeRate || 1;
+  const totalAccountEquityKrw = policy ? (domesticEquity > 0 ? domesticEquity : (cash + evaluation) * currencyFactor) : null;
+  const totalAccountEquity = policy ? totalAccountEquityKrw / currencyFactor
+    : market === "KRX" ? domesticEquity : cash + evaluation;
+  const autoCapital = policy ? totalAccountEquity * policy.autoCapitalRatio : null;
+  const equity = autoCapital || totalAccountEquity;
+  const availableCash = policy
+    ? Math.min(cash, Math.max(0, (totalAccountEquityKrw * policy.autoCapitalRatio - portfolio.deployedKrw) / currencyFactor))
+    : cash;
   const currentPositionValue = current.reduce((sum, holding) => sum + holding.evaluationAmount, 0);
   const currentPositionQuantity = current.reduce((sum, holding) => sum + holding.quantity, 0);
   const purchaseAmount = current.reduce((sum, holding) => sum + (Number(holding.purchaseAmount) || 0), 0);
@@ -357,11 +438,15 @@ async function accountContext(clients, record, maxOpenPositions) {
     (sum, holding) => sum + (Number(holding.purchasePrice) || 0) * holding.quantity, 0,
   );
   return {
-    equity, availableCash: cash, currency: market === "KRX" ? "KRW" : "USD",
+    equity, availableCash, currency: market === "KRX" ? "KRW" : "USD",
+    totalAccountEquity, autoCapital, autoCapitalRatio: policy?.autoCapitalRatio,
+    currentOpenRisk: policy ? portfolio.openRiskKrw / currencyFactor : null,
+    maxOpenRisk: policy ? autoCapital * policy.maxOpenRiskRatio : null,
+    maxOpenRiskRatio: policy?.maxOpenRiskRatio,
     openPositions: domestic.holdings.length + usHoldings.length,
     maxOpenPositions,
     currentPositionValue,
-    accountPositionRatio: equity > 0 ? currentPositionValue / equity * 100 : 0,
+    accountPositionRatio: totalAccountEquity > 0 ? currentPositionValue / totalAccountEquity * 100 : 0,
     currentPositionQuantity,
     hasExistingPosition: current.length > 0,
     positionProfitable: inferPositionProfitable(current, null, record.payload.price),
@@ -385,6 +470,12 @@ function enforceOwnAccountRules(record, account, preview) {
     return { ...preview, blocked: true, quantity: 0, reason: "해당 계좌에 수익 중인 기존 포지션이 없어 추가매수 차단" };
   }
   return preview;
+}
+
+function enforceOpenRiskLimit(preview) {
+  if (!preview || preview.blocked || preview.capitalOnly) return preview;
+  if (preview.currentOpenRisk + preview.stopLossAmount <= preview.maxOpenRisk) return preview;
+  return { ...preview, blocked: true, quantity: 0, reason: `동시 손절위험 ${(preview.maxOpenRiskRatio * 100).toFixed(1)}% 한도 초과` };
 }
 
 const PYRAMID_RATIOS = [0.5, 0.25];
@@ -440,6 +531,10 @@ function applyPyramidSizing(record, preview, orders) {
     positionValue,
     projectedPositionValue,
     projectedPositionRatio: projectedPositionValue / preview.equity * 100,
+    ...(preview.capitalOnly ? { stopLossAmount: null }
+      : Number.isFinite(preview.entryPrice) && Number.isFinite(preview.stopPrice)
+        ? { stopLossAmount: quantity * (preview.entryPrice - preview.stopPrice) }
+        : Number.isFinite(preview.stopLossAmount) ? { stopLossAmount: preview.stopLossAmount } : {}),
     pyramidStage: plan.stage,
     pyramidRatio: plan.ratio,
     initialEntryQuantity: plan.initialEntryQuantity,
@@ -470,7 +565,7 @@ async function holdingLines(account) {
 function approvalText(record, previews, brokerIds = Object.keys(previews)) {
   const lines = Object.values(previews).map(({ label, preview }) => preview.blocked
     ? `**${label}**: 불가 · ${preview.reason}`
-    : `**${label}**: ${preview.quantity}주 · 예상 ${preview.currency === "KRW" ? `${Math.round(preview.positionValue).toLocaleString("ko-KR")}원` : `$${preview.positionValue.toLocaleString("en-US", { maximumFractionDigits: 2 })}`} · 주문 후 계좌 비중 ${preview.projectedPositionRatio.toFixed(2)}% / 최대 ${preview.positionLimitRatio * 100}%${preview.pyramidStage ? ` · 피라미딩 ${preview.pyramidStage}차(최초 ${preview.initialEntryQuantity}주의 ${preview.pyramidRatio * 100}%)` : ""}`);
+    : `**${label}**: ${preview.quantity}주 · 예상 ${preview.currency === "KRW" ? `${Math.round(preview.positionValue).toLocaleString("ko-KR")}원` : `$${preview.positionValue.toLocaleString("en-US", { maximumFractionDigits: 2 })}`} · 주문 후 ${Number.isFinite(preview.autoCapital) ? "자동운용금" : "계좌"} 비중 ${preview.projectedPositionRatio.toFixed(2)}% / 최대 ${preview.positionLimitRatio * 100}%${preview.pyramidStage ? ` · 피라미딩 ${preview.pyramidStage}차(최초 ${preview.initialEntryQuantity}주의 ${preview.pyramidRatio * 100}%)` : ""}`);
   const commands = brokerIds.length === 2
     ? "`사줘`·`둘다` / `키움만` / `한투만` / `안 사`"
     : `${brokerIds[0] === "KIWOOM" ? "`키움만`" : "`한투만`"} / \`안 사\``;
@@ -479,6 +574,8 @@ function approvalText(record, previews, brokerIds = Object.keys(previews)) {
     `**종목**: ${formatInstrumentLabel(record.payload)}`,
     ...(Object.values(previews).some(({ preview }) => preview.capitalOnly)
       ? ["⚠️ **PEG 손절가 없음** · 위험금액 계산 불가 · 종목 최대 10% 한도"] : []),
+    ...Object.values(previews).filter(({ preview }) => Number.isFinite(preview.autoCapital)).map(({ label, preview }) =>
+      `**${label} 실계좌 안전한도**: 계좌 총액 ${preview.currency === "KRW" ? `${Math.round(preview.totalAccountEquity).toLocaleString("ko-KR")}원` : `$${preview.totalAccountEquity.toLocaleString("en-US", { maximumFractionDigits: 2 })}`} · 자동운용 ${(preview.autoCapitalRatio * 100).toFixed(0)}% · 동시 손절위험 최대 ${(preview.maxOpenRiskRatio * 100).toFixed(1)}%`),
     ...lines,
     commands,
   ].join("\n");
@@ -510,6 +607,7 @@ async function start() {
   };
   const maxAgeMs = Number(process.env.KIS_SIGNAL_MAX_AGE_MINUTES || 30) * 60_000;
   const maxOpenPositions = Number(process.env.MAX_OPEN_POSITIONS || 5);
+  const riskPolicy = Object.values(environments).includes("live") ? accountRiskPolicy() : null;
   const ownerId = process.env.EXECUTOR_OWNER_ID || process.env.DISCORD_OWNER_ID;
   if (!ownerId) throw new Error("EXECUTOR_OWNER_ID 또는 DISCORD_OWNER_ID가 필요합니다.");
   const approvalTtlMs = Number(process.env.BUY_APPROVAL_TTL_MINUTES || 30) * 60_000;
@@ -578,10 +676,12 @@ async function start() {
     if (sizingRecord.risk?.verdict === "BUY_PENDING_APPROVAL") {
       sizingRecord.risk.verdict = approvedEntryVerdict(sizingRecord);
     }
-    const ownAccount = await accountContext(broker, sizingRecord, maxOpenPositions);
-    const preview = applyPyramidSizing(sizingRecord,
+    const liveRiskPolicy = broker.environment === "live" ? riskPolicy : null;
+    const ownAccount = await accountContext(broker, sizingRecord, maxOpenPositions, { orders: broker.tracker.list(), riskPolicy: liveRiskPolicy });
+    const sized = applyPyramidSizing(sizingRecord,
       enforceOwnAccountRules(sizingRecord, ownAccount, calculateWebhookPositionPreview(sizingRecord, ownAccount)),
       broker.tracker.list());
+    const preview = liveRiskPolicy ? enforceOpenRiskLimit(sized) : sized;
     return { label: broker.label, preview };
   }
 
@@ -1054,4 +1154,4 @@ async function start() {
 
 if (require.main === module) start().catch((error) => { console.error(error); process.exitCode = 1; });
 
-module.exports = { SignalReceiptStore, accountCommand, accountContext, accountPortfolioSyncMinutes, applyPyramidSizing, approvalText, approvedEntryVerdict, brokerEnvironments, buyApprovalRequiredForBroker, discordMessagePayload, enabledBrokerIds, enforceOwnAccountRules, errorReportDue, invalidationExitReason, liveAutoBuyEligible, momentumExitRecommendation, orderNeedsPortfolioSync, orderNeedsResultReport, pyramidPlan, readOnlySignalAllowed, reconcilePendingBrokerOrders, shouldConsumeMessage, signalExchange, start };
+module.exports = { SignalReceiptStore, accountCommand, accountContext, accountPortfolioSyncMinutes, accountRiskPolicy, accountSymbol, applyPyramidSizing, approvalText, approvedEntryVerdict, brokerEnvironments, buyApprovalRequiredForBroker, discordMessagePayload, enabledBrokerIds, enforceOpenRiskLimit, enforceOwnAccountRules, errorReportDue, invalidationExitReason, liveAutoBuyEligible, momentumExitRecommendation, orderNeedsPortfolioSync, orderNeedsResultReport, pyramidPlan, readOnlySignalAllowed, reconcilePendingBrokerOrders, shouldConsumeMessage, signalExchange, start, trackedPortfolio };

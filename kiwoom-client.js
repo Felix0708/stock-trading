@@ -372,6 +372,10 @@ class KiwoomClient {
     };
   }
 
+  async getUsdExchangeRate() {
+    return (await this.getUsCash()).usdExchangeRate;
+  }
+
   async getUsQuote({ exchange, symbol } = {}) {
     exchange = String(exchange || "").toUpperCase();
     symbol = String(symbol || "").toUpperCase();

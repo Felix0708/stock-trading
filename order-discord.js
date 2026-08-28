@@ -42,9 +42,10 @@ function formatOrderStatus(order) {
   const filledValue = Number.isFinite(fillPrice) && fillPrice > 0 && order.filledQuantity > 0
     ? fillPrice * order.filledQuantity : null;
   const positionRatio = Number.isFinite(order.positionRatio) ? order.positionRatio : null;
+  const plannedRatioLabel = Number.isFinite(order.autoCapital) ? "자동운용금 비중" : "계좌 비중";
   const limitPrice = order.side === "BUY" && Number.isFinite(order.limitPrice) ? order.limitPrice : null;
   const plannedLine = Number.isFinite(order.plannedInvestment)
-    ? `예상 투입 ${money(order.plannedInvestment, currency)}${Number.isFinite(order.projectedPositionRatio) ? ` · 주문 후 예상 계좌 비중 ${order.projectedPositionRatio.toFixed(2)}% / 최대 ${(order.positionLimitRatio ?? 0.2) * 100}%` : ""}`
+    ? `예상 투입 ${money(order.plannedInvestment, currency)}${Number.isFinite(order.projectedPositionRatio) ? ` · 주문 후 예상 ${plannedRatioLabel} ${order.projectedPositionRatio.toFixed(2)}% / 최대 ${(order.positionLimitRatio ?? 0.2) * 100}%` : ""}`
     : null;
   const filledLine = filledValue
     ? `실제 투입 ${money(filledValue, currency)}${Number.isFinite(positionRatio) ? ` · 체결 후 계좌 비중 ${positionRatio.toFixed(2)}%` : ""}`
@@ -83,7 +84,7 @@ function formatOrderStatus(order) {
       limitPrice ? `**매수 상한가**: ${money(limitPrice, currency)}` : null,
       fillPrice > 0 ? `**체결가**: ${money(fillPrice, currency)}` : null,
       filledLine ? `**실제 투입**: ${money(filledValue, currency)}${Number.isFinite(positionRatio) ? ` / **체결 후 계좌 비중**: ${positionRatio.toFixed(2)}%` : ""}` : null,
-      !filledLine && plannedLine ? `**예상 투입**: ${money(order.plannedInvestment, currency)}${Number.isFinite(order.projectedPositionRatio) ? ` / **주문 후 예상 계좌 비중**: ${order.projectedPositionRatio.toFixed(2)}% / 최대 ${(order.positionLimitRatio ?? 0.2) * 100}%` : ""}` : null,
+      !filledLine && plannedLine ? `**예상 투입**: ${money(order.plannedInvestment, currency)}${Number.isFinite(order.projectedPositionRatio) ? ` / **주문 후 예상 ${plannedRatioLabel}**: ${order.projectedPositionRatio.toFixed(2)}% / 최대 ${(order.positionLimitRatio ?? 0.2) * 100}%` : ""}` : null,
       statusReason ? `**사유**: ${statusReason}` : null,
       `**주문번호**: 끝 4자리 ${String(order.orderNo || "").slice(-4) || "-"}`,
     ].filter(Boolean).join("\n"),

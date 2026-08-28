@@ -118,10 +118,15 @@ function positionPreviewLines(preview) {
   if (!preview.available) return [`**자동 수량 미리보기**: 대기 — ${display(preview.reason)}`];
   if (preview.blocked) return [`**자동 수량 미리보기**: 🛑 차단 — ${display(preview.reason)}`];
   return [
-    `**모의계좌**: 평가액 ${money(preview.equity, preview.currency)} / 가용 현금 ${money(preview.availableCash, preview.currency)}`,
+    Number.isFinite(preview.autoCapital)
+      ? `**실계좌 안전한도**: 계좌 총액 ${money(preview.totalAccountEquity, preview.currency)} / 자동운용 ${(preview.autoCapitalRatio * 100).toFixed(0)}% ${money(preview.autoCapital, preview.currency)}`
+      : `**모의계좌**: 평가액 ${money(preview.equity, preview.currency)} / 가용 현금 ${money(preview.availableCash, preview.currency)}`,
     `**자동 수량 미리보기**: **${preview.quantity}주** / 예상 투자금 ${money(preview.positionValue, preview.currency)}`,
     ...(Number.isFinite(preview.projectedPositionRatio)
-      ? [`**주문 후 종목 비중**: ${preview.projectedPositionRatio.toFixed(2)}% / 최대 ${(preview.positionLimitRatio ?? 0.2) * 100}%`]
+      ? [`**주문 후 ${Number.isFinite(preview.autoCapital) ? "자동운용금" : "종목"} 비중**: ${preview.projectedPositionRatio.toFixed(2)}% / 최대 ${(preview.positionLimitRatio ?? 0.2) * 100}%`]
+      : []),
+    ...(Number.isFinite(preview.maxOpenRisk)
+      ? [`**동시 손절위험**: 현재 ${money(preview.currentOpenRisk, preview.currency)} / 최대 ${money(preview.maxOpenRisk, preview.currency)} (${(preview.maxOpenRiskRatio * 100).toFixed(1)}%)`]
       : []),
     preview.capitalOnly
       ? "**예상 위험**: 손절가 없음 · 위험금액 계산 불가 · 사용자 승인 필수"

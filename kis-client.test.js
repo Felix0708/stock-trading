@@ -24,6 +24,7 @@ async function fakeFetch(url, options) {
   if (["VTTC0012U", "VTTC0011U"].includes(trId)) return new Response(JSON.stringify({ rt_cd: "0", output: { ODNO: "1234" } }));
   if (trId === "VTTS3012R") return new Response(JSON.stringify({ rt_cd: "0", output1: [{ ovrs_pdno: "AAPL", ovrs_item_name: "Apple", ovrs_cblc_qty: "2", ord_psbl_qty: "2", now_pric2: "250", ovrs_stck_evlu_amt: "500", frcr_pchs_amt1: "400", frcr_evlu_pfls_amt: "100", evlu_pfls_rt: "25" }], output2: [] }));
   if (trId === "VTTS3007R") return new Response(JSON.stringify({ rt_cd: "0", output: { ovrs_ord_psbl_amt: "100000" } }));
+  if (trId === "VTRP6504R") return new Response(JSON.stringify({ rt_cd: "0", output2: [{ frst_bltn_exrt: "1,250.50" }] }));
   if (trId === "HHDFS00000300") return new Response(JSON.stringify({ rt_cd: "0", output: { rsym: "DNYSSE", last: "120.9678", base: "123.1800" } }));
   if (["VTTT1002U", "VTTT1001U"].includes(trId)) return new Response(JSON.stringify({ rt_cd: "0", output: { ODNO: "5678" } }));
   throw new Error(`unexpected ${trId}`);
@@ -53,13 +54,14 @@ async function fakeFetch(url, options) {
   await Promise.all([client.getUsBalance({ exchange: "ND" }), client.getUsBalance({ exchange: "NY" })]);
   assert.equal(maxActiveRequests, 1);
   assert.equal((await client.getUsCash({ exchange: "ND", symbol: "AAPL", price: 250 })).usd, 100000);
+  assert.equal(await client.getUsdExchangeRate(), 1250.5);
   assert.deepEqual(await client.getUsQuote({ exchange: "NY", symbol: "SE" }), {
     exchange: "NY", symbol: "SE", currentPrice: 120.9678, previousClose: 123.18,
   });
   assert.equal((await client.placeUsLimitOrder({ side: "SELL", exchange: "ND", symbol: "AAPL", quantity: 1, price: 250 })).orderNo, "5678");
   assert(calls.every((call) => call.url.startsWith(MOCK_BASE_URL)));
   assert.deepEqual(calls.filter((call) => !call.url.endsWith("tokenP")).map((call) => call.options.headers.tr_id), [
-    "VTTC8434R", "VTTC8908R", "VTTC0012U", "VTTS3012R", "VTTS3012R", "VTTS3012R", "VTTS3012R", "VTTS3012R", "VTTS3007R", "HHDFS00000300", "VTTT1001U",
+    "VTTC8434R", "VTTC8908R", "VTTC0012U", "VTTS3012R", "VTTS3012R", "VTTS3012R", "VTTS3012R", "VTTS3012R", "VTTS3007R", "VTRP6504R", "HHDFS00000300", "VTTT1001U",
   ]);
   const sessionBodies = [];
   const sessionClient = new KisClient({

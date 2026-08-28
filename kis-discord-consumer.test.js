@@ -1,7 +1,8 @@
 "use strict";
 
 const assert = require("node:assert/strict");
-const { accountCommand, accountContext, accountPortfolioSyncMinutes, applyPyramidSizing, approvalText, approvedEntryVerdict, brokerEnvironments, buyApprovalRequiredForBroker, discordMessagePayload, enabledBrokerIds, enforceOwnAccountRules, errorReportDue, invalidationExitReason, liveAutoBuyEligible, momentumExitRecommendation, orderNeedsPortfolioSync, orderNeedsResultReport, pyramidPlan, readOnlySignalAllowed, reconcilePendingBrokerOrders, shouldConsumeMessage, SignalReceiptStore } = require("./kis-discord-consumer");
+const { accountCommand, accountContext, accountPortfolioSyncMinutes, accountRiskPolicy, accountSymbol, applyPyramidSizing, approvalText, approvedEntryVerdict, brokerEnvironments, buyApprovalRequiredForBroker, discordMessagePayload, enabledBrokerIds, enforceOpenRiskLimit, enforceOwnAccountRules, errorReportDue, invalidationExitReason, liveAutoBuyEligible, momentumExitRecommendation, orderNeedsPortfolioSync, orderNeedsResultReport, pyramidPlan, readOnlySignalAllowed, reconcilePendingBrokerOrders, shouldConsumeMessage, SignalReceiptStore, trackedPortfolio } = require("./kis-discord-consumer");
+const { calculateWebhookPositionPreview } = require("./position-sizer");
 
 assert.deepEqual(enabledBrokerIds({ ACCOUNT_EXECUTOR_ENABLED: "true", EXECUTOR_KIWOOM_ENABLED: "true", EXECUTOR_KIS_ENABLED: "true" }), ["KIWOOM", "KIS"]);
 assert.deepEqual(enabledBrokerIds({ ACCOUNT_EXECUTOR_ENABLED: "true", EXECUTOR_KIWOOM_ENABLED: "true", EXECUTOR_KIS_ENABLED: "false" }), ["KIWOOM"]);
@@ -15,6 +16,11 @@ assert.equal(readOnlySignalAllowed({ payload: { paper_order_test: false } }, tru
 assert.equal(readOnlySignalAllowed({ payload: {} }, false), true);
 assert.equal(accountPortfolioSyncMinutes({ MY_PORTFOLIO_SYNC_MINUTES: "10" }), 1440);
 assert.equal(accountPortfolioSyncMinutes({ ACCOUNT_PORTFOLIO_SYNC_MINUTES: "720", MY_PORTFOLIO_SYNC_MINUTES: "10" }), 720);
+assert.deepEqual(accountRiskPolicy({}), { autoCapitalRatio: 0.1, maxOpenRiskRatio: 0.015 });
+assert.throws(() => accountRiskPolicy({ ACCOUNT_AUTO_CAP_RATIO: "0" }), /ACCOUNT_AUTO_CAP_RATIO/);
+assert.throws(() => accountRiskPolicy({ ACCOUNT_MAX_OPEN_RISK_RATIO: "1.1" }), /ACCOUNT_MAX_OPEN_RISK_RATIO/);
+assert.equal(accountSymbol("A005930"), "005930");
+assert.equal(accountSymbol("AAPL"), "AAPL");
 assert.deepEqual(discordMessagePayload({ text: "중복되면 안 됨", embed: { title: "카드" } }), { embeds: [{ title: "카드" }] });
 assert.deepEqual(discordMessagePayload({ text: "텍스트만" }), { content: "텍스트만" });
 assert.equal(orderNeedsResultReport({ status: "FILLED", source: "USER_SCHEDULED_EXIT" }), false);
@@ -153,6 +159,33 @@ assert.deepEqual({ ...pyramidSizing, projectedPositionRatio: 13.2 }, {
   pyramidStage: 1, pyramidRatio: 0.5, initialEntryQuantity: 8,
 });
 assert.ok(Math.abs(pyramidSizing.projectedPositionRatio - 13.2) < 1e-9);
+assert.equal(applyPyramidSizing(pyramidRecord, {
+  blocked: false, quantity: 8, currentPositionValue: 960, equity: 10_000, entryPrice: 120, stopPrice: 110,
+  positionValue: 960, projectedPositionValue: 1920, projectedPositionRatio: 19.2, stopLossAmount: 80,
+}, [initialEntry]).stopLossAmount, 40);
+
+assert.deepEqual(trackedPortfolio([
+  { revision: 1, market: "KRX", symbol: "005930", entryType: "PAPER_ENTRY", status: "FILLED", filledQuantity: 5, stopPrice: 90_000 },
+  { revision: 2, market: "NASDAQ", symbol: "AAPL", entryType: "PAPER_ENTRY", status: "FILLED", filledQuantity: 10, stopPrice: 90 },
+  { revision: 3, market: "KRX", symbol: "000660", entryType: "PAPER_ENTRY", status: "ACCEPTED", orderQuantity: 2, remainingQuantity: 2, plannedInvestment: 200_000, plannedRisk: 10_000 },
+], [
+  { code: "005930", quantity: 5, evaluationAmount: 550_000, purchaseAmount: 500_000 },
+], [
+  { code: "AAPL", quantity: 10, evaluationAmount: 1_100, purchaseAmount: 1_000 },
+], 1250), { deployedKrw: 2_125_000, openRiskKrw: 185_000, hasUsExposure: true });
+assert.deepEqual(trackedPortfolio([
+  { revision: 1, market: "NASDAQ", symbol: "AAPL", entryType: "PAPER_ENTRY", status: "FILLED", filledQuantity: 10, stopPrice: 90 },
+  { revision: 2, market: "NASDAQ", symbol: "AAPL", fullExit: true, status: "FILLED", filledQuantity: 10 },
+  { revision: 3, market: "KRX", symbol: "000660", entryType: "PAPER_ENTRY", status: "PARTIALLY_FILLED", orderQuantity: 4, filledQuantity: 2, remainingQuantity: 2, plannedInvestment: 400_000, plannedRisk: 40_000 },
+], [], [], 1250), { deployedKrw: 200_000, openRiskKrw: 20_000, hasUsExposure: false });
+assert.equal(enforceOpenRiskLimit({
+  blocked: false, capitalOnly: false, currentOpenRisk: 60_000, stopLossAmount: 20_000,
+  maxOpenRisk: 75_000, maxOpenRiskRatio: 0.015, quantity: 2,
+}).blocked, true);
+assert.equal(enforceOpenRiskLimit({
+  blocked: false, capitalOnly: false, currentOpenRisk: 50_000, stopLossAmount: 20_000,
+  maxOpenRisk: 75_000, maxOpenRiskRatio: 0.015, quantity: 2,
+}).blocked, false);
 
 (async () => {
   const context = await accountContext({
@@ -161,6 +194,37 @@ assert.ok(Math.abs(pyramidSizing.projectedPositionRatio - 13.2) < 1e-9);
     getUsCash: async () => ({ usd: 92294.675 }),
   }, { payload: { exchange: "NYSE", ticker: "SE", price: 121.18 } }, 5);
   assert.equal(context.accountPositionRatio, 7625.52 / (92294.675 + 7625.52) * 100);
+  assert.equal(context.autoCapital, null);
+
+  const liveDomestic = await accountContext({
+    getDomesticBalance: async () => ({ estimatedAssets: 50_000_000, totalEvaluation: 50_000_000, holdings: [] }),
+    getUsBalances: async () => [{ holdings: [] }],
+    getDomesticCash: async () => ({ orderableAmount: 40_000_000 }),
+  }, { payload: { exchange: "KRX", ticker: "005930", price: 100_000 } }, 5, {
+    orders: [], riskPolicy: accountRiskPolicy({}),
+  });
+  assert.equal(liveDomestic.totalAccountEquity, 50_000_000);
+  assert.equal(liveDomestic.autoCapital, 5_000_000);
+  assert.equal(liveDomestic.availableCash, 5_000_000);
+  assert.equal(liveDomestic.maxOpenRisk, 75_000);
+  const livePreview = calculateWebhookPositionPreview({
+    payload: { price: 100_000, sl: 99_999, conviction: "B", daily_trend: "BULL", daily_ema_aligned: true, daily_above_200ma: true },
+    outcome: { decision: "ENTRY_CANDIDATE", signal: { signalCode: "ENTRY_STANDARD" } },
+  }, liveDomestic);
+  assert.equal(livePreview.positionValue, 1_000_000);
+  assert.equal(livePreview.projectedPositionRatio, 20);
+
+  const liveUs = await accountContext({
+    getDomesticBalance: async () => ({ estimatedAssets: 50_000_000, totalEvaluation: 50_000_000, holdings: [] }),
+    getUsBalances: async () => [{ holdings: [] }],
+    getUsCash: async () => ({ usd: 10_000 }),
+    getUsdExchangeRate: async () => 1250,
+  }, { payload: { exchange: "NASDAQ", ticker: "AAPL", price: 100 } }, 5, {
+    orders: [], riskPolicy: accountRiskPolicy({}),
+  });
+  assert.equal(liveUs.totalAccountEquity, 40_000);
+  assert.equal(liveUs.autoCapital, 4_000);
+  assert.equal(liveUs.availableCash, 4_000);
 
   const approval = approvalText({ payload: { ticker: "SE", name: "Sea Limited" } }, {
     KIS: { label: "한투", preview: { blocked: false, quantity: 4, currency: "USD", positionValue: 484.72, projectedPositionRatio: 7.64, positionLimitRatio: 0.2, pyramidStage: 1, pyramidRatio: 0.5, initialEntryQuantity: 8 } },
@@ -172,6 +236,9 @@ assert.ok(Math.abs(pyramidSizing.projectedPositionRatio - 13.2) < 1e-9);
   assert.match(approvalText({ payload: { ticker: "SE", name: "Sea Limited" } }, {
     KIS: { label: "한투", preview: { blocked: false, capitalOnly: true, quantity: 8, currency: "USD", positionValue: 800, projectedPositionRatio: 10, positionLimitRatio: 0.1 } },
   }, ["KIS"]), /PEG 손절가 없음/);
+  assert.match(approvalText({ payload: { ticker: "AAPL", name: "Apple" } }, {
+    KIS: { label: "한투", preview: { blocked: false, quantity: 2, currency: "USD", positionValue: 200, projectedPositionRatio: 5, positionLimitRatio: 0.2, totalAccountEquity: 40_000, autoCapital: 4_000, autoCapitalRatio: 0.1, maxOpenRiskRatio: 0.015 } },
+  }, ["KIS"]), /실계좌 안전한도.*자동운용 10%.*동시 손절위험 최대 1\.5%/);
 
   const changes = await reconcilePendingBrokerOrders({
     tracker: {
