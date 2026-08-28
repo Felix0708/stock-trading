@@ -739,11 +739,17 @@ async function start() {
 
   async function execute(broker, record) {
     if (!readOnlySignalAllowed(record, readOnly)) return null;
-    record.positionPreview = (await previewFor(broker, record)).preview;
     if (record.payload?.paper_order_test === true) {
+      const market = signalExchange(record.payload.exchange);
+      await broker.domesticClient.getDomesticBalance();
+      if (broker.overseasClient.getUsBalances) await broker.overseasClient.getUsBalances();
+      else await broker.overseasClient.getUsBalance();
+      if (market === "KRX") await broker.domesticClient.getDomesticCash({ symbol: record.payload.ticker, price: record.payload.price });
+      else await broker.overseasClient.getUsCash({ exchange: market, symbol: record.payload.ticker, price: record.payload.price });
       await send(channels.order, { text: `✅ **${brokerAccountLabel(broker)} 자동매매 연동 테스트 통과**\n**종목**: ${formatInstrumentLabel(record.payload)}\n계좌 조회 정상 · 주문 생성 없음` });
       return null;
     }
+    record.positionPreview = (await previewFor(broker, record)).preview;
     const stage = partialExitStage(record);
     if (stage && receipts.partialExitBlocked(broker.id, record)) {
       await send(channels.execution, formatUncreatedOrder(brokerAccountLabel(broker), record, {

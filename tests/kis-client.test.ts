@@ -30,7 +30,7 @@ async function fakeFetch(url, options) {
   if (trId === "VTTC8908R") return new Response(JSON.stringify({ rt_cd: "0", output: { nrcvb_buy_amt: "400000000" } }));
   if (["VTTC0012U", "VTTC0011U"].includes(trId)) return new Response(JSON.stringify({ rt_cd: "0", output: { ODNO: "1234" } }));
   if (trId === "VTTS3012R") return new Response(JSON.stringify({ rt_cd: "0", output1: [{ ovrs_pdno: "AAPL", ovrs_item_name: "Apple", ovrs_cblc_qty: "2", ord_psbl_qty: "2", now_pric2: "250", ovrs_stck_evlu_amt: "500", frcr_pchs_amt1: "400", frcr_evlu_pfls_amt: "100", evlu_pfls_rt: "25" }], output2: [] }));
-  if (trId === "VTTS3007R") return new Response(JSON.stringify({ rt_cd: "0", output: { ovrs_ord_psbl_amt: "100000" } }));
+  if (trId === "VTTS3007R") return new Response(JSON.stringify({ rt_cd: "0", output: { ovrs_ord_psbl_amt: "100000", exrt: "1,380.30" } }));
   if (trId === "VTRP6504R") return new Response(JSON.stringify({ rt_cd: "0", output2: [{ frst_bltn_exrt: "1,250.50" }] }));
   if (trId === "HHDFS00000300") return new Response(JSON.stringify({ rt_cd: "0", output: { rsym: "DNYSSE", last: "120.9678", base: "123.1800" } }));
   if (["VTTT1002U", "VTTT1001U"].includes(trId)) return new Response(JSON.stringify({ rt_cd: "0", output: { ODNO: "5678" } }));
@@ -60,7 +60,7 @@ async function fakeFetch(url, options) {
   assert.equal((await client.getUsBalances(["ND", "NY"])).length, 2);
   await Promise.all([client.getUsBalance({ exchange: "ND" }), client.getUsBalance({ exchange: "NY" })]);
   assert.equal(maxActiveRequests, 1);
-  assert.equal((await client.getUsCash({ exchange: "ND", symbol: "AAPL", price: 250 })).usd, 100000);
+  assert.deepEqual(await client.getUsCash({ exchange: "ND", symbol: "AAPL", price: 250 }), { usd: 100000, usdExchangeRate: 1380.3 });
   assert.equal(await client.getUsdExchangeRate(), 1250.5);
   assert.deepEqual(await client.getUsQuote({ exchange: "NY", symbol: "SE" }), {
     exchange: "NY", symbol: "SE", currentPrice: 120.9678, previousClose: 123.18,

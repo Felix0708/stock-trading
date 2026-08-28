@@ -311,7 +311,10 @@ class KisClient {
       trId: this.trId("VTTS3007R", "TTTS3007R"),
       params: this.accountParams({ OVRS_EXCG_CD: this.kisExchange(exchange), OVRS_ORD_UNPR: String(price), ITEM_CD: symbol }),
     });
-    return { usd: number(result.output?.ovrs_ord_psbl_amt || result.output?.frcr_ord_psbl_amt1) };
+    return {
+      usd: number(result.output?.ovrs_ord_psbl_amt || result.output?.frcr_ord_psbl_amt1),
+      usdExchangeRate: number(result.output?.exrt),
+    };
   }
 
   async getUsdExchangeRate() {
