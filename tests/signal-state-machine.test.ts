@@ -43,6 +43,14 @@ assert.equal(new SignalStateMachine().handle(signal("BUY", "🪜 강한 눌림�
 assert.equal(new SignalStateMachine().handle(signal("SELL", "🛑 급락 손절 -10%", 90)).decision, "EXIT_CANDIDATE");
 assert.equal(new SignalStateMachine().handle(signal("CHECK", "변동성 수축", 100)).decision, "INFO_ONLY");
 
+const multiTimeframe = new SignalStateMachine();
+multiTimeframe.handle(signal("BUY", "💰 정석 진입", 100));
+multiTimeframe.handle({ ...signal("BUY", "💰 정석 진입", 101), timeframe: "1D" });
+const channelHold = multiTimeframe.handle(signal("CHECK", "채널 이탈 홀딩", 102));
+assert.equal(channelHold.decision, "INFO_ONLY");
+assert.equal(channelHold.state.status, "ENTRY_SIGNALLED");
+assert.equal(multiTimeframe.snapshot().instruments["KRX:005930:1D"].status, "ENTRY_SIGNALLED");
+
 const second = new SignalStateMachine();
 second.handle(signal("BUY", "🚀 돌파 진입", 100), "2026-08-10T02:00:00Z");
 second.handle(signal("SELL", "🚫 진입 무효", 97), "2026-08-10T02:00:01Z");
