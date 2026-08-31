@@ -24,8 +24,27 @@ async function assertSecondStartIsSkipped(script, lockName) {
   }
 }
 
+async function assertNamedExecutorIsSkipped() {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "stock-trading-start-"));
+  const envFile = path.join(directory, ".env.account.leedonghun");
+  fs.writeFileSync(envFile, "\n");
+  const running = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  try {
+    const lock = spawnSync("/usr/bin/shlock", ["-f", path.join(directory, "stock-trading-executor-.env.account.leedonghun.lock"), "-p", String(running.pid)]);
+    assert.equal(lock.status, 0, "named executor test could not acquire its fixture lock");
+    const result = spawnSync("sh", ["start-executor.sh", envFile], { cwd: path.resolve(__dirname, ".."), encoding: "utf8", env: { ...process.env, TMPDIR: directory } });
+    assert.equal(result.status, 0, `named executor did not skip an already-running instance: ${result.stderr}`);
+    assert.match(result.stdout, /이미 실행 중/);
+  } finally {
+    running.kill();
+    fs.rmSync(directory, { recursive: true });
+  }
+}
+
 (async () => {
   await assertSecondStartIsSkipped("start-signal.sh", "stock-trading-signal.lock");
-  await assertSecondStartIsSkipped("start-executor.sh", "stock-trading-executor.lock");
+  await assertSecondStartIsSkipped("start-executor.sh", "stock-trading-executor-empty.env.lock");
+  await assertNamedExecutorIsSkipped();
   console.log("start single-instance test OK");
 })().catch((error) => { console.error(error); process.exitCode = 1; });

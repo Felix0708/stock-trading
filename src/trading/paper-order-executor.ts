@@ -22,6 +22,12 @@ function isUsMarketClosedError(error: unknown) {
   return /RC4058|장\s*종료/.test(String(error instanceof Error ? error.message : error || ""));
 }
 
+function isRetryablePreOrderError(error: unknown) {
+  const message = String(error instanceof Error ? error.message : error || "");
+  return isUsMarketClosedError(error)
+    || /\[(?:VTTS|TTTS)3012R\].*Gateway\s*라우팅\s*오류/i.test(message);
+}
+
 function domesticSessionClock(value = new Date()) {
   const parts = Object.fromEntries(new Intl.DateTimeFormat("en-CA", {
     timeZone: "Asia/Seoul", weekday: "short", year: "numeric", month: "2-digit", day: "2-digit",
@@ -108,6 +114,29 @@ function isDomesticEntry(record: SignalRecord) {
     && record?.payload?.exchange === "KRX"
     && record?.payload?.action === "BUY"
     && ["PAPER_ENTRY", "PAPER_ADD"].includes(record?.risk?.verdict);
+}
+
+function isExecutableOrder(record: SignalRecord) {
+  if (record?.payload?.paper_order_test === true) return false;
+  if (record?.payload?.action === "BUY") return ["PAPER_ENTRY", "PAPER_ADD"].includes(record?.risk?.verdict);
+  if (record?.payload?.action === "SELL") return ["PAPER_EXIT", "PAPER_PARTIAL_EXIT"].includes(record?.risk?.verdict);
+  return false;
+}
+
+function shouldDeferOrder(record: SignalRecord, error: unknown) {
+  return isExecutableOrder(record) && isRetryablePreOrderError(error);
+}
+
+function shouldDelayOrder(record: SignalRecord, value = new Date()) {
+  if (!isExecutableOrder(record)) return false;
+  const buy = record.payload.action === "BUY";
+  if (Boolean(US_EXCHANGE[String(record.payload.exchange || "").toUpperCase()])) {
+    return buy ? !isUsBuySession(value) : !isUsOrderSession(value);
+  }
+  if (record.payload.exchange === "KRX") {
+    return buy ? !isDomesticBuySession(value) : !isDomesticOrderSession(value);
+  }
+  return false;
 }
 
 function shouldDeferEntry(record: SignalRecord, error: unknown) {
@@ -283,6 +312,7 @@ module.exports = {
   isDomesticOrderSession,
   isUsBuySession,
   isUsMarketClosedError,
+  isRetryablePreOrderError,
   isUsOrderSession,
   isUsRegularSession,
   partialExitQuantity,
@@ -292,7 +322,9 @@ module.exports = {
   refreshPaperOrder,
   shouldDeferUsEntry,
   shouldDeferEntry,
+  shouldDeferOrder,
   shouldDelayEntry,
+  shouldDelayOrder,
   shouldDelayUsEntry,
   submitPaperOrder,
   trackPaperOrder,

@@ -38,7 +38,7 @@ const emptyBroker = (id, label): any => ({
   kisHoldingBroker.overseasClient.getUsCash = async (query) => { cashQuery = query; return { usd: 9200 }; };
   await syncAccountPortfolio(channel, [kisHoldingBroker], "2026-08-26T00:00:00.000Z");
   assert.deepEqual(cashQuery, { exchange: "ND", symbol: "SE", price: 120 });
-  assert.match(editedPayload.embeds[0].description, /63주 · \$800 · 8\.0%/);
+  assert.match(editedPayload.embeds[0].description, /63주 · 평단 확인 불가 · 평가 \$800 · 8\.0%/);
 
   const failedKiwoom = emptyBroker("KIWOOM", "키움");
   failedKiwoom.domesticClient.getDomesticBalance = async () => { throw new Error("Token invalid"); };

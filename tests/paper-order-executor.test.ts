@@ -8,7 +8,7 @@ const { OrderTracker } = require("../src/trading/order-tracker");
 const {
   domesticSession, isDomesticBuySession, isDomesticOrderSession,
   isUsBuySession, isUsMarketClosedError, isUsOrderSession, isUsRegularSession,
-  shouldDeferEntry, shouldDeferUsEntry, shouldDelayEntry, shouldDelayUsEntry, usSession,
+  shouldDeferEntry, shouldDeferOrder, shouldDeferUsEntry, shouldDelayEntry, shouldDelayOrder, shouldDelayUsEntry, usSession,
   partialExitQuantity, partialExitRatio, partialExitStage,
   refreshPaperOrder, submitPaperOrder, trackPaperOrder, submitPaperTestOrder, trackPaperTestOrder,
 } = require("../src/trading/paper-order-executor");
@@ -64,6 +64,9 @@ const record = {
   assert.equal(shouldDelayEntry({ payload: { exchange: "KRX", action: "BUY" }, risk: { verdict: "PAPER_ENTRY" } }, new Date("2026-08-23T23:35:00.000Z")), true);
   assert.equal(shouldDelayEntry(record, new Date("2026-08-23T23:35:00.000Z")), false);
   assert.equal(shouldDelayEntry({ payload: { exchange: "KRX", action: "SELL" }, risk: { verdict: "PAPER_EXIT" } }, new Date("2026-08-23T23:35:00.000Z")), false);
+  assert.equal(shouldDelayOrder({ payload: { exchange: "KRX", action: "SELL" }, risk: { verdict: "PAPER_EXIT" } }, new Date("2026-08-24T12:00:00.000Z")), true);
+  assert.equal(shouldDelayOrder({ payload: { exchange: "NASDAQ", action: "SELL" }, risk: { verdict: "PAPER_EXIT" } }, new Date("2026-08-25T00:00:00.000Z")), true);
+  assert.equal(shouldDelayOrder({ payload: { exchange: "NASDAQ", action: "SELL" }, risk: { verdict: "PAPER_EXIT" } }, new Date("2026-08-24T12:00:00.000Z")), false);
   assert.equal(shouldDeferUsEntry({
     payload: { exchange: "NASDAQ", action: "BUY" }, risk: { verdict: "PAPER_ENTRY" },
   }, new Error("[20000](RC4058:모의투자 장종료)")), true);
@@ -76,6 +79,21 @@ const record = {
   assert.equal(shouldDeferEntry({
     payload: { exchange: "KRX", action: "BUY" }, risk: { verdict: "PAPER_ENTRY" },
   }, new Error("장종료")), true);
+  assert.equal(shouldDeferOrder({
+    payload: { exchange: "NASDAQ", action: "SELL" }, risk: { verdict: "PAPER_EXIT" },
+  }, new Error("[2000](RC4058:모의투자 장종료)")), true);
+  assert.equal(shouldDeferOrder({
+    payload: { exchange: "NYSE", action: "SELL" }, risk: { verdict: "PAPER_PARTIAL_EXIT" },
+  }, new Error("한투 모의 API 실패 [VTTT1001U]: 모의투자 장종료 입니다.")), true);
+  assert.equal(shouldDeferOrder({
+    payload: { exchange: "NASDAQ", action: "SELL" }, risk: { verdict: "PAPER_PARTIAL_EXIT" },
+  }, new Error("한투 모의 API 실패 [VTTS3012R]: Gateway 라우팅 오류가 발생했습니다.")), true);
+  assert.equal(shouldDeferOrder({
+    payload: { exchange: "NASDAQ", action: "SELL" }, risk: { verdict: "PAPER_EXIT" },
+  }, new Error("한투 실계좌 API 실패 [TTTS3012R]: Gateway 라우팅 오류가 발생했습니다.")), true);
+  assert.equal(shouldDeferOrder({
+    payload: { exchange: "NASDAQ", action: "SELL" }, risk: { verdict: "PAPER_EXIT" },
+  }, new Error("주문가능수량 부족")), false);
   assert.equal(partialExitQuantity(8, 0.25), 2);
   assert.equal(partialExitQuantity(1, 0.25), 0);
   assert.equal(partialExitRatio({ outcome: { signal: { signalCode: "TAKE_PROFIT", tpLevel: 2 } } }, {}), 0.5);

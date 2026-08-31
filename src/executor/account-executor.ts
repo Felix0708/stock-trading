@@ -14,15 +14,15 @@ const {
   domesticSessionClock,
   partialExitStage,
   refreshPaperOrder,
-  shouldDeferEntry,
-  shouldDelayEntry,
+  shouldDeferOrder,
+  shouldDelayOrder,
   submitPaperOrder,
   trackPaperOrder,
   usSession,
   usSessionClock,
 } = require("../trading/paper-order-executor");
 const { calculateWebhookPositionPreview, inferPositionProfitable } = require("../trading/position-sizer");
-const { formatBrokerStartup, formatDeferredBuy, formatExecutorError, formatOrderStatus, formatTradeJournal, formatUncreatedOrder } = require("../discord/order-discord");
+const { formatBrokerStartup, formatDeferredOrder, formatExecutorError, formatOrderStatus, formatTradeJournal, formatUncreatedOrder } = require("../discord/order-discord");
 
 function shouldConsumeMessage(message, config) {
   return message?.author?.bot === true
@@ -853,9 +853,9 @@ async function start() {
 
   async function executeOrDefer(broker, record, { retry = false } = {}) {
     if (!readOnlySignalAllowed(record, readOnly)) return null;
-    if (!retry && shouldDelayEntry(record)) {
+    if (!retry && shouldDelayOrder(record)) {
       receipts.putDeferred(broker.id, record, deferredTtlMs);
-      await send(channels.order, formatDeferredBuy(record, broker.label, broker.environment));
+      await send(channels.order, formatDeferredOrder(record, broker.label, broker.environment));
       return null;
     }
     try {
@@ -865,10 +865,11 @@ async function start() {
         await reportUnknownOrder(broker, record, error);
         return { status: "UNKNOWN", orderStatusUnknown: true };
       }
-      if (shouldDeferEntry(record, error)) {
+      if (shouldDeferOrder(record, error)) {
         if (!retry) {
-          receipts.putDeferred(broker.id, record, deferredTtlMs);
-          await send(channels.order, formatDeferredBuy(record, broker.label, broker.environment));
+          const deferred = receipts.putDeferred(broker.id, record, deferredTtlMs);
+          receipts.markDeferredFailure(deferred.key, error);
+          await send(channels.order, formatDeferredOrder(record, broker.label, broker.environment));
         }
         return null;
       }
@@ -884,13 +885,14 @@ async function start() {
 
   async function retryDeferred(now = new Date()) {
     for (const deferred of receipts.listDeferred()) {
+      const action = deferred.record.payload.action === "SELL" ? "매도" : "매수";
       if (deferred.expiresAt <= now.getTime()) {
         receipts.removeDeferred(deferred.key);
-        await send(channels.order, { text: `⌛ **매수 예약 만료**\n${formatInstrumentLabel(deferred.record.payload)}` });
+        await send(channels.order, { text: `⌛ **${action} 예약 만료**\n${formatInstrumentLabel(deferred.record.payload)}` });
         continue;
       }
       const record = structuredClone(deferred.record);
-      if (shouldDelayEntry(record, now)) continue;
+      if (shouldDelayOrder(record, now)) continue;
       const domestic = record.payload.exchange === "KRX";
       const clock = domestic ? domesticSessionClock(now) : usSessionClock(now);
       const attemptKey = `${clock.date}:${domestic ? domesticSession(now) : usSession(now)}`;
@@ -920,13 +922,16 @@ async function start() {
           await reportUnknownOrder(broker, record, error);
           continue;
         }
-        if (shouldDeferEntry(record, error)) continue;
+        if (shouldDeferOrder(record, error)) {
+          receipts.markDeferredFailure(deferred.key, error);
+          continue;
+        }
         receipts.markDeferredFailure(deferred.key, error);
         await send(channels.execution, formatUncreatedOrder(brokerAccountLabel(broker), record, {
-          title: "예약 매수 실패",
+          title: `예약 ${action} 실패`,
           reason: "계좌 조회 또는 주문 요청 실패",
         }));
-        await reportError(`${broker.label} 예약 매수 재시도 실패`, error, record);
+        await reportError(`${broker.label} 예약 ${action} 재시도 실패`, error, record);
       }
     }
   }
@@ -1175,7 +1180,7 @@ async function start() {
     }
     if (!readOnly) {
       setInterval(() => {
-        queue = queue.then(() => retryDeferred()).catch((error) => reportError("미국 예약 주문 재시도 실패", error));
+        queue = queue.then(() => retryDeferred()).catch((error) => reportError("예약 주문 재시도 실패", error));
       }, 15_000).unref();
       setInterval(() => {
         queue = queue

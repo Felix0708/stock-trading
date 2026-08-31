@@ -6,7 +6,7 @@ const {
   formatBrokerStartup,
   formatBuyApproval,
   formatDailyJournal,
-  formatDeferredBuy,
+  formatDeferredOrder,
   formatExecutorError,
   formatUncreatedOrder,
   formatOrderStatus,
@@ -258,10 +258,14 @@ assert.equal(
   "✅ 공통 신호 서버 연결 · 드러켄밀러#2229\nTradingView 웹훅 수신 · 계좌 중립 신호 전달 · 실계좌 차단",
 );
 assert.equal(formatBrokerStartup("계좌 실행기", "봇#1", "키움 모의", "실계좌 지원 · 현재 잠금"), "✅ 계좌 실행기 연결 · 봇#1\n키움 모의 · 실계좌 지원 · 현재 잠금");
-const deferredBuy = formatDeferredBuy(base, "한투", "mock");
+const deferredBuy = formatDeferredOrder(base, "한투", "mock");
 assert.equal(deferredBuy.event, "DEFERRED_BUY");
 assert.equal(deferredBuy.text.includes("청산 실패"), false);
-assert(formatDeferredBuy({ ...base, payload: { ...base.payload, exchange: "KRX" } }, "키움", "mock").text.includes("국내 모의 매수 예약"));
+assert(formatDeferredOrder({ ...base, payload: { ...base.payload, exchange: "KRX" } }, "키움", "mock").text.includes("국내 모의 매수 예약"));
+const deferredSell = formatDeferredOrder({ ...base, payload: { ...base.payload, exchange: "NASDAQ", action: "SELL" } }, "한투", "mock");
+assert.equal(deferredSell.event, "DEFERRED_SELL");
+assert(deferredSell.text.includes("한투 미국 모의 매도 예약"));
+assert(deferredSell.text.includes("계좌 보유·주문 가능 수량"));
 assert.equal(formatExecutorError("한투 예약 매수 재시도 실패", new Error("장 종료"), base).event, "EXECUTOR_ERROR");
 const executorOrderFailure = formatUncreatedOrder("키움 모의계좌", base, { title: "주문 실패", reason: "계좌 조회 실패" });
 assert.equal(executorOrderFailure.channel, "execution");

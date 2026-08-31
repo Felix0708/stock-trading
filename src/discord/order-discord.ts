@@ -142,16 +142,17 @@ function formatDailyJournal(date, entries, brokerLabel = "키움 모의계좌") 
   };
 }
 
-function formatDeferredBuy(record, brokerLabel, environment = "mock") {
+function formatDeferredOrder(record, brokerLabel, environment = "mock") {
   const payload = record.payload || {};
   const market = payload.exchange === "KRX" ? "국내" : "미국";
+  const action = payload.action === "SELL" ? "매도" : "매수";
   return {
     channel: "order",
-    event: "DEFERRED_BUY",
+    event: action === "매도" ? "DEFERRED_SELL" : "DEFERRED_BUY",
     text: [
-      `⏰ **${brokerLabel} ${market} ${environment === "live" ? "실계좌" : "모의"} 매수 예약**`,
+      `⏰ **${brokerLabel} ${market} ${environment === "live" ? "실계좌" : "모의"} ${action} 예약**`,
       `**종목**: ${formatInstrumentLabel(payload)}`,
-      "프리장·장 종료 시간에는 주문하지 않고, 다음 정규장 또는 애프터장에 계좌를 다시 확인합니다.",
+      `${action === "매수" ? "주문 가능 시간" : "매도 가능 시간"}에 현재가와 계좌 보유·주문 가능 수량을 다시 확인한 뒤 자동으로 재시도합니다.`,
     ].join("\n"),
   };
 }
@@ -199,7 +200,7 @@ module.exports = {
   formatBrokerStartup,
   formatBuyApproval,
   formatDailyJournal,
-  formatDeferredBuy,
+  formatDeferredOrder,
   formatExecutorError,
   formatOrderStatus,
   formatTradeJournal,

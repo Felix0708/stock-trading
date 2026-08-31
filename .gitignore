@@ -4,6 +4,7 @@ node_modules/
 .env.*
 !.env.signal.example
 !.env.account.example
+이동훈_작성용.env
 state.json*
 .codex-chat/
 .omo/
