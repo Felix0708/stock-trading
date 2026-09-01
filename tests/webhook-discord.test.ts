@@ -267,6 +267,10 @@ const deferredSell = formatDeferredOrder({ ...base, payload: { ...base.payload, 
 assert.equal(deferredSell.event, "DEFERRED_SELL");
 assert(deferredSell.text.includes("한투 미국 모의 매도 예약"));
 assert(deferredSell.text.includes("계좌 보유·주문 가능 수량"));
+const transitionRetry = formatDeferredOrder({ ...base, payload: { ...base.payload, exchange: "NASDAQ", action: "SELL" } }, "한투", "mock", { transitionRetry: true });
+assert.equal(transitionRetry.event, "DEFERRED_MARKET_TRANSITION");
+assert(transitionRetry.text.includes("장 전환 재시도 예약"));
+assert(transitionRetry.text.includes("30초 → 2분 → 5분"));
 const deferredVerification = formatDeferredVerification({ ...base, payload: { ...base.payload, exchange: "NASDAQ", action: "SELL" } }, "한투", "mock");
 assert.equal(deferredVerification.event, "DEFERRED_ACCOUNT_VERIFICATION");
 assert(deferredVerification.text.includes("보유 확인 보류"));

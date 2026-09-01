@@ -142,17 +142,19 @@ function formatDailyJournal(date, entries, brokerLabel = "키움 모의계좌") 
   };
 }
 
-function formatDeferredOrder(record, brokerLabel, environment = "mock") {
+function formatDeferredOrder(record, brokerLabel, environment = "mock", { transitionRetry = false } = {}) {
   const payload = record.payload || {};
   const market = payload.exchange === "KRX" ? "국내" : "미국";
   const action = payload.action === "SELL" ? "매도" : "매수";
   return {
     channel: "order",
-    event: action === "매도" ? "DEFERRED_SELL" : "DEFERRED_BUY",
+    event: transitionRetry ? "DEFERRED_MARKET_TRANSITION" : action === "매도" ? "DEFERRED_SELL" : "DEFERRED_BUY",
     text: [
-      `⏰ **${brokerLabel} ${market} ${environment === "live" ? "실계좌" : "모의"} ${action} 예약**`,
+      `${transitionRetry ? "🔄" : "⏰"} **${brokerLabel} ${market} ${environment === "live" ? "실계좌" : "모의"} ${action} ${transitionRetry ? "장 전환 재시도 예약" : "예약"}**`,
       `**종목**: ${formatInstrumentLabel(payload)}`,
-      `${action === "매수" ? "주문 가능 시간" : "매도 가능 시간"}에 현재가와 계좌 보유·주문 가능 수량을 다시 확인한 뒤 자동으로 재시도합니다.`,
+      transitionRetry
+        ? "증권사가 주문 미생성을 명확히 응답했습니다. 30초 → 2분 → 5분 후 같은 시간외장에서 안전하게 다시 시도합니다."
+        : `${action === "매수" ? "주문 가능 시간" : "매도 가능 시간"}에 현재가와 계좌 보유·주문 가능 수량을 다시 확인한 뒤 자동으로 재시도합니다.`,
     ].join("\n"),
   };
 }

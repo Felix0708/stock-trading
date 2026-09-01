@@ -12,6 +12,7 @@ const { OrderTracker } = require("../trading/order-tracker");
 const {
   domesticSession,
   domesticSessionClock,
+  isUsMarketClosedError,
   partialExitStage,
   refreshPaperOrder,
   shouldDeferOrder,
@@ -25,9 +26,35 @@ const { calculateWebhookPositionPreview, inferPositionProfitable } = require("..
 const { formatBrokerStartup, formatDeferredOrder, formatDeferredVerification, formatExecutorError, formatOrderStatus, formatTradeJournal, formatUncreatedOrder } = require("../discord/order-discord");
 
 const VERIFICATION_RETRY_DELAYS_MS = [60_000, 5 * 60_000, 15 * 60_000];
+const MARKET_TRANSITION_RETRY_DELAYS_MS = [30_000, 2 * 60_000, 5 * 60_000];
 
 function verificationDelayMs(attempts) {
   return VERIFICATION_RETRY_DELAYS_MS[Math.min(Math.max(Number(attempts) - 1, 0), VERIFICATION_RETRY_DELAYS_MS.length - 1)];
+}
+
+function marketTransitionRetryDelayMs(attempts) {
+  return MARKET_TRANSITION_RETRY_DELAYS_MS[Number(attempts) - 1] ?? null;
+}
+
+function orderAttemptKey(record, now = new Date()) {
+  const domestic = record?.payload?.exchange === "KRX";
+  const clock = domestic ? domesticSessionClock(now) : usSessionClock(now);
+  return `${clock.date}:${domestic ? domesticSession(now) : usSession(now)}`;
+}
+
+function shouldRetryMarketTransition(record, error, now = new Date()) {
+  return record?.payload?.exchange !== "KRX"
+    && ["PRE", "REGULAR", "AFTER"].includes(usSession(now))
+    && shouldDeferOrder(record, error)
+    && isUsMarketClosedError(error);
+}
+
+function deferredOrderAttemptDue(deferred, attemptKey, now = Date.now()) {
+  if (deferred?.orderRetrySessionKey === attemptKey) {
+    return marketTransitionRetryDelayMs(deferred.orderRetryAttempts) !== null
+      && Number(deferred.nextAttemptAt || 0) <= now;
+  }
+  return deferred?.lastAttemptMarketDate !== attemptKey;
 }
 
 function requiresExistingPosition(record) {
@@ -73,6 +100,8 @@ class SignalReceiptStore {
     for (const deferred of Object.values(this.state.deferred) as any[]) {
       deferred.kind ||= "ORDER";
       deferred.verificationAttempts ||= 0;
+      deferred.orderRetryAttempts ||= 0;
+      deferred.orderRetrySessionKey ||= "";
       deferred.nextAttemptAt ??= deferred.queuedAt || 0;
     }
   }
@@ -142,7 +171,8 @@ class SignalReceiptStore {
     const key = `${brokerId}:${record.requestId}`;
     this.state.deferred[key] = {
       key, brokerId, record, kind, queuedAt: now, expiresAt: now + ttlMs,
-      lastAttemptMarketDate: "", verificationAttempts: 0, nextAttemptAt: now,
+      lastAttemptMarketDate: "", verificationAttempts: 0,
+      orderRetryAttempts: 0, orderRetrySessionKey: "", nextAttemptAt: now,
     };
     this.write();
     return this.state.deferred[key];
@@ -153,8 +183,14 @@ class SignalReceiptStore {
   }
 
   markDeferredAttempt(key, marketDate) {
-    if (!this.state.deferred[key]) return;
-    this.state.deferred[key].lastAttemptMarketDate = marketDate;
+    const deferred = this.state.deferred[key];
+    if (!deferred) return;
+    if (deferred.orderRetrySessionKey && deferred.orderRetrySessionKey !== marketDate) {
+      deferred.orderRetryAttempts = 0;
+      deferred.orderRetrySessionKey = "";
+      deferred.nextAttemptAt = Date.now();
+    }
+    deferred.lastAttemptMarketDate = marketDate;
     this.write();
   }
 
@@ -177,11 +213,30 @@ class SignalReceiptStore {
     return deferred;
   }
 
+  markMarketTransitionFailure(key, attemptKey, error, now = Date.now()) {
+    const deferred = this.state.deferred[key];
+    if (!deferred) return null;
+    if (deferred.orderRetrySessionKey !== attemptKey) deferred.orderRetryAttempts = 0;
+    deferred.kind = "ORDER";
+    deferred.orderRetrySessionKey = attemptKey;
+    deferred.orderRetryAttempts = Number(deferred.orderRetryAttempts || 0) + 1;
+    deferred.lastAttemptMarketDate = attemptKey;
+    const delay = marketTransitionRetryDelayMs(deferred.orderRetryAttempts);
+    deferred.nextAttemptAt = delay === null ? Number.MAX_SAFE_INTEGER : now + delay;
+    deferred.lastError = String(error?.message || error);
+    deferred.lastFailedAt = new Date(now).toISOString();
+    this.write();
+    return deferred;
+  }
+
   markDeferredOrder(key, marketDate = "") {
     const deferred = this.state.deferred[key];
     if (!deferred) return;
     deferred.kind = "ORDER";
     deferred.lastAttemptMarketDate = marketDate;
+    deferred.orderRetryAttempts = 0;
+    deferred.orderRetrySessionKey = "";
+    deferred.nextAttemptAt = Date.now();
     this.write();
   }
 
@@ -960,9 +1015,12 @@ async function start() {
       }
       if (shouldDeferOrder(record, error)) {
         if (!retry) {
-          const deferred = receipts.putDeferred(broker.id, record, deferredTtlMs);
-          receipts.markDeferredFailure(deferred.key, error);
-          await send(channels.order, formatDeferredOrder(record, broker.label, broker.environment));
+          const now = new Date();
+          const transitionRetry = shouldRetryMarketTransition(record, error, now);
+          const deferred = receipts.putDeferred(broker.id, record, deferredTtlMs, { now: now.getTime() });
+          if (transitionRetry) receipts.markMarketTransitionFailure(deferred.key, orderAttemptKey(record, now), error, now.getTime());
+          else receipts.markDeferredFailure(deferred.key, error);
+          await send(channels.order, formatDeferredOrder(record, broker.label, broker.environment, { transitionRetry }));
         }
         return null;
       }
@@ -989,11 +1047,9 @@ async function start() {
       const verificationPending = deferred.kind === "VERIFY";
       if (verificationPending && deferred.nextAttemptAt > now.getTime()) continue;
       if (!verificationPending && shouldDelayOrder(record, now)) continue;
-      const domestic = record.payload.exchange === "KRX";
-      const clock = domestic ? domesticSessionClock(now) : usSessionClock(now);
-      const attemptKey = `${clock.date}:${domestic ? domesticSession(now) : usSession(now)}`;
+      const attemptKey = orderAttemptKey(record, now);
       if (!verificationPending) {
-        if (deferred.lastAttemptMarketDate === attemptKey) continue;
+        if (!deferredOrderAttemptDue(deferred, attemptKey, now.getTime())) continue;
         receipts.markDeferredAttempt(deferred.key, attemptKey);
       }
       const broker = brokers.find((item) => item.id === deferred.brokerId);
@@ -1020,8 +1076,20 @@ async function start() {
           continue;
         }
         if (shouldDeferOrder(record, error)) {
-          receipts.markDeferredOrder(deferred.key, attemptKey);
-          receipts.markDeferredFailure(deferred.key, error);
+          if (shouldRetryMarketTransition(record, error, now)) {
+            const pending = receipts.markMarketTransitionFailure(deferred.key, attemptKey, error, now.getTime());
+            if (pending?.orderRetryAttempts === MARKET_TRANSITION_RETRY_DELAYS_MS.length + 1) {
+              await send(channels.order, { text: [
+                `⏸️ **${broker.label} ${action} 장 전환 재시도 보류**`,
+                formatInstrumentLabel(record.payload),
+                "30초 → 2분 → 5분 재시도에서도 증권사가 주문 미생성을 확인했습니다.",
+                "중복 주문 없이 다음 주문 가능 세션에서 다시 확인합니다.",
+              ].join("\n") });
+            }
+          } else {
+            receipts.markDeferredOrder(deferred.key, attemptKey);
+            receipts.markDeferredFailure(deferred.key, error);
+          }
           continue;
         }
         if (verificationPending && record.accountVerified === true) receipts.markDeferredOrder(deferred.key, attemptKey);
@@ -1294,4 +1362,4 @@ async function start() {
 
 if (require.main === module) start().catch((error) => { console.error(error); process.exitCode = 1; });
 
-module.exports = { SignalReceiptStore, accountCommand, accountContext, accountPortfolioSyncMinutes, accountRiskPolicy, accountSymbol, applyPyramidSizing, approvalText, approvedEntryVerdict, brokerEnvironments, buyApprovalRequiredForBroker, discordMessagePayload, enabledBrokerIds, enforceOpenRiskLimit, enforceOwnAccountRules, errorReportDue, executionPreview, invalidationExitReason, liveAutoBuyEligible, momentumExitRecommendation, orderNeedsPortfolioSync, orderNeedsResultReport, orderStatusUnknown, pyramidPlan, readOnlySignalAllowed, reconcilePendingBrokerOrders, requiresExistingPosition, shouldConsumeMessage, signalExchange, skippedNoPosition, start, trackedPortfolio, verificationDelayMs };
+module.exports = { SignalReceiptStore, accountCommand, accountContext, accountPortfolioSyncMinutes, accountRiskPolicy, accountSymbol, applyPyramidSizing, approvalText, approvedEntryVerdict, brokerEnvironments, buyApprovalRequiredForBroker, deferredOrderAttemptDue, discordMessagePayload, enabledBrokerIds, enforceOpenRiskLimit, enforceOwnAccountRules, errorReportDue, executionPreview, invalidationExitReason, liveAutoBuyEligible, marketTransitionRetryDelayMs, momentumExitRecommendation, orderAttemptKey, orderNeedsPortfolioSync, orderNeedsResultReport, orderStatusUnknown, pyramidPlan, readOnlySignalAllowed, reconcilePendingBrokerOrders, requiresExistingPosition, shouldConsumeMessage, shouldRetryMarketTransition, signalExchange, skippedNoPosition, start, trackedPortfolio, verificationDelayMs };
