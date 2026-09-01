@@ -22,7 +22,24 @@ const {
   usSessionClock,
 } = require("../trading/paper-order-executor");
 const { calculateWebhookPositionPreview, inferPositionProfitable } = require("../trading/position-sizer");
-const { formatBrokerStartup, formatDeferredOrder, formatExecutorError, formatOrderStatus, formatTradeJournal, formatUncreatedOrder } = require("../discord/order-discord");
+const { formatBrokerStartup, formatDeferredOrder, formatDeferredVerification, formatExecutorError, formatOrderStatus, formatTradeJournal, formatUncreatedOrder } = require("../discord/order-discord");
+
+const VERIFICATION_RETRY_DELAYS_MS = [60_000, 5 * 60_000, 15 * 60_000];
+
+function verificationDelayMs(attempts) {
+  return VERIFICATION_RETRY_DELAYS_MS[Math.min(Math.max(Number(attempts) - 1, 0), VERIFICATION_RETRY_DELAYS_MS.length - 1)];
+}
+
+function requiresExistingPosition(record) {
+  return record?.risk?.verdict === "PAPER_ADD"
+    || (record?.payload?.action === "SELL" && ["PAPER_EXIT", "PAPER_PARTIAL_EXIT"].includes(record?.risk?.verdict));
+}
+
+function skippedNoPosition(record, preview) {
+  return requiresExistingPosition(record) && preview?.hasExistingPosition !== true
+    ? { status: "SKIPPED_NO_POSITION", reason: "해당 계좌 미보유" }
+    : null;
+}
 
 function shouldConsumeMessage(message, config) {
   return message?.author?.bot === true
@@ -44,6 +61,11 @@ class SignalReceiptStore {
     this.state.partialExits ||= {};
     this.state.invalidations ||= {};
     this.state.autoTrading ??= defaultAutoTrading;
+    for (const deferred of Object.values(this.state.deferred) as any[]) {
+      deferred.kind ||= "ORDER";
+      deferred.verificationAttempts ||= 0;
+      deferred.nextAttemptAt ??= deferred.queuedAt || 0;
+    }
   }
 
   claim(requestId, messageId) {
@@ -107,10 +129,11 @@ class SignalReceiptStore {
     return removed;
   }
 
-  putDeferred(brokerId, record, ttlMs) {
+  putDeferred(brokerId, record, ttlMs, { kind = "ORDER", now = Date.now() } = {}) {
     const key = `${brokerId}:${record.requestId}`;
     this.state.deferred[key] = {
-      key, brokerId, record, queuedAt: Date.now(), expiresAt: Date.now() + ttlMs, lastAttemptMarketDate: "",
+      key, brokerId, record, kind, queuedAt: now, expiresAt: now + ttlMs,
+      lastAttemptMarketDate: "", verificationAttempts: 0, nextAttemptAt: now,
     };
     this.write();
     return this.state.deferred[key];
@@ -130,6 +153,26 @@ class SignalReceiptStore {
     if (!this.state.deferred[key]) return;
     this.state.deferred[key].lastError = String(error?.message || error);
     this.state.deferred[key].lastFailedAt = new Date().toISOString();
+    this.write();
+  }
+
+  markVerificationFailure(key, error, now = Date.now()) {
+    const deferred = this.state.deferred[key];
+    if (!deferred) return null;
+    deferred.kind = "VERIFY";
+    deferred.verificationAttempts = Number(deferred.verificationAttempts || 0) + 1;
+    deferred.nextAttemptAt = now + verificationDelayMs(deferred.verificationAttempts);
+    deferred.lastError = String(error?.message || error);
+    deferred.lastFailedAt = new Date(now).toISOString();
+    this.write();
+    return deferred;
+  }
+
+  markDeferredOrder(key, marketDate = "") {
+    const deferred = this.state.deferred[key];
+    if (!deferred) return;
+    deferred.kind = "ORDER";
+    deferred.lastAttemptMarketDate = marketDate;
     this.write();
   }
 
@@ -702,7 +745,14 @@ async function start() {
       sizingRecord.risk.verdict = approvedEntryVerdict(sizingRecord);
     }
     const liveRiskPolicy = broker.environment === "live" ? riskPolicy : null;
-    const ownAccount = await accountContext(broker, sizingRecord, maxOpenPositions, { orders: broker.tracker.list(), riskPolicy: liveRiskPolicy });
+    let ownAccount;
+    try {
+      ownAccount = await accountContext(broker, sizingRecord, maxOpenPositions, { orders: broker.tracker.list(), riskPolicy: liveRiskPolicy });
+    } catch (error) {
+      const verificationError: any = error instanceof Error ? error : new Error(String(error));
+      verificationError.accountVerificationFailed = true;
+      throw verificationError;
+    }
     const sized = applyPyramidSizing(sizingRecord,
       enforceOwnAccountRules(sizingRecord, ownAccount, calculateWebhookPositionPreview(sizingRecord, ownAccount)),
       broker.tracker.list());
@@ -737,7 +787,7 @@ async function start() {
     return reported;
   }
 
-  async function execute(broker, record) {
+  async function execute(broker, record, { refreshQuote = false } = {}) {
     if (!readOnlySignalAllowed(record, readOnly)) return null;
     if (record.payload?.paper_order_test === true) {
       const market = signalExchange(record.payload.exchange);
@@ -750,6 +800,11 @@ async function start() {
       return null;
     }
     record.positionPreview = (await previewFor(broker, record)).preview;
+    record.accountVerified = true;
+    const skipped = skippedNoPosition(record, record.positionPreview);
+    if (skipped) return skipped;
+    if (shouldDelayOrder(record)) return { status: "DEFER_REQUIRED" };
+    if (refreshQuote) record.payload.price = await currentSignalPrice(broker, record.payload);
     const stage = partialExitStage(record);
     if (stage && receipts.partialExitBlocked(broker.id, record)) {
       await send(channels.execution, formatUncreatedOrder(brokerAccountLabel(broker), record, {
@@ -853,17 +908,33 @@ async function start() {
 
   async function executeOrDefer(broker, record, { retry = false } = {}) {
     if (!readOnlySignalAllowed(record, readOnly)) return null;
-    if (!retry && shouldDelayOrder(record)) {
+    if (!retry && !requiresExistingPosition(record) && shouldDelayOrder(record)) {
       receipts.putDeferred(broker.id, record, deferredTtlMs);
       await send(channels.order, formatDeferredOrder(record, broker.label, broker.environment));
       return null;
     }
     try {
-      return await execute(broker, record);
+      const result = await execute(broker, record);
+      if (result?.status === "DEFER_REQUIRED") {
+        if (!retry) {
+          receipts.putDeferred(broker.id, record, deferredTtlMs);
+          await send(channels.order, formatDeferredOrder(record, broker.label, broker.environment));
+        }
+        return null;
+      }
+      return result;
     } catch (error) {
       if (orderStatusUnknown(error)) {
         await reportUnknownOrder(broker, record, error);
         return { status: "UNKNOWN", orderStatusUnknown: true };
+      }
+      if (error?.accountVerificationFailed === true) {
+        if (!retry) {
+          const deferred = receipts.putDeferred(broker.id, record, deferredTtlMs, { kind: "VERIFY" });
+          receipts.markVerificationFailure(deferred.key, error);
+          await send(channels.order, formatDeferredVerification(record, broker.label, broker.environment));
+        }
+        return null;
       }
       if (shouldDeferOrder(record, error)) {
         if (!retry) {
@@ -888,33 +959,32 @@ async function start() {
       const action = deferred.record.payload.action === "SELL" ? "매도" : "매수";
       if (deferred.expiresAt <= now.getTime()) {
         receipts.removeDeferred(deferred.key);
-        await send(channels.order, { text: `⌛ **${action} 예약 만료**\n${formatInstrumentLabel(deferred.record.payload)}` });
+        const label = deferred.kind === "VERIFY" ? "보유 확인" : action;
+        await send(channels.order, { text: `⌛ **${label} 예약 만료**\n${formatInstrumentLabel(deferred.record.payload)}` });
         continue;
       }
       const record = structuredClone(deferred.record);
-      if (shouldDelayOrder(record, now)) continue;
+      const verificationPending = deferred.kind === "VERIFY";
+      if (verificationPending && deferred.nextAttemptAt > now.getTime()) continue;
+      if (!verificationPending && shouldDelayOrder(record, now)) continue;
       const domestic = record.payload.exchange === "KRX";
       const clock = domestic ? domesticSessionClock(now) : usSessionClock(now);
       const attemptKey = `${clock.date}:${domestic ? domesticSession(now) : usSession(now)}`;
-      if (deferred.lastAttemptMarketDate === attemptKey) continue;
-      receipts.markDeferredAttempt(deferred.key, attemptKey);
+      if (!verificationPending) {
+        if (deferred.lastAttemptMarketDate === attemptKey) continue;
+        receipts.markDeferredAttempt(deferred.key, attemptKey);
+      }
       const broker = brokers.find((item) => item.id === deferred.brokerId);
       if (!broker) {
         receipts.removeDeferred(deferred.key);
         continue;
       }
       try {
-        const quoteClient = domestic ? broker.domesticClient : broker.overseasClient;
-        if (domestic && quoteClient?.getDomesticQuote) {
-          const quote = await quoteClient.getDomesticQuote({ symbol: record.payload.ticker });
-          record.payload.price = quote.currentPrice;
-          if (quote.name) record.payload.name = quote.name;
-        } else if (quoteClient) {
-          const quote = await quoteClient.getUsQuote({ exchange: signalExchange(record.payload.exchange), symbol: record.payload.ticker });
-          record.payload.price = quote.currentPrice;
-          if (quote.name) record.payload.name = quote.name;
+        const result = await execute(broker, record, { refreshQuote: true });
+        if (result?.status === "DEFER_REQUIRED") {
+          receipts.markDeferredOrder(deferred.key);
+          continue;
         }
-        await execute(broker, record);
         receipts.removeDeferred(deferred.key);
       } catch (error) {
         if (orderStatusUnknown(error)) {
@@ -922,10 +992,17 @@ async function start() {
           await reportUnknownOrder(broker, record, error);
           continue;
         }
+        if (error?.accountVerificationFailed === true) {
+          const pending = receipts.markVerificationFailure(deferred.key, error, now.getTime());
+          if (pending?.verificationAttempts === 3) await reportError(`${broker.label} 보유 확인 반복 실패`, error, record);
+          continue;
+        }
         if (shouldDeferOrder(record, error)) {
+          receipts.markDeferredOrder(deferred.key, attemptKey);
           receipts.markDeferredFailure(deferred.key, error);
           continue;
         }
+        if (verificationPending && record.accountVerified === true) receipts.markDeferredOrder(deferred.key, attemptKey);
         receipts.markDeferredFailure(deferred.key, error);
         await send(channels.execution, formatUncreatedOrder(brokerAccountLabel(broker), record, {
           title: `예약 ${action} 실패`,
@@ -1195,4 +1272,4 @@ async function start() {
 
 if (require.main === module) start().catch((error) => { console.error(error); process.exitCode = 1; });
 
-module.exports = { SignalReceiptStore, accountCommand, accountContext, accountPortfolioSyncMinutes, accountRiskPolicy, accountSymbol, applyPyramidSizing, approvalText, approvedEntryVerdict, brokerEnvironments, buyApprovalRequiredForBroker, discordMessagePayload, enabledBrokerIds, enforceOpenRiskLimit, enforceOwnAccountRules, errorReportDue, invalidationExitReason, liveAutoBuyEligible, momentumExitRecommendation, orderNeedsPortfolioSync, orderNeedsResultReport, orderStatusUnknown, pyramidPlan, readOnlySignalAllowed, reconcilePendingBrokerOrders, shouldConsumeMessage, signalExchange, start, trackedPortfolio };
+module.exports = { SignalReceiptStore, accountCommand, accountContext, accountPortfolioSyncMinutes, accountRiskPolicy, accountSymbol, applyPyramidSizing, approvalText, approvedEntryVerdict, brokerEnvironments, buyApprovalRequiredForBroker, discordMessagePayload, enabledBrokerIds, enforceOpenRiskLimit, enforceOwnAccountRules, errorReportDue, invalidationExitReason, liveAutoBuyEligible, momentumExitRecommendation, orderNeedsPortfolioSync, orderNeedsResultReport, orderStatusUnknown, pyramidPlan, readOnlySignalAllowed, reconcilePendingBrokerOrders, requiresExistingPosition, shouldConsumeMessage, signalExchange, skippedNoPosition, start, trackedPortfolio, verificationDelayMs };

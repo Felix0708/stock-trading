@@ -1,7 +1,7 @@
 "use strict";
 
 const assert = require("node:assert/strict");
-const { accountCommand, accountContext, accountPortfolioSyncMinutes, accountRiskPolicy, accountSymbol, applyPyramidSizing, approvalText, approvedEntryVerdict, brokerEnvironments, buyApprovalRequiredForBroker, discordMessagePayload, enabledBrokerIds, enforceOpenRiskLimit, enforceOwnAccountRules, errorReportDue, invalidationExitReason, liveAutoBuyEligible, momentumExitRecommendation, orderNeedsPortfolioSync, orderNeedsResultReport, orderStatusUnknown, pyramidPlan, readOnlySignalAllowed, reconcilePendingBrokerOrders, shouldConsumeMessage, SignalReceiptStore, trackedPortfolio } = require("../src/executor/account-executor");
+const { accountCommand, accountContext, accountPortfolioSyncMinutes, accountRiskPolicy, accountSymbol, applyPyramidSizing, approvalText, approvedEntryVerdict, brokerEnvironments, buyApprovalRequiredForBroker, discordMessagePayload, enabledBrokerIds, enforceOpenRiskLimit, enforceOwnAccountRules, errorReportDue, invalidationExitReason, liveAutoBuyEligible, momentumExitRecommendation, orderNeedsPortfolioSync, orderNeedsResultReport, orderStatusUnknown, pyramidPlan, readOnlySignalAllowed, reconcilePendingBrokerOrders, requiresExistingPosition, shouldConsumeMessage, SignalReceiptStore, skippedNoPosition, trackedPortfolio, verificationDelayMs } = require("../src/executor/account-executor");
 const { calculateWebhookPositionPreview } = require("../src/trading/position-sizer");
 
 assert.deepEqual(enabledBrokerIds({ ACCOUNT_EXECUTOR_ENABLED: "true", EXECUTOR_KIWOOM_ENABLED: "true", EXECUTOR_KIS_ENABLED: "true" }), ["KIWOOM", "KIS"]);
@@ -74,6 +74,7 @@ store.removePending(pending.key);
 assert.equal(store.findPending({ ticker: "PLTR" }), null);
 const deferred = store.putDeferred("KIWOOM", { requestId: "request-3", payload: { exchange: "NYSE", ticker: "SE" } }, 60_000);
 assert.equal(store.listDeferred()[0].key, deferred.key);
+assert.equal(store.listDeferred()[0].kind, "ORDER");
 store.markDeferredAttempt(deferred.key, "2026-08-26");
 assert.equal(store.listDeferred()[0].lastAttemptMarketDate, "2026-08-26");
 store.markDeferredFailure(deferred.key, new Error("temporary auth failure"));
@@ -81,6 +82,17 @@ assert.equal(store.listDeferred()[0].lastError, "temporary auth failure");
 assert.equal(store.listDeferred().length, 1);
 store.removeDeferred(deferred.key);
 assert.equal(store.listDeferred().length, 0);
+const verification = store.putDeferred("KIS", { requestId: "request-verify", payload: { exchange: "NASDAQ", ticker: "ABCL" } }, 60_000, { kind: "VERIFY", now: 1_000 });
+assert.equal(store.markVerificationFailure(verification.key, new Error("gateway"), 1_000).nextAttemptAt, 61_000);
+assert.equal(store.markVerificationFailure(verification.key, new Error("gateway"), 61_000).nextAttemptAt, 361_000);
+assert.equal(store.markVerificationFailure(verification.key, new Error("gateway"), 361_000).nextAttemptAt, 1_261_000);
+store.markDeferredOrder(verification.key);
+assert.equal(store.listDeferred()[0].kind, "ORDER");
+store.removeDeferred(verification.key);
+assert.equal(verificationDelayMs(1), 60_000);
+assert.equal(verificationDelayMs(2), 300_000);
+assert.equal(verificationDelayMs(3), 900_000);
+assert.equal(verificationDelayMs(9), 900_000);
 const invalidationRecord = { payload: { exchange: "NYSE", ticker: "SE" } };
 const invalidation = store.putInvalidation("KIS", invalidationRecord, 100, 1_000);
 assert.equal(store.listInvalidations()[0].entryPrice, 100);
@@ -102,6 +114,14 @@ assert.equal(buyApprovalRequiredForBroker({ environment: "live" }, mixedBuy, tru
 assert.equal(buyApprovalRequiredForBroker({ environment: "mock" }, strongBuy, false), true);
 assert.equal(approvedEntryVerdict({ outcome: { decision: "ENTRY_CANDIDATE" } }), "PAPER_ENTRY");
 assert.equal(approvedEntryVerdict({ outcome: { decision: "ADD_CANDIDATE" } }), "PAPER_ADD");
+assert.equal(requiresExistingPosition({ payload: { action: "BUY" }, risk: { verdict: "PAPER_ENTRY" } }), false);
+assert.equal(requiresExistingPosition({ payload: { action: "BUY" }, risk: { verdict: "PAPER_ADD" } }), true);
+assert.equal(requiresExistingPosition({ payload: { action: "SELL" }, risk: { verdict: "PAPER_EXIT" } }), true);
+assert.equal(requiresExistingPosition({ payload: { action: "SELL" }, risk: { verdict: "PAPER_PARTIAL_EXIT" } }), true);
+assert.deepEqual(skippedNoPosition({ payload: { action: "BUY" }, risk: { verdict: "PAPER_ADD" } }, { hasExistingPosition: false }), { status: "SKIPPED_NO_POSITION", reason: "해당 계좌 미보유" });
+assert.deepEqual(skippedNoPosition({ payload: { action: "SELL" }, risk: { verdict: "PAPER_EXIT" } }, { hasExistingPosition: false }), { status: "SKIPPED_NO_POSITION", reason: "해당 계좌 미보유" });
+assert.equal(skippedNoPosition({ payload: { action: "SELL" }, risk: { verdict: "PAPER_EXIT" } }, { hasExistingPosition: true }), null);
+assert.equal(skippedNoPosition({ payload: { action: "BUY" }, risk: { verdict: "PAPER_ENTRY" } }, { hasExistingPosition: false }), null);
 
 assert.deepEqual(momentumExitRecommendation({
   hasExistingPosition: true, currentPositionQuantity: 10, positionProfitRate: 3.2,

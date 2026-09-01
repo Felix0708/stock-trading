@@ -7,6 +7,7 @@ const {
   formatBuyApproval,
   formatDailyJournal,
   formatDeferredOrder,
+  formatDeferredVerification,
   formatExecutorError,
   formatUncreatedOrder,
   formatOrderStatus,
@@ -266,6 +267,10 @@ const deferredSell = formatDeferredOrder({ ...base, payload: { ...base.payload, 
 assert.equal(deferredSell.event, "DEFERRED_SELL");
 assert(deferredSell.text.includes("한투 미국 모의 매도 예약"));
 assert(deferredSell.text.includes("계좌 보유·주문 가능 수량"));
+const deferredVerification = formatDeferredVerification({ ...base, payload: { ...base.payload, exchange: "NASDAQ", action: "SELL" } }, "한투", "mock");
+assert.equal(deferredVerification.event, "DEFERRED_ACCOUNT_VERIFICATION");
+assert(deferredVerification.text.includes("보유 확인 보류"));
+assert(deferredVerification.text.includes("1분 → 5분 → 15분"));
 assert.equal(formatExecutorError("한투 예약 매수 재시도 실패", new Error("장 종료"), base).event, "EXECUTOR_ERROR");
 const executorOrderFailure = formatUncreatedOrder("키움 모의계좌", base, { title: "주문 실패", reason: "계좌 조회 실패" });
 assert.equal(executorOrderFailure.channel, "execution");

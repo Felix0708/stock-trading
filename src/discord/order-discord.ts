@@ -157,6 +157,20 @@ function formatDeferredOrder(record, brokerLabel, environment = "mock") {
   };
 }
 
+function formatDeferredVerification(record, brokerLabel, environment = "mock") {
+  const payload = record.payload || {};
+  return {
+    channel: "order",
+    event: "DEFERRED_ACCOUNT_VERIFICATION",
+    text: [
+      `⏳ **${brokerLabel} ${environment === "live" ? "실계좌" : "모의계좌"} 보유 확인 보류**`,
+      `**종목**: ${formatInstrumentLabel(payload)}`,
+      "계좌 조회가 일시적으로 실패해 주문을 생성하지 않았습니다.",
+      "1분 → 5분 → 15분 간격으로 다시 확인하고, 미보유면 조용히 종료합니다.",
+    ].join("\n"),
+  };
+}
+
 function formatExecutorError(title, error, record = null) {
   const payload = record?.payload;
   return {
@@ -201,6 +215,7 @@ module.exports = {
   formatBuyApproval,
   formatDailyJournal,
   formatDeferredOrder,
+  formatDeferredVerification,
   formatExecutorError,
   formatOrderStatus,
   formatTradeJournal,
