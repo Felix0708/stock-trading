@@ -41,6 +41,15 @@ function skippedNoPosition(record, preview) {
     : null;
 }
 
+function executionPreview(record, account, calculated) {
+  if (calculated || !requiresExistingPosition(record)) return calculated;
+  return {
+    ...account,
+    blocked: false,
+    quantity: account.currentPositionQuantity || 0,
+  };
+}
+
 function shouldConsumeMessage(message, config) {
   return message?.author?.bot === true
     && config.sourceChannelIds.has(message.channelId)
@@ -448,20 +457,27 @@ function trackedPortfolio(orders, domesticHoldings, usHoldings, usdExchangeRate 
 async function accountContext(clients, record, maxOpenPositions, options: any = {}) {
   const domesticClient = clients.domesticClient || clients;
   const overseasClient = clients.overseasClient || clients;
-  const domestic = await domesticClient.getDomesticBalance();
-  const usBalances = overseasClient.getUsBalances
-    ? await overseasClient.getUsBalances()
-    : [await overseasClient.getUsBalance()];
-  const usHoldings = [...new Map(usBalances.flatMap((balance) => balance.holdings).map((holding) => [holding.code, holding])).values()];
   const market = signalExchange(record.payload.exchange);
+  const positionOnly = options.positionOnly === true;
+  const domestic = positionOnly && market !== "KRX"
+    ? { holdings: [], estimatedAssets: 0, totalEvaluation: 0 }
+    : await domesticClient.getDomesticBalance();
+  const usBalances = positionOnly
+    ? market === "KRX" ? [] : [await overseasClient.getUsBalance({ exchange: market })]
+    : overseasClient.getUsBalances
+      ? await overseasClient.getUsBalances()
+      : [await overseasClient.getUsBalance()];
+  const usHoldings = [...new Map(usBalances.flatMap((balance) => balance.holdings).map((holding) => [holding.code, holding])).values()];
   const holdings = market === "KRX" ? domestic.holdings : usHoldings;
   const current = holdings.filter((holding) => accountSymbol(holding.code) === accountSymbol(record.payload.ticker));
-  const cashResult = market === "KRX"
-    ? await domesticClient.getDomesticCash({ symbol: record.payload.ticker, price: record.payload.price })
-    : await overseasClient.getUsCash({ exchange: market, symbol: record.payload.ticker, price: record.payload.price });
+  const cashResult = positionOnly
+    ? { orderableAmount: 0, usd: 0, usdExchangeRate: 0 }
+    : market === "KRX"
+      ? await domesticClient.getDomesticCash({ symbol: record.payload.ticker, price: record.payload.price })
+      : await overseasClient.getUsCash({ exchange: market, symbol: record.payload.ticker, price: record.payload.price });
   const cash = market === "KRX" ? cashResult.orderableAmount : cashResult.usd;
   const evaluation = holdings.reduce((sum, holding) => sum + holding.evaluationAmount, 0);
-  const policy = options.riskPolicy || null;
+  const policy = positionOnly ? null : options.riskPolicy || null;
   const orders = policy ? options.orders || [] : [];
   const previewPortfolio = policy ? trackedPortfolio(orders, domestic.holdings, usHoldings, 1) : null;
   let usdExchangeRate = Number(cashResult.usdExchangeRate || 0);
@@ -524,6 +540,7 @@ function enforceOwnAccountRules(record, account, preview) {
 
 function enforceOpenRiskLimit(preview) {
   if (!preview || preview.blocked || preview.capitalOnly) return preview;
+  if (![preview.currentOpenRisk, preview.stopLossAmount, preview.maxOpenRisk].every(Number.isFinite)) return preview;
   if (preview.currentOpenRisk + preview.stopLossAmount <= preview.maxOpenRisk) return preview;
   return { ...preview, blocked: true, quantity: 0, reason: `동시 손절위험 ${(preview.maxOpenRiskRatio * 100).toFixed(1)}% 한도 초과` };
 }
@@ -745,16 +762,21 @@ async function start() {
       sizingRecord.risk.verdict = approvedEntryVerdict(sizingRecord);
     }
     const liveRiskPolicy = broker.environment === "live" ? riskPolicy : null;
+    const positionOnly = record.payload?.action === "SELL"
+      && ["PAPER_EXIT", "PAPER_PARTIAL_EXIT"].includes(sizingRecord.risk?.verdict);
     let ownAccount;
     try {
-      ownAccount = await accountContext(broker, sizingRecord, maxOpenPositions, { orders: broker.tracker.list(), riskPolicy: liveRiskPolicy });
+      ownAccount = await accountContext(broker, sizingRecord, maxOpenPositions, {
+        orders: broker.tracker.list(), riskPolicy: liveRiskPolicy, positionOnly,
+      });
     } catch (error) {
       const verificationError: any = error instanceof Error ? error : new Error(String(error));
       verificationError.accountVerificationFailed = true;
       throw verificationError;
     }
+    const calculated = executionPreview(sizingRecord, ownAccount, calculateWebhookPositionPreview(sizingRecord, ownAccount));
     const sized = applyPyramidSizing(sizingRecord,
-      enforceOwnAccountRules(sizingRecord, ownAccount, calculateWebhookPositionPreview(sizingRecord, ownAccount)),
+      enforceOwnAccountRules(sizingRecord, ownAccount, calculated),
       broker.tracker.list());
     const preview = liveRiskPolicy ? enforceOpenRiskLimit(sized) : sized;
     return { label: broker.label, preview };
@@ -1272,4 +1294,4 @@ async function start() {
 
 if (require.main === module) start().catch((error) => { console.error(error); process.exitCode = 1; });
 
-module.exports = { SignalReceiptStore, accountCommand, accountContext, accountPortfolioSyncMinutes, accountRiskPolicy, accountSymbol, applyPyramidSizing, approvalText, approvedEntryVerdict, brokerEnvironments, buyApprovalRequiredForBroker, discordMessagePayload, enabledBrokerIds, enforceOpenRiskLimit, enforceOwnAccountRules, errorReportDue, invalidationExitReason, liveAutoBuyEligible, momentumExitRecommendation, orderNeedsPortfolioSync, orderNeedsResultReport, orderStatusUnknown, pyramidPlan, readOnlySignalAllowed, reconcilePendingBrokerOrders, requiresExistingPosition, shouldConsumeMessage, signalExchange, skippedNoPosition, start, trackedPortfolio, verificationDelayMs };
+module.exports = { SignalReceiptStore, accountCommand, accountContext, accountPortfolioSyncMinutes, accountRiskPolicy, accountSymbol, applyPyramidSizing, approvalText, approvedEntryVerdict, brokerEnvironments, buyApprovalRequiredForBroker, discordMessagePayload, enabledBrokerIds, enforceOpenRiskLimit, enforceOwnAccountRules, errorReportDue, executionPreview, invalidationExitReason, liveAutoBuyEligible, momentumExitRecommendation, orderNeedsPortfolioSync, orderNeedsResultReport, orderStatusUnknown, pyramidPlan, readOnlySignalAllowed, reconcilePendingBrokerOrders, requiresExistingPosition, shouldConsumeMessage, signalExchange, skippedNoPosition, start, trackedPortfolio, verificationDelayMs };

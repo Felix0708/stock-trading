@@ -170,6 +170,12 @@ function partialExitQuantity(tradableQuantity: number, ratio: number | null) {
   return Math.floor(tradableQuantity * ratio);
 }
 
+function previewTradableQuantity(positionPreview: any, ticker: string) {
+  const holding = positionPreview?.currentHoldings?.find((item: any) => String(item.code || "").replace(/^A/, "").toUpperCase() === String(ticker || "").replace(/^A/, "").toUpperCase());
+  const quantity = Number(holding?.tradableQuantity ?? holding?.quantity);
+  return Number.isInteger(quantity) && quantity >= 0 ? quantity : null;
+}
+
 function protectedUsBuyLimit(signalPrice: number, currentPrice: number) {
   if (!Number.isFinite(signalPrice) || signalPrice <= 0 || !Number.isFinite(currentPrice) || currentPrice <= 0) {
     throw new Error("미국주식 매수 상한가 계산에 유효한 신호가와 현재가가 필요합니다.");
@@ -205,7 +211,8 @@ async function submitPaperOrder(record: SignalRecord, options: ExecutorOptions) 
     if (!/^\d{6}$/.test(payload.ticker)) return blocked("국내주식 종목코드는 6자리여야 함");
     if (entry) quantity = positionPreview?.quantity;
     else {
-      const tradable = (await client.getDomesticBalance()).holdings.find((item: any) => item.code.replace(/^A/, "") === payload.ticker)?.tradableQuantity;
+      const previewTradable = previewTradableQuantity(positionPreview, payload.ticker);
+      const tradable = previewTradable ?? (await client.getDomesticBalance()).holdings.find((item: any) => item.code.replace(/^A/, "") === payload.ticker)?.tradableQuantity;
       quantity = partialExit ? partialExitQuantity(tradable, partialExitRatio(record, options)) : tradable;
     }
     if (!Number.isInteger(quantity) || quantity < 1) return blocked("주문 가능한 국내주식 수량 없음");
@@ -225,7 +232,8 @@ async function submitPaperOrder(record: SignalRecord, options: ExecutorOptions) 
     if (!kiwoomExchange) return blocked(`지원하지 않는 거래소: ${exchange || "없음"}`);
     if (entry) quantity = positionPreview?.quantity;
     else {
-      const tradable = (await client.getUsBalance({ exchange: kiwoomExchange })).holdings.find((item: any) => item.code === payload.ticker)?.tradableQuantity;
+      const previewTradable = previewTradableQuantity(positionPreview, payload.ticker);
+      const tradable = previewTradable ?? (await client.getUsBalance({ exchange: kiwoomExchange })).holdings.find((item: any) => item.code === payload.ticker)?.tradableQuantity;
       quantity = partialExit ? partialExitQuantity(tradable, partialExitRatio(record, options)) : tradable;
     }
     if (!Number.isInteger(quantity) || quantity < 1) return blocked("주문 가능한 미국주식 수량 없음");
@@ -318,6 +326,7 @@ module.exports = {
   partialExitQuantity,
   partialExitRatio,
   partialExitStage,
+  previewTradableQuantity,
   protectedUsBuyLimit,
   refreshPaperOrder,
   shouldDeferUsEntry,

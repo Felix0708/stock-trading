@@ -1,7 +1,7 @@
 "use strict";
 
 const assert = require("node:assert/strict");
-const { accountCommand, accountContext, accountPortfolioSyncMinutes, accountRiskPolicy, accountSymbol, applyPyramidSizing, approvalText, approvedEntryVerdict, brokerEnvironments, buyApprovalRequiredForBroker, discordMessagePayload, enabledBrokerIds, enforceOpenRiskLimit, enforceOwnAccountRules, errorReportDue, invalidationExitReason, liveAutoBuyEligible, momentumExitRecommendation, orderNeedsPortfolioSync, orderNeedsResultReport, orderStatusUnknown, pyramidPlan, readOnlySignalAllowed, reconcilePendingBrokerOrders, requiresExistingPosition, shouldConsumeMessage, SignalReceiptStore, skippedNoPosition, trackedPortfolio, verificationDelayMs } = require("../src/executor/account-executor");
+const { accountCommand, accountContext, accountPortfolioSyncMinutes, accountRiskPolicy, accountSymbol, applyPyramidSizing, approvalText, approvedEntryVerdict, brokerEnvironments, buyApprovalRequiredForBroker, discordMessagePayload, enabledBrokerIds, enforceOpenRiskLimit, enforceOwnAccountRules, errorReportDue, executionPreview, invalidationExitReason, liveAutoBuyEligible, momentumExitRecommendation, orderNeedsPortfolioSync, orderNeedsResultReport, orderStatusUnknown, pyramidPlan, readOnlySignalAllowed, reconcilePendingBrokerOrders, requiresExistingPosition, shouldConsumeMessage, SignalReceiptStore, skippedNoPosition, trackedPortfolio, verificationDelayMs } = require("../src/executor/account-executor");
 const { calculateWebhookPositionPreview } = require("../src/trading/position-sizer");
 
 assert.deepEqual(enabledBrokerIds({ ACCOUNT_EXECUTOR_ENABLED: "true", EXECUTOR_KIWOOM_ENABLED: "true", EXECUTOR_KIS_ENABLED: "true" }), ["KIWOOM", "KIS"]);
@@ -122,6 +122,12 @@ assert.deepEqual(skippedNoPosition({ payload: { action: "BUY" }, risk: { verdict
 assert.deepEqual(skippedNoPosition({ payload: { action: "SELL" }, risk: { verdict: "PAPER_EXIT" } }, { hasExistingPosition: false }), { status: "SKIPPED_NO_POSITION", reason: "해당 계좌 미보유" });
 assert.equal(skippedNoPosition({ payload: { action: "SELL" }, risk: { verdict: "PAPER_EXIT" } }, { hasExistingPosition: true }), null);
 assert.equal(skippedNoPosition({ payload: { action: "BUY" }, risk: { verdict: "PAPER_ENTRY" } }, { hasExistingPosition: false }), null);
+const heldSell = { payload: { action: "SELL" }, risk: { verdict: "PAPER_EXIT" } };
+const heldSellPreview = executionPreview(heldSell, { hasExistingPosition: true, currentPositionQuantity: 63, currentPositionValue: 7_000 }, null);
+assert.equal(heldSellPreview.hasExistingPosition, true);
+assert.equal(heldSellPreview.quantity, 63);
+assert.equal(skippedNoPosition(heldSell, heldSellPreview), null);
+assert.deepEqual(executionPreview(heldSell, { hasExistingPosition: false, currentPositionQuantity: 0 }, null), { hasExistingPosition: false, currentPositionQuantity: 0, blocked: false, quantity: 0 });
 
 assert.deepEqual(momentumExitRecommendation({
   hasExistingPosition: true, currentPositionQuantity: 10, positionProfitRate: 3.2,
@@ -208,6 +214,8 @@ assert.equal(enforceOpenRiskLimit({
   blocked: false, capitalOnly: false, currentOpenRisk: 50_000, stopLossAmount: 20_000,
   maxOpenRisk: 75_000, maxOpenRiskRatio: 0.015, quantity: 2,
 }).blocked, false);
+const exitRiskPreview = { blocked: false, quantity: 63, hasExistingPosition: true };
+assert.equal(enforceOpenRiskLimit(exitRiskPreview), exitRiskPreview);
 
 (async () => {
   const context = await accountContext({
@@ -217,6 +225,23 @@ assert.equal(enforceOpenRiskLimit({
   }, { payload: { exchange: "NYSE", ticker: "SE", price: 121.18 } }, 5);
   assert.equal(context.accountPositionRatio, 7625.52 / (92294.675 + 7625.52) * 100);
   assert.equal(context.autoCapital, null);
+
+  const exitCalls: string[] = [];
+  const exitContext = await accountContext({
+    getDomesticBalance: async () => { throw new Error("국내 잔고를 조회하면 안 됨"); },
+    getUsBalances: async () => { throw new Error("전체 미국 잔고를 조회하면 안 됨"); },
+    getUsBalance: async ({ exchange }) => {
+      exitCalls.push(exchange);
+      return { holdings: [{ code: "SE", quantity: 63, tradableQuantity: 63, evaluationAmount: 7_000 }] };
+    },
+    getUsCash: async () => { throw new Error("매도 때 주문가능현금을 조회하면 안 됨"); },
+  }, { payload: { action: "SELL", exchange: "NYSE", ticker: "SE", price: 113.41 }, risk: { verdict: "PAPER_EXIT" } }, 5, {
+    positionOnly: true,
+  });
+  assert.deepEqual(exitCalls, ["NY"]);
+  assert.equal(exitContext.hasExistingPosition, true);
+  assert.equal(exitContext.currentPositionQuantity, 63);
+  assert.equal(exitContext.currentHoldings[0].tradableQuantity, 63);
 
   const liveDomestic = await accountContext({
     getDomesticBalance: async () => ({ estimatedAssets: 50_000_000, totalEvaluation: 50_000_000, holdings: [] }),

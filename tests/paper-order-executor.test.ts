@@ -10,6 +10,7 @@ const {
   isUsBuySession, isUsMarketClosedError, isUsOrderSession, isUsRegularSession,
   shouldDeferEntry, shouldDeferOrder, shouldDeferUsEntry, shouldDelayEntry, shouldDelayOrder, shouldDelayUsEntry, usSession,
   partialExitQuantity, partialExitRatio, partialExitStage,
+  previewTradableQuantity,
   refreshPaperOrder, submitPaperOrder, trackPaperOrder, submitPaperTestOrder, trackPaperTestOrder,
 } = require("../src/trading/paper-order-executor");
 
@@ -99,6 +100,9 @@ const record = {
   assert.equal(partialExitRatio({ outcome: { signal: { signalCode: "TAKE_PROFIT", tpLevel: 2 } } }, {}), 0.5);
   assert.equal(partialExitStage({ outcome: { signal: { signalCode: "EXIT_PARTIAL_1" } } }), "TP1");
   assert.equal(partialExitStage({ outcome: { signal: { signalCode: "TAKE_PROFIT", tpLevel: 2 } } }), "TP2");
+  assert.equal(previewTradableQuantity({ currentHoldings: [{ code: "SE", tradableQuantity: 63 }] }, "SE"), 63);
+  assert.equal(previewTradableQuantity({ currentHoldings: [{ code: "A005930", tradableQuantity: 8 }] }, "005930"), 8);
+  assert.equal(previewTradableQuantity(null, "SE"), null);
   assert.equal((await submitPaperTestOrder({ ...record, payload: { ...record.payload, ticker: "000001" } }, options)).status, "BLOCKED");
   const accepted = await submitPaperTestOrder(record, options);
   assert.equal(accepted.orderQuantity, 1);
@@ -143,6 +147,26 @@ const record = {
   assert.equal(auto.initialEntryQuantity, 8);
   assert.equal(auto.limitPrice, 241.2);
   assert.equal(auto.referencePrice, 240);
+  const usExit = await submitPaperOrder({
+    requestId: "sell-se",
+    payload: { ticker: "SE", exchange: "NYSE", action: "SELL", price: 113.41 },
+    risk: { verdict: "PAPER_EXIT" },
+    positionPreview: { currentHoldings: [{ code: "SE", quantity: 63, tradableQuantity: 63 }], hasExistingPosition: true },
+  }, {
+    enabled: true,
+    environment: "mock",
+    domesticClient: options.client,
+    overseasClient: {
+      getUsBalance: async () => { throw new Error("보유 확인 뒤 잔고를 중복 조회하면 안 됨"); },
+      placeUsLimitOrder: async ({ side, exchange, symbol, quantity, price }) => ({
+        status: "ACCEPTED", orderNo: "000000917", side, exchange, symbol, orderQuantity: quantity, price,
+      }),
+    },
+    tracker: autoTracker,
+  });
+  assert.equal(usExit.side, "SELL");
+  assert.equal(usExit.orderQuantity, 63);
+  assert.equal(usExit.fullExit, true);
   assert.equal((await refreshPaperOrder(auto, {
     domesticClient: options.client, overseasClient, tracker: autoTracker,
   })).status, "FILLED");
