@@ -58,6 +58,12 @@ const emptyBroker = (id, label): any => ({
   assert.equal(snapshot[0].account_type, "paper");
   assert.equal(snapshot[0].all.win_rate, 100);
   assert.equal(snapshot[0].realized.KRW.profit_loss, 10_000);
+  const draw = tradingPerformanceSnapshot([{ ...emptyBroker("KIS", "한투"), tracker: { list: () => [
+    { environment: "live", status: "FILLED", side: "SELL", fullExit: true, market: "NASDAQ", symbol: "AAPL", filledQuantity: 1, fillPrice: 100, preTradeAverageEntryPrice: 100 },
+  ] } }], "2026-08-10T00:00:00.000Z")[0];
+  assert.equal(draw.all.count, 1);
+  assert.equal(draw.all.draws, 1);
+  assert.equal(draw.all.win_rate, null);
 
   const mixedBroker = emptyBroker("KIWOOM", "키움");
   mixedBroker.tracker.list = () => [
