@@ -31,6 +31,7 @@ const emptyBroker = (id, label): any => ({
   };
   const result = await syncAccountPortfolio(channel, [emptyBroker("KIWOOM", "키움"), emptyBroker("KIS", "한투")], "2026-08-26T00:00:00.000Z");
   assert.equal(result.message.id, "portfolio-1");
+  assert.equal(result.accounts.length, 2);
   assert.deepEqual([...result.succeededBrokerIds], ["KIWOOM", "KIS"]);
   assert.match(editedPayload.embeds[0].description, /키움 모의계좌/);
   assert.match(editedPayload.embeds[0].description, /한투 실계좌/);

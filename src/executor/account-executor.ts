@@ -8,6 +8,7 @@ const { decodeSignalEmbed } = require("../discord/discord-signal-envelope");
 const { KiwoomClient, kiwoomCredentials } = require("../brokers/kiwoom-client");
 const { KisClient, kisCredentials } = require("../brokers/kis-client");
 const { enrichInstrumentNames, formatInstrumentLabel } = require("../research/instrument-names");
+const { stockBriefingSyncReady, syncStockBriefingHoldings } = require("../integrations/stock-briefing");
 const { OrderTracker } = require("../trading/order-tracker");
 const {
   domesticSession,
@@ -807,6 +808,14 @@ async function start() {
     const result = await syncAccountPortfolio(await targetChannel(channels.portfolio), brokers);
     for (const failure of result.failures) {
       await reportError(`${failure.label} 포트폴리오 조회 실패`, failure.reason);
+    }
+    if (process.env.STOCK_BRIEFING_TOKEN && stockBriefingSyncReady(result, brokers.length)) {
+      try {
+        const synced = await syncStockBriefingHoldings(result.accounts);
+        console.log(`Stock-Briefing 보유종목 동기화: ${synced.synced}종목`);
+      } catch (error) {
+        await reportError("Stock-Briefing 보유종목 동기화 실패", error);
+      }
     }
     return result;
   }

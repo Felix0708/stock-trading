@@ -215,7 +215,7 @@ async function syncAccountPortfolio(channel, brokers, updatedAt = new Date().toI
   const performancePayload = formatTradingPerformanceMessage(brokers, updatedAt);
   const existingPerformance = [...recent.values()].find((candidate) => candidate.embeds?.some((embed) => embed.title === "자동매매 누적 성과"));
   const performanceMessage = existingPerformance ? await existingPerformance.edit(performancePayload) : await channel.send(performancePayload);
-  return { message, performanceMessage, succeededBrokerIds: new Set(accounts.map((account) => account.id)), failures };
+  return { message, performanceMessage, accounts, succeededBrokerIds: new Set(accounts.map((account) => account.id)), failures };
 }
 
 module.exports = { brokerPortfolio, calculateTradingPerformance, formatTradingPerformanceMessage, syncAccountPortfolio };

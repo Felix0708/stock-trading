@@ -38,6 +38,10 @@ const { collectTelegramDay, previousDate } = require("../research/telegram-colle
 const { createBuyApproval, findBuyApproval, parseBuyApprovalCommand } = require("../executor/buy-approval");
 const { enrichInstrumentNames, formatInstrumentLabel } = require("../research/instrument-names");
 const {
+  formatStockBriefingContext,
+  loadStockBriefingImportantFilings,
+} = require("../integrations/stock-briefing");
+const {
   formatDuquesne13fContext,
   formatInvestorPortfolioMessage,
   formatInvestorPortfolioMessages,
@@ -955,8 +959,38 @@ async function usMarketContext(clock) {
   };
 }
 
+function morningBriefingSources(marketPrompt, filings) {
+  return [
+    "최종 장전 브리핑은 아래 1→4 순서를 유지하세요.",
+    "1. 최근 지표",
+    marketPrompt,
+    filings,
+    "4. 뉴스·거시환경",
+    "최신 웹 검색으로 금리·환율·유가·VIX·수급·주요 뉴스와 향후 5거래일 일정을 확인하세요.",
+    "공시는 참고자료일 뿐이며 공시나 뉴스만으로 자동 주문을 제안하거나 실행 조건으로 해석하지 마세요.",
+  ].join("\n\n");
+}
+
 async function briefingSourceContext(clock) {
-  return clock.time === "15:40" ? domesticCloseContext(clock) : usMarketContext(clock);
+  if (clock.time === "15:40") return domesticCloseContext(clock);
+  const market = await usMarketContext(clock);
+  if (clock.time !== "08:30") return market;
+  let filings;
+  try {
+    filings = formatStockBriefingContext(await loadStockBriefingImportantFilings());
+  } catch (error) {
+    filings = [
+      "2. 관심·보유 대상 상태(익명)",
+      "- Stock-Briefing 조회 실패로 현재 상태를 확정하지 못했습니다.",
+      "3. 최신 공시 요약·원문",
+      `- 조회 실패: ${String(error?.message || error).slice(0, 200)}`,
+      "- 공시 조회 실패를 미보유나 공시 없음으로 해석하지 마세요.",
+    ].join("\n");
+  }
+  return {
+    prompt: morningBriefingSources(market.prompt, filings),
+    fallback: market.fallback,
+  };
 }
 
 function findTextChannelByName(name) {
@@ -2010,7 +2044,7 @@ async function checkScheduledBriefing(now = new Date(), forceTime = "") {
     saveState();
     const responses = await runGroupDiscussion(
       { channel },
-      `${scheduledTopic(clock.time)}\n\n${sourceContext.prompt}\n\n반드시 최신 웹 검색과 제공된 스냅샷을 함께 사용해 브리핑을 완성하세요. 확인되지 않은 수치를 추정하지 마세요.`,
+      `${sourceContext.prompt}\n\n추가 확인사항:\n${scheduledTopic(clock.time)}\n\n반드시 최신 웹 검색과 제공된 스냅샷을 함께 사용해 브리핑을 완성하세요. 확인되지 않은 수치를 추정하지 마세요.`,
       {
         includeResearch: true,
         includeResearchImages: false,
@@ -2629,6 +2663,13 @@ function selfTest() {
   const clock = zonedClock(new Date("2026-08-07T23:30:00.000Z"));
   if (clock.date !== "2026-08-08" || clock.time !== "08:30" || clock.weekday !== "Sat") throw new Error("자동 브리핑 시간대 계산 실패");
   if (!scheduledTopic("08:30").includes("장전 브리핑")) throw new Error("자동 브리핑 주제 선택 실패");
+  const morningSources = morningBriefingSources("지표", "2. 익명 상태\n3. 공시");
+  if (!(morningSources.indexOf("1. 최근 지표") < morningSources.indexOf("2. 익명 상태")
+      && morningSources.indexOf("2. 익명 상태") < morningSources.indexOf("3. 공시")
+      && morningSources.indexOf("3. 공시") < morningSources.indexOf("4. 뉴스·거시환경"))
+      || !morningSources.includes("자동 주문을 제안하거나 실행 조건으로 해석하지 마세요")) {
+    throw new Error("08:30 브리핑 근거 순서 또는 주문 분리 실패");
+  }
   const usSnapshot = formatUsMarketSnapshot([{
     label: "S&P500 ETF SPY",
     quote: { currentPrice: 650.12, changeRate: -0.42, dayLow: 648.5, dayHigh: 653.25 },
