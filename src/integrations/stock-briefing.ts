@@ -4,6 +4,7 @@ const DEFAULT_API_URL = "https://web-mu-inky-93.vercel.app";
 const DEFAULT_PUBLIC_DATA_URL = "https://felix0708.github.io/stock-briefing/data";
 const TOKEN_PATTERN = /^sb_sync_[A-Za-z0-9_-]{43}$/;
 const CODE_PATTERNS = { KR: /^[0-9]{6}$/, US: /^[A-Z][A-Z0-9.-]{0,9}$/ };
+const BROKERS = new Set(["KIWOOM", "KIS"]);
 const FILING_HOSTS = {
   KR: new Set(["dart.fss.or.kr"]),
   US: new Set(["www.sec.gov", "sec.gov"]),
@@ -37,6 +38,8 @@ function holdingName(holding, market, code) {
 function stockBriefingSnapshot(accounts) {
   const positions = new Map();
   for (const account of accounts || []) {
+    const broker = String(account.id || "").toUpperCase();
+    if (!BROKERS.has(broker)) throw new Error(`Stock-Briefing 증권사가 올바르지 않습니다: ${broker || "없음"}`);
     const accountType = account.environment === "live" ? "live" : "paper";
     const groups = [
       ["KR", account.domestic?.holdingPositions || []],
@@ -50,10 +53,10 @@ function stockBriefingSnapshot(accounts) {
         if (!CODE_PATTERNS[market].test(code)) throw new Error(`Stock-Briefing ${market} 종목코드가 올바르지 않습니다: ${code || "없음"}`);
         const price = averagePrice(holding);
         if (!price) throw new Error(`Stock-Briefing 평단가를 확인할 수 없습니다: ${code}`);
-        const key = `${market}:${code}:${accountType}`;
+        const key = `${broker}:${market}:${code}:${accountType}`;
         const current = positions.get(key) || {
           market, stock_code: code, stock_name: holdingName(holding, market, code),
-          quantity: 0, cost: 0, account_type: accountType,
+          quantity: 0, cost: 0, account_type: accountType, broker,
         };
         current.quantity += quantity;
         current.cost += quantity * price;
@@ -64,8 +67,8 @@ function stockBriefingSnapshot(accounts) {
   if (positions.size > MAX_HOLDINGS) throw new Error(`Stock-Briefing 동기화 종목은 최대 ${MAX_HOLDINGS}개입니다.`);
   return [...positions.values()]
     .map(({ cost, ...holding }) => ({ ...holding, avg_price: cost / holding.quantity }))
-    .sort((left, right) => `${left.account_type}:${left.market}:${left.stock_code}`
-      .localeCompare(`${right.account_type}:${right.market}:${right.stock_code}`));
+    .sort((left, right) => `${left.account_type}:${left.broker}:${left.market}:${left.stock_code}`
+      .localeCompare(`${right.account_type}:${right.broker}:${right.market}:${right.stock_code}`));
 }
 
 function stockBriefingSyncReady(result, expectedAccounts) {

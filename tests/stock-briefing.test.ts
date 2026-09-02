@@ -11,6 +11,7 @@ const {
 
 const accounts = [
   {
+    id: "KIWOOM",
     environment: "mock",
     domestic: { holdingPositions: [
       { code: "A005930", name: "삼성전자", quantity: 10, purchasePrice: 70_000 },
@@ -20,6 +21,7 @@ const accounts = [
     ] },
   },
   {
+    id: "KIS",
     environment: "mock",
     domestic: { holdingPositions: [
       { code: "005930", name: "삼성전자", quantity: 5, purchaseAmount: 400_000 },
@@ -27,6 +29,7 @@ const accounts = [
     overseas: { holdingPositions: [] },
   },
   {
+    id: "KIS",
     environment: "live",
     domestic: { holdingPositions: [
       { code: "005930", name: "삼성전자", quantity: 1, purchasePrice: 90_000 },
@@ -36,20 +39,30 @@ const accounts = [
 ];
 
 const snapshot = stockBriefingSnapshot(accounts);
-assert.equal(snapshot.length, 3);
-assert.deepEqual(snapshot.find((holding) => holding.market === "KR" && holding.account_type === "paper"), {
+assert.equal(snapshot.length, 4);
+assert.deepEqual(snapshot.find((holding) => holding.market === "KR" && holding.account_type === "paper" && holding.broker === "KIWOOM"), {
   market: "KR", stock_code: "005930", stock_name: "삼성전자",
-  quantity: 15, account_type: "paper", avg_price: 1_100_000 / 15,
+  quantity: 10, account_type: "paper", broker: "KIWOOM", avg_price: 70_000,
+});
+assert.deepEqual(snapshot.find((holding) => holding.market === "KR" && holding.account_type === "paper" && holding.broker === "KIS"), {
+  market: "KR", stock_code: "005930", stock_name: "삼성전자",
+  quantity: 5, account_type: "paper", broker: "KIS", avg_price: 80_000,
 });
 assert.equal(snapshot.find((holding) => holding.market === "KR" && holding.account_type === "live").avg_price, 90_000);
 assert.equal(snapshot.find((holding) => holding.market === "US").stock_name, "Apple");
 assert.equal(stockBriefingSyncReady({ accounts, failures: [] }, 3), true);
 assert.equal(stockBriefingSyncReady({ accounts: accounts.slice(1), failures: [{ label: "키움" }] }, 3), false);
 assert.throws(() => stockBriefingSnapshot([{
+  id: "KIWOOM",
   environment: "mock",
   domestic: { holdingPositions: [{ code: "005930", name: "삼성전자", quantity: 1 }] },
   overseas: { holdingPositions: [] },
 }]), /평단가/);
+assert.throws(() => stockBriefingSnapshot([{
+  id: "UNKNOWN",
+  environment: "mock",
+  domestic: { holdingPositions: [] }, overseas: { holdingPositions: [] },
+}]), /증권사/);
 
 (async () => {
   const token = `sb_sync_${"a".repeat(43)}`;
@@ -59,13 +72,14 @@ assert.throws(() => stockBriefingSnapshot([{
     apiUrl: "https://briefing.example",
     fetchImpl: async (url, init) => {
       request = { url, init };
-      return Response.json({ ok: true, synced: 3 });
+      return Response.json({ ok: true, synced: 4 });
     },
   });
-  assert.equal(synced.synced, 3);
+  assert.equal(synced.synced, 4);
   assert.equal(request.url, "https://briefing.example/api/sync/holdings");
   assert.equal(request.init.headers.Authorization, `Bearer ${token}`);
-  assert.equal(JSON.parse(request.init.body).holdings.length, 3);
+  assert.equal(JSON.parse(request.init.body).holdings.length, 4);
+  assert.deepEqual(new Set(JSON.parse(request.init.body).holdings.map((holding) => holding.broker)), new Set(["KIWOOM", "KIS"]));
 
   let calls = 0;
   await assert.rejects(() => syncStockBriefingHoldings(accounts, {
