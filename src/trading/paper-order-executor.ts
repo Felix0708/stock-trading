@@ -256,6 +256,7 @@ async function submitPaperOrder(record: SignalRecord, options: ExecutorOptions) 
     ...order, orderQuantity: quantity, filledQuantity: 0, remainingQuantity: quantity,
     orderStyle, orderStrategy, marketFallbackAllowed, limitPrice, referencePrice,
     brokerLabel: options.brokerLabel || "키움 모의계좌",
+    environment: options.environment,
     source: record.source || "TRADINGVIEW", market: exchange, name: payload.name,
     koreanName: payload.koreanName, englishName: payload.englishName,
     signalType: payload.type, signalPrice: payload.price, stopPrice: positionPreview?.stopPrice ?? payload.sl,
@@ -275,6 +276,8 @@ async function submitPaperOrder(record: SignalRecord, options: ExecutorOptions) 
     autoCapital: positionPreview?.autoCapital,
     autoCapitalRatio: positionPreview?.autoCapitalRatio,
     preTradePositionValue: positionPreview?.currentPositionValue,
+    preTradePositionQuantity: positionPreview?.currentPositionQuantity,
+    preTradeAverageEntryPrice: positionPreview?.averageEntryPrice,
     currency: positionPreview?.currency || (exchange === "KRX" ? "KRW" : "USD"),
   });
 }
