@@ -811,7 +811,7 @@ async function start() {
     }
     if (process.env.STOCK_BRIEFING_TOKEN && stockBriefingSyncReady(result, brokers.length)) {
       try {
-        const synced = await syncStockBriefingHoldings(result.accounts);
+        const synced = await syncStockBriefingHoldings(result.accounts, { performance: result.performance });
         console.log(`Stock-Briefing 보유종목 동기화: ${synced.synced}종목`);
       } catch (error) {
         await reportError("Stock-Briefing 보유종목 동기화 실패", error);

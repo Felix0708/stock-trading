@@ -1,7 +1,7 @@
 "use strict";
 
 const assert = require("node:assert/strict");
-const { calculateTradingPerformance, syncAccountPortfolio } = require("../src/executor/account-portfolio");
+const { calculateTradingPerformance, syncAccountPortfolio, tradingPerformanceSnapshot } = require("../src/executor/account-portfolio");
 
 const emptyBroker = (id, label): any => ({
   id, label, environment: id === "KIS" ? "live" : "mock",
@@ -36,6 +36,8 @@ const emptyBroker = (id, label): any => ({
   assert.match(editedPayload.embeds[0].description, /키움 모의계좌/);
   assert.match(editedPayload.embeds[0].description, /한투 실계좌/);
   assert.match(performancePayload.embeds[0].description, /역대.*완료 0건/);
+  assert.equal(result.performance.length, 2);
+  assert.deepEqual(result.performance[0].all, { count: 0, wins: 0, losses: 0, draws: 0, win_rate: null });
 
   const performance = calculateTradingPerformance([
     { revision: 1, status: "FILLED", side: "BUY", entryType: "PAPER_ENTRY", market: "NASDAQ", symbol: "AAPL", currency: "USD", filledQuantity: 10, fillPrice: 100, updatedAt: "2026-08-01T00:00:00.000Z" },
@@ -49,6 +51,13 @@ const emptyBroker = (id, label): any => ({
   assert.equal(performance.all.currencies.USD.returnRate, -4);
   assert.equal(performance.month.count, 1);
   assert.equal(performance.excludedFullExits, 1);
+  const snapshot = tradingPerformanceSnapshot([{ ...emptyBroker("KIWOOM", "키움"), tracker: { list: () => [
+    { environment: "mock", revision: 1, status: "FILLED", side: "SELL", fullExit: true, market: "KRX", symbol: "005930", filledQuantity: 1, fillPrice: 80_000, preTradeAverageEntryPrice: 70_000, updatedAt: "2026-08-04T00:00:00.000Z" },
+  ] } }], "2026-08-10T00:00:00.000Z");
+  assert.equal(snapshot[0].broker, "KIWOOM");
+  assert.equal(snapshot[0].account_type, "paper");
+  assert.equal(snapshot[0].all.win_rate, 100);
+  assert.equal(snapshot[0].realized.KRW.profit_loss, 10_000);
 
   const mixedBroker = emptyBroker("KIWOOM", "키움");
   mixedBroker.tracker.list = () => [

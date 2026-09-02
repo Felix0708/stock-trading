@@ -114,6 +114,33 @@ function calculateTradingPerformance(orders, now = new Date()) {
   };
 }
 
+function brokerOrders(broker) {
+  const accountKind = broker.environment === "live" ? "실계좌" : "모의계좌";
+  return (broker.tracker?.list?.() || []).filter((order) => order.environment
+    ? order.environment === broker.environment
+    : String(order.brokerLabel || "").includes(accountKind));
+}
+
+function tradingPerformanceSnapshot(brokers, updatedAt = new Date().toISOString()) {
+  return brokers.map((broker) => {
+    const performance = calculateTradingPerformance(brokerOrders(broker), new Date(updatedAt));
+    const summary = ({ count, wins, losses, draws, winRate }) => ({ count, wins, losses, draws, win_rate: winRate });
+    const realized = Object.fromEntries(["KRW", "USD"].map((currency) => {
+      const result = performance.all.currencies[currency];
+      return [currency, { count: result.count, profit_loss: result.profitLoss, return_rate: result.returnRate }];
+    }));
+    return {
+      broker: broker.id,
+      account_type: broker.environment === "live" ? "live" : "paper",
+      all: summary(performance.all),
+      month: summary(performance.month),
+      realized,
+      excluded_full_exits: performance.excludedFullExits,
+      updated_at: updatedAt,
+    };
+  });
+}
+
 function percentage(value) {
   return Number.isFinite(value) ? `${value.toFixed(1)}%` : "-";
 }
@@ -133,10 +160,7 @@ function summaryLine(label, summary) {
 function formatTradingPerformanceMessage(brokers, updatedAt) {
   const description = brokers.flatMap((broker, index) => {
     const accountKind = broker.environment === "live" ? "실계좌" : "모의계좌";
-    const orders = (broker.tracker?.list?.() || []).filter((order) => order.environment
-      ? order.environment === broker.environment
-      : String(order.brokerLabel || "").includes(accountKind));
-    const performance = calculateTradingPerformance(orders);
+    const performance = calculateTradingPerformance(brokerOrders(broker));
     const results = ["KRW", "USD"].flatMap((currency) => {
       const result = performance.all.currencies[currency];
       if (!result.count) return [];
@@ -215,7 +239,20 @@ async function syncAccountPortfolio(channel, brokers, updatedAt = new Date().toI
   const performancePayload = formatTradingPerformanceMessage(brokers, updatedAt);
   const existingPerformance = [...recent.values()].find((candidate) => candidate.embeds?.some((embed) => embed.title === "자동매매 누적 성과"));
   const performanceMessage = existingPerformance ? await existingPerformance.edit(performancePayload) : await channel.send(performancePayload);
-  return { message, performanceMessage, accounts, succeededBrokerIds: new Set(accounts.map((account) => account.id)), failures };
+  return {
+    message,
+    performanceMessage,
+    accounts,
+    performance: tradingPerformanceSnapshot(brokers, updatedAt),
+    succeededBrokerIds: new Set(accounts.map((account) => account.id)),
+    failures,
+  };
 }
 
-module.exports = { brokerPortfolio, calculateTradingPerformance, formatTradingPerformanceMessage, syncAccountPortfolio };
+module.exports = {
+  brokerPortfolio,
+  calculateTradingPerformance,
+  formatTradingPerformanceMessage,
+  syncAccountPortfolio,
+  tradingPerformanceSnapshot,
+};

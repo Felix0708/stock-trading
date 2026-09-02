@@ -18,6 +18,7 @@ const accounts = [
     ] },
     overseas: { holdingPositions: [
       { code: "AAPL", englishName: "Apple", quantity: 2, purchasePrice: 100 },
+      { code: "ZETA", name: "제타 글로벌 홀딩스", quantity: 2, purchasePrice: 30 },
     ] },
   },
   {
@@ -26,7 +27,9 @@ const accounts = [
     domestic: { holdingPositions: [
       { code: "005930", name: "삼성전자", quantity: 5, purchaseAmount: 400_000 },
     ] },
-    overseas: { holdingPositions: [] },
+    overseas: { holdingPositions: [
+      { code: "ZETA", englishName: "Zeta Global Holdings Corp.", quantity: 3, purchasePrice: 31 },
+    ] },
   },
   {
     id: "KIS",
@@ -39,7 +42,7 @@ const accounts = [
 ];
 
 const snapshot = stockBriefingSnapshot(accounts);
-assert.equal(snapshot.length, 4);
+assert.equal(snapshot.length, 6);
 assert.deepEqual(snapshot.find((holding) => holding.market === "KR" && holding.account_type === "paper" && holding.broker === "KIWOOM"), {
   market: "KR", stock_code: "005930", stock_name: "삼성전자",
   quantity: 10, account_type: "paper", broker: "KIWOOM", avg_price: 70_000,
@@ -49,7 +52,10 @@ assert.deepEqual(snapshot.find((holding) => holding.market === "KR" && holding.a
   quantity: 5, account_type: "paper", broker: "KIS", avg_price: 80_000,
 });
 assert.equal(snapshot.find((holding) => holding.market === "KR" && holding.account_type === "live").avg_price, 90_000);
-assert.equal(snapshot.find((holding) => holding.market === "US").stock_name, "Apple");
+assert.equal(snapshot.find((holding) => holding.stock_code === "AAPL").stock_name, "Apple");
+assert.deepEqual(snapshot.filter((holding) => holding.stock_code === "ZETA").map((holding) => holding.stock_name), [
+  "제타 글로벌 홀딩스", "제타 글로벌 홀딩스",
+]);
 assert.equal(stockBriefingSyncReady({ accounts, failures: [] }, 3), true);
 assert.equal(stockBriefingSyncReady({ accounts: accounts.slice(1), failures: [{ label: "키움" }] }, 3), false);
 assert.throws(() => stockBriefingSnapshot([{
@@ -69,16 +75,18 @@ assert.throws(() => stockBriefingSnapshot([{
   let request;
   const synced = await syncStockBriefingHoldings(accounts, {
     token,
+    performance: [{ broker: "KIWOOM", account_type: "paper", all: { count: 1 } }],
     apiUrl: "https://briefing.example",
     fetchImpl: async (url, init) => {
       request = { url, init };
-      return Response.json({ ok: true, synced: 4 });
+      return Response.json({ ok: true, synced: 6 });
     },
   });
-  assert.equal(synced.synced, 4);
+  assert.equal(synced.synced, 6);
   assert.equal(request.url, "https://briefing.example/api/sync/holdings");
   assert.equal(request.init.headers.Authorization, `Bearer ${token}`);
-  assert.equal(JSON.parse(request.init.body).holdings.length, 4);
+  assert.equal(JSON.parse(request.init.body).holdings.length, 6);
+  assert.equal(JSON.parse(request.init.body).performance[0].all.count, 1);
   assert.deepEqual(new Set(JSON.parse(request.init.body).holdings.map((holding) => holding.broker)), new Set(["KIWOOM", "KIS"]));
 
   let calls = 0;

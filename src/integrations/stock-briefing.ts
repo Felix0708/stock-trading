@@ -37,6 +37,7 @@ function holdingName(holding, market, code) {
 
 function stockBriefingSnapshot(accounts) {
   const positions = new Map();
+  const canonicalNames = new Map();
   for (const account of accounts || []) {
     const broker = String(account.id || "").toUpperCase();
     if (!BROKERS.has(broker)) throw new Error(`Stock-Briefing 증권사가 올바르지 않습니다: ${broker || "없음"}`);
@@ -53,9 +54,11 @@ function stockBriefingSnapshot(accounts) {
         if (!CODE_PATTERNS[market].test(code)) throw new Error(`Stock-Briefing ${market} 종목코드가 올바르지 않습니다: ${code || "없음"}`);
         const price = averagePrice(holding);
         if (!price) throw new Error(`Stock-Briefing 평단가를 확인할 수 없습니다: ${code}`);
+        const instrumentKey = `${market}:${code}`;
+        if (!canonicalNames.has(instrumentKey)) canonicalNames.set(instrumentKey, holdingName(holding, market, code));
         const key = `${broker}:${market}:${code}:${accountType}`;
         const current = positions.get(key) || {
-          market, stock_code: code, stock_name: holdingName(holding, market, code),
+          market, stock_code: code, stock_name: canonicalNames.get(instrumentKey),
           quantity: 0, cost: 0, account_type: accountType, broker,
         };
         current.quantity += quantity;
@@ -86,6 +89,7 @@ async function responseJson(response, maxLength = 1_000_000) {
 }
 
 async function syncStockBriefingHoldings(accounts, {
+  performance = [],
   token = process.env.STOCK_BRIEFING_TOKEN,
   apiUrl = process.env.STOCK_BRIEFING_URL,
   fetchImpl = fetch,
@@ -97,7 +101,7 @@ async function syncStockBriefingHoldings(accounts, {
     response = await fetchImpl(`${baseUrl(apiUrl, DEFAULT_API_URL)}/api/sync/holdings`, {
       method: "PUT",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-      body: JSON.stringify({ holdings }),
+      body: JSON.stringify({ holdings, performance }),
       signal: AbortSignal.timeout(10_000),
     });
   } catch {
@@ -108,7 +112,7 @@ async function syncStockBriefingHoldings(accounts, {
     const detail = typeof payload.error === "string" ? `: ${payload.error.slice(0, 200)}` : "";
     throw new Error(`Stock-Briefing 보유종목 동기화 실패 (${response.status})${detail}`);
   }
-  return { synced: Number(payload.synced) || 0, holdings };
+  return { synced: Number(payload.synced) || 0, holdings, performance };
 }
 
 function plainText(value, maxLength = 600) {
