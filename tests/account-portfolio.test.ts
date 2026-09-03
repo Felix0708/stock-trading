@@ -1,7 +1,7 @@
 "use strict";
 
 const assert = require("node:assert/strict");
-const { calculateTradingPerformance, syncAccountPortfolio, tradingPerformanceSnapshot } = require("../src/executor/account-portfolio");
+const { calculateTradingPerformance, harmonizePortfolioNames, syncAccountPortfolio, tradingPerformanceSnapshot } = require("../src/executor/account-portfolio");
 
 const emptyBroker = (id, label): any => ({
   id, label, environment: id === "KIS" ? "live" : "mock",
@@ -38,6 +38,11 @@ const emptyBroker = (id, label): any => ({
   assert.match(performancePayload.embeds[0].description, /역대.*완료 0건/);
   assert.equal(result.performance.length, 2);
   assert.deepEqual(result.performance[0].all, { count: 0, wins: 0, losses: 0, draws: 0, win_rate: null });
+  const harmonized = harmonizePortfolioNames([
+    { domestic: { holdingPositions: [] }, overseas: { holdingPositions: [{ code: "DELL", name: "델 테크놀로지스", koreanName: "델 테크놀로지스" }] } },
+    { domestic: { holdingPositions: [] }, overseas: { holdingPositions: [{ code: "DELL", name: "Dell Technologies Inc", englishName: "Dell Technologies Inc" }] } },
+  ]);
+  assert.deepEqual(harmonized.map((account) => account.overseas.holdingPositions[0].koreanName), ["델 테크놀로지스", "델 테크놀로지스"]);
 
   const performance = calculateTradingPerformance([
     { revision: 1, status: "FILLED", side: "BUY", entryType: "PAPER_ENTRY", market: "NASDAQ", symbol: "AAPL", currency: "USD", filledQuantity: 10, fillPrice: 100, updatedAt: "2026-08-01T00:00:00.000Z" },

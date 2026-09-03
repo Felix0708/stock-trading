@@ -1,7 +1,7 @@
 "use strict";
 
 const assert = require("node:assert/strict");
-const { accountCommand, accountContext, accountPortfolioSyncMinutes, accountRiskPolicy, accountSymbol, applyPyramidSizing, approvalText, approvedEntryVerdict, brokerEnvironments, buyApprovalRequiredForBroker, deferredOrderAttemptDue, discordMessagePayload, enabledBrokerIds, enforceOpenRiskLimit, enforceOwnAccountRules, errorReportDue, executionPreview, invalidationExitReason, liveAutoBuyEligible, marketTransitionRetryDelayMs, momentumExitRecommendation, orderAttemptKey, orderNeedsPortfolioSync, orderNeedsResultReport, orderStatusUnknown, pyramidPlan, readOnlySignalAllowed, reconcilePendingBrokerOrders, requiresExistingPosition, shouldConsumeMessage, shouldRetryMarketTransition, SignalReceiptStore, skippedNoPosition, trackedPortfolio, verificationDelayMs } = require("../src/executor/account-executor");
+const { accountCommand, accountContext, accountPortfolioSyncMinutes, accountRiskPolicy, accountSymbol, applyPyramidSizing, approvalText, approvedEntryVerdict, availableApprovalBrokerIds, brokerEnvironments, buyApprovalRequiredForBroker, deferredOrderAttemptDue, discordMessagePayload, enabledBrokerIds, enforceOpenRiskLimit, enforceOwnAccountRules, errorReportDue, executionPreview, invalidationExitReason, liveAutoBuyEligible, marketTransitionRetryDelayMs, momentumExitRecommendation, orderAttemptKey, orderNeedsPortfolioSync, orderNeedsResultReport, orderStatusUnknown, pyramidPlan, readOnlySignalAllowed, reconcilePendingBrokerOrders, requiresExistingPosition, shouldConsumeMessage, shouldRetryMarketTransition, SignalReceiptStore, skippedNoPosition, trackedPortfolio, verificationDelayMs } = require("../src/executor/account-executor");
 const { calculateWebhookPositionPreview } = require("../src/trading/position-sizer");
 
 assert.deepEqual(enabledBrokerIds({ ACCOUNT_EXECUTOR_ENABLED: "true", EXECUTOR_KIWOOM_ENABLED: "true", EXECUTOR_KIS_ENABLED: "true" }), ["KIWOOM", "KIS"]);
@@ -82,6 +82,12 @@ assert.equal(store.listDeferred()[0].lastError, "temporary auth failure");
 assert.equal(store.listDeferred().length, 1);
 store.removeDeferred(deferred.key);
 assert.equal(store.listDeferred().length, 0);
+const firstEntry = store.putDeferred("KIWOOM", { requestId: "entry-1", payload: { exchange: "NYSE", ticker: "DELL" }, risk: { verdict: "PAPER_ENTRY" } }, 60_000);
+const duplicateEntry = store.putDeferred("KIWOOM", { requestId: "entry-2", payload: { exchange: "NYSE", ticker: "DELL" }, risk: { verdict: "PAPER_ENTRY" } }, 60_000);
+assert.equal(duplicateEntry.key, firstEntry.key);
+assert.equal(store.findDeferredEntry("KIWOOM", duplicateEntry.record).key, firstEntry.key);
+assert.equal(store.listDeferred().length, 1);
+store.removeDeferred(firstEntry.key);
 const verification = store.putDeferred("KIS", { requestId: "request-verify", payload: { exchange: "NASDAQ", ticker: "ABCL" } }, 60_000, { kind: "VERIFY", now: 1_000 });
 assert.equal(store.markVerificationFailure(verification.key, new Error("gateway"), 1_000).nextAttemptAt, 61_000);
 assert.equal(store.markVerificationFailure(verification.key, new Error("gateway"), 61_000).nextAttemptAt, 361_000);
@@ -96,7 +102,10 @@ assert.equal(verificationDelayMs(9), 900_000);
 assert.equal(marketTransitionRetryDelayMs(1), 30_000);
 assert.equal(marketTransitionRetryDelayMs(2), 120_000);
 assert.equal(marketTransitionRetryDelayMs(3), 300_000);
-assert.equal(marketTransitionRetryDelayMs(4), null);
+assert.equal(marketTransitionRetryDelayMs(4), 900_000);
+assert.equal(marketTransitionRetryDelayMs(5), 1_800_000);
+assert.equal(marketTransitionRetryDelayMs(6), 3_600_000);
+assert.equal(marketTransitionRetryDelayMs(99), 3_600_000);
 const marketCloseRecord = { payload: { exchange: "NYSE", ticker: "SE", action: "SELL" }, risk: { verdict: "PAPER_EXIT" } };
 const afterOpen = new Date("2026-09-01T20:00:05.000Z");
 assert.equal(orderAttemptKey(marketCloseRecord, afterOpen), "2026-09-01:AFTER");
@@ -117,7 +126,9 @@ assert.equal(transitionState.nextAttemptAt, 451_000);
 assert.equal(deferredOrderAttemptDue(transitionState, "2026-09-01:AFTER", 451_000), true);
 transitionState = store.markMarketTransitionFailure(transition.key, "2026-09-01:AFTER", new Error("장종료"), 451_000);
 assert.equal(transitionState.orderRetryAttempts, 4);
-assert.equal(deferredOrderAttemptDue(transitionState, "2026-09-01:AFTER", Number.MAX_SAFE_INTEGER), false);
+assert.equal(transitionState.nextAttemptAt, 1_351_000);
+transitionState.nextAttemptAt = Number.MAX_SAFE_INTEGER;
+assert.equal(deferredOrderAttemptDue(transitionState, "2026-09-01:AFTER", 451_000), true);
 assert.equal(deferredOrderAttemptDue(transitionState, "2026-09-02:PRE", 451_000), true);
 store.removeDeferred(transition.key);
 const invalidationRecord = { payload: { exchange: "NYSE", ticker: "SE" } };
@@ -313,6 +324,14 @@ assert.equal(enforceOpenRiskLimit(exitRiskPreview), exitRiskPreview);
   assert.match(approvalText({ payload: { ticker: "AAPL", name: "Apple" } }, {
     KIS: { label: "한투", preview: { blocked: false, quantity: 2, currency: "USD", positionValue: 200, projectedPositionRatio: 5, positionLimitRatio: 0.2, totalAccountEquity: 40_000, autoCapital: 4_000, autoCapitalRatio: 0.1, maxOpenRiskRatio: 0.015 } },
   }, ["KIS"]), /실계좌 안전한도.*자동운용 10%.*동시 손절위험 최대 1\.5%/);
+  const approvalPreviews = {
+    KIWOOM: { label: "키움", preview: { blocked: true, quantity: 0, reason: "Sigma 과열" } },
+    KIS: { label: "한투", preview: { blocked: false, quantity: 2, currency: "USD", positionValue: 200, projectedPositionRatio: 5, positionLimitRatio: 0.2 } },
+  };
+  assert.deepEqual(availableApprovalBrokerIds(approvalPreviews, ["KIWOOM", "KIS"]), ["KIS"]);
+  assert.match(approvalText({ payload: { ticker: "META" } }, approvalPreviews, ["KIS"]), /`한투만` \/ `안 사`/);
+  assert.doesNotMatch(approvalText({ payload: { ticker: "META" } }, approvalPreviews, ["KIS"]), /둘다/);
+  assert.match(approvalText({ payload: { ticker: "META" } }, approvalPreviews, []), /승인 가능한 계좌 없음/);
 
   const changes = await reconcilePendingBrokerOrders({
     tracker: {

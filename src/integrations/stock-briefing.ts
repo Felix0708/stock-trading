@@ -1,5 +1,7 @@
 "use strict";
 
+const { formatInstrumentLabel } = require("../research/instrument-names");
+
 const DEFAULT_API_URL = "https://web-mu-inky-93.vercel.app";
 const DEFAULT_PUBLIC_DATA_URL = "https://felix0708.github.io/stock-briefing/data";
 const TOKEN_PATTERN = /^sb_sync_[A-Za-z0-9_-]{43}$/;
@@ -28,11 +30,8 @@ function averagePrice(holding) {
     ? purchaseAmount / quantity : null;
 }
 
-function holdingName(holding, market, code) {
-  const candidates = market === "US"
-    ? [holding.englishName, holding.name, holding.koreanName]
-    : [holding.koreanName, holding.name, holding.englishName];
-  return String(candidates.find((value) => String(value || "").trim()) || code).trim().slice(0, 50);
+function holdingName(holding, code) {
+  return (formatInstrumentLabel({ ...holding, ticker: code }).replace(/\s*\([^()]+\)$/, "") || code).slice(0, 50);
 }
 
 function stockBriefingSnapshot(accounts) {
@@ -55,7 +54,7 @@ function stockBriefingSnapshot(accounts) {
         const price = averagePrice(holding);
         if (!price) throw new Error(`Stock-Briefing 평단가를 확인할 수 없습니다: ${code}`);
         const instrumentKey = `${market}:${code}`;
-        if (!canonicalNames.has(instrumentKey)) canonicalNames.set(instrumentKey, holdingName(holding, market, code));
+        if (!canonicalNames.has(instrumentKey)) canonicalNames.set(instrumentKey, holdingName(holding, code));
         const key = `${broker}:${market}:${code}:${accountType}`;
         const current = positions.get(key) || {
           market, stock_code: code, stock_name: canonicalNames.get(instrumentKey),

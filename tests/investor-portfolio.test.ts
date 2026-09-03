@@ -51,7 +51,7 @@ const fetchImpl = async (url) => {
     ticker: "005930",
     koreanName: "삼성전자",
     englishName: "Samsung Electronics",
-  }), "삼성전자 / Samsung Electronics (005930)");
+  }), "삼성전자 (005930)");
   const [enriched] = await enrichInstrumentNames(
     [{ exchange: "KRX", ticker: "005930", name: "Samsung Electronics Co Ltd" }],
     { fetchImpl: async (url) => {
@@ -61,15 +61,17 @@ const fetchImpl = async (url) => {
       return { ok: true, json: async () => ({ stockName: "삼성전자" }) };
     } },
   );
-  assert.equal(formatInstrumentLabel(enriched), "삼성전자 / Samsung Electronics Co Ltd (005930)");
+  assert.equal(formatInstrumentLabel(enriched), "삼성전자 (005930)");
   const seaAliases = await enrichInstrumentNames([
     { exchange: "NY", ticker: "SE", name: "씨이에이(ADS)" },
     { exchange: "NYSE", ticker: "SE", name: "Sea Limited Sponsored ADR Class A" },
   ], { fetchImpl: async () => ({ ok: false }) });
   assert.deepEqual(seaAliases.map(formatInstrumentLabel), [
-    "씨 / Sea Limited (SE)",
-    "씨 / Sea Limited (SE)",
+    "씨 (SE)",
+    "씨 (SE)",
   ]);
+  assert.equal(formatInstrumentLabel({ ticker: "BE", name: "Bloom Energy Corporation Class A" }), "블룸 에너지 (BE)");
+  assert.equal(formatInstrumentLabel({ ticker: "UNKNOWN", name: "Unknown Corp" }), "(UNKNOWN)");
 
   const filing = await loadLatestDuquesne13f({ fetchImpl });
   assert.equal(filing.reportDate, "2026-06-30");
@@ -89,16 +91,16 @@ const fetchImpl = async (url) => {
     2,
     { fetchImpl },
   );
-  assert.equal((managerContext.match(/씨 \/ Sea Limited \(SE\)/g) || []).length, 1);
-  assert.match(managerContext, /엔비디아 \/ NVIDIA \(NVDA\)/);
+  assert.equal((managerContext.match(/씨 \(SE\)/g) || []).length, 1);
+  assert.match(managerContext, /엔비디아 \(NVDA\)/);
   assert.match(managerContext, /보고일 2026-06-30/);
   const onePercentContext = await loadManager13fContexts(
     [{ name: "Duquesne", cik: 1536411 }],
     Number.POSITIVE_INFINITY,
     { fetchImpl, minimumWeight: 1 },
   );
-  assert.match(onePercentContext, /씨 \/ Sea Limited \(SE\)/);
-  assert.doesNotMatch(onePercentContext, /엔비디아 \/ NVIDIA \(NVDA\)/);
+  assert.match(onePercentContext, /씨 \(SE\)/);
+  assert.doesNotMatch(onePercentContext, /엔비디아 \(NVDA\)/);
 
   const publicPayload = formatInvestorPortfolioMessage("x".repeat(6_000), "2026-08-21T00:00:00.000Z");
   assert.equal(publicPayload.embeds.length, 1);
@@ -149,10 +151,10 @@ const fetchImpl = async (url) => {
     },
   });
   const personalText = personalPayload.embeds[0].description;
-  assert.match(personalText, /국내주식 · 1종목\*\*\n\n\*\*삼성전자 \/ Samsung Electronics/);
-  assert.match(personalText, /삼성전자 \/ Samsung Electronics \(005930\)\*\*\n1주 · 평단 70,000원 · 평가 80,000원 · 8\.0%/);
-  assert.match(personalText, /미국주식 · 1종목\*\*\n\n\*\*씨 \/ Sea Limited/);
-  assert.match(personalText, /씨 \/ Sea Limited \(SE\)\*\*\n2주 · 평단 \$100 · 평가 \$240 · 2\.4%/);
+  assert.match(personalText, /국내주식 · 1종목\*\*\n\n\*\*삼성전자 \(005930\)/);
+  assert.match(personalText, /삼성전자 \(005930\)\*\*\n1주 · 평단 70,000원 · 평가 80,000원 · 8\.0%/);
+  assert.match(personalText, /미국주식 · 1종목\*\*\n\n\*\*씨 \(SE\)/);
+  assert.match(personalText, /씨 \(SE\)\*\*\n2주 · 평단 \$100 · 평가 \$240 · 2\.4%/);
   assert.match(personalPayload.embeds[0].footer.text, /모의계좌/);
   const dualAccountPayload = formatMyPortfolioMessage({
     updatedAt: "2026-08-26T00:00:00.000Z",

@@ -121,6 +121,32 @@ function brokerOrders(broker) {
     : String(order.brokerLabel || "").includes(accountKind));
 }
 
+function harmonizePortfolioNames(accounts) {
+  const names = new Map();
+  for (const account of accounts) {
+    for (const [market, holdings] of [["KR", account.domestic?.holdingPositions || []], ["US", account.overseas?.holdingPositions || []]]) {
+      for (const holding of holdings) {
+        const key = `${market}:${String(holding.code || holding.ticker || "").replace(/^A(?=\d{6}$)/, "").toUpperCase()}`;
+        const current = names.get(key) || {};
+        const fallback = String(holding.name || "").trim();
+        current.koreanName ||= String(holding.koreanName || (/[가-힣]/.test(fallback) ? fallback : "")).trim();
+        current.englishName ||= String(holding.englishName || (fallback && !/[가-힣]/.test(fallback) ? fallback : "")).trim();
+        names.set(key, current);
+      }
+    }
+  }
+  return accounts.map((account) => ({
+    ...account,
+    ...Object.fromEntries([["domestic", "KR"], ["overseas", "US"]].map(([section, market]) => [section, {
+      ...account[section],
+      holdingPositions: (account[section]?.holdingPositions || []).map((holding) => ({
+        ...holding,
+        ...names.get(`${market}:${String(holding.code || holding.ticker || "").replace(/^A(?=\d{6}$)/, "").toUpperCase()}`),
+      })),
+    }])),
+  }));
+}
+
 function tradingPerformanceSnapshot(brokers, updatedAt = new Date().toISOString()) {
   return brokers.map((broker) => {
     const performance = calculateTradingPerformance(brokerOrders(broker), new Date(updatedAt));
@@ -223,7 +249,7 @@ async function brokerPortfolio(broker) {
 
 async function syncAccountPortfolio(channel, brokers, updatedAt = new Date().toISOString()) {
   const settled = await Promise.allSettled(brokers.map(brokerPortfolio));
-  const accounts = settled.filter((result) => result.status === "fulfilled").map((result) => result.value);
+  const accounts = harmonizePortfolioNames(settled.filter((result) => result.status === "fulfilled").map((result) => result.value));
   const failures = settled.flatMap((result, index) => result.status === "rejected"
     ? [{ id: brokers[index].id, label: brokers[index].label, reason: result.reason }]
     : []);
@@ -253,6 +279,7 @@ module.exports = {
   brokerPortfolio,
   calculateTradingPerformance,
   formatTradingPerformanceMessage,
+  harmonizePortfolioNames,
   syncAccountPortfolio,
   tradingPerformanceSnapshot,
 };

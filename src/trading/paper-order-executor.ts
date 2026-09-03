@@ -193,6 +193,7 @@ async function submitPaperOrder(record: SignalRecord, options: ExecutorOptions) 
   const exit = risk?.verdict === "PAPER_EXIT";
   const partialExit = risk?.verdict === "PAPER_PARTIAL_EXIT";
   if (!entry && !exit && !partialExit) return null;
+  if (entry && positionPreview?.blocked) return blocked(positionPreview.reason || "주문 조건 불충족");
   if (!options.enabled) return blocked(`${options.brokerLabel || "키움"} 모의 자동주문 비활성`);
   if (!["mock", "live"].includes(options.environment)) return blocked("지원하지 않는 계좌 환경");
   const side = entry ? "BUY" : "SELL";

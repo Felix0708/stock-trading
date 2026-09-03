@@ -130,6 +130,13 @@ const record = {
       orderQuantity: 4, filledQuantity: 4, remainingQuantity: 0, fillPrice: 250,
     }],
   };
+  assert.deepEqual(await submitPaperOrder({
+    payload: { ticker: "META", exchange: "NASDAQ", action: "BUY", price: 613.01 },
+    risk: { verdict: "PAPER_ENTRY" },
+    positionPreview: { blocked: true, quantity: 0, reason: "Sigma 과열" },
+  }, {
+    enabled: true, environment: "mock", domesticClient: options.client, overseasClient, tracker: autoTracker,
+  }), { status: "BLOCKED", reason: "Sigma 과열" });
   const auto = await submitPaperOrder(autoRecord, {
     enabled: true, environment: "mock", domesticClient: options.client, overseasClient, tracker: autoTracker,
   });

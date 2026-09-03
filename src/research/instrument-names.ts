@@ -23,6 +23,12 @@ const KNOWN_13F_INSTRUMENTS: Record<string, InstrumentName> = {
 const knownByTicker = new Map<string, InstrumentName>(Object.values(KNOWN_13F_INSTRUMENTS)
   .filter((item) => item.ticker)
   .map((item) => [item.ticker, item]));
+for (const [ticker, koreanName] of Object.entries({
+  BE: "블룸 에너지",
+  DELL: "델 테크놀로지스",
+  PLTR: "팔란티어 테크놀로지스",
+  ZETA: "제타 글로벌 홀딩스",
+})) knownByTicker.set(ticker, { ticker, koreanName });
 
 function exchangeCode(value) {
   const exchange = String(value || "").toUpperCase();
@@ -37,14 +43,12 @@ function instrumentKey(item: InstrumentName) {
   return `${exchangeCode(item.exchange)}:${item.ticker}`;
 }
 
-function formatInstrumentLabel({ ticker, name, koreanName, englishName }: InstrumentName = {}) {
+function formatInstrumentLabel({ ticker, name, koreanName }: InstrumentName = {}) {
   const fallback = String(name || "").trim();
   const symbol = String(ticker || "").trim().toUpperCase();
   const known = knownByTicker.get(symbol) || {};
   const korean = String(known.koreanName || koreanName || (/[가-힣]/.test(fallback) ? fallback : "")).trim();
-  const english = String(known.englishName || englishName || (!/[가-힣]/.test(fallback) ? fallback : "")).trim();
-  const names = [...new Set([korean, english].filter(Boolean))];
-  return `${names.join(" / ")}${names.length && symbol ? " " : ""}${symbol ? `(${symbol})` : ""}` || "종목명 미확인";
+  return `${korean}${korean && symbol ? " " : ""}${symbol ? `(${symbol})` : ""}` || "종목명 미확인";
 }
 
 async function enrichInstrumentNames(items: InstrumentName[], { fetchImpl = fetch }: { fetchImpl?: typeof fetch } = {}) {

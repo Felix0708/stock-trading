@@ -52,7 +52,7 @@ assert.deepEqual(snapshot.find((holding) => holding.market === "KR" && holding.a
   quantity: 5, account_type: "paper", broker: "KIS", avg_price: 80_000,
 });
 assert.equal(snapshot.find((holding) => holding.market === "KR" && holding.account_type === "live").avg_price, 90_000);
-assert.equal(snapshot.find((holding) => holding.stock_code === "AAPL").stock_name, "Apple");
+assert.equal(snapshot.find((holding) => holding.stock_code === "AAPL").stock_name, "애플");
 assert.deepEqual(snapshot.filter((holding) => holding.stock_code === "ZETA").map((holding) => holding.stock_name), [
   "제타 글로벌 홀딩스", "제타 글로벌 홀딩스",
 ]);

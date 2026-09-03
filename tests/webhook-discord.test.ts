@@ -189,11 +189,11 @@ const order = formatOrderStatus({
   orderQuantity: 2, filledQuantity: 1, remainingQuantity: 1,
 });
 assert.equal(order.channel, "system");
-assert(order.text.includes("애플 / Apple (AAPL)"));
+assert(order.text.includes("애플 (AAPL)"));
 assert(order.text.includes("PARTIALLY_FILLED"));
 assert(order.text.includes("0282"));
 assert.equal(order.embed.title, "⏳ BUY · 부분 체결");
-assert(order.embed.description.includes("애플 / Apple (AAPL)"));
+assert(order.embed.description.includes("애플 (AAPL)"));
 const kisOrder = formatOrderStatus({
   orderNo: "5678", symbol: "AAPL", name: "Apple Inc.", side: "BUY", status: "ACCEPTED",
   orderQuantity: 1, filledQuantity: 0, remainingQuantity: 1, brokerLabel: "한투 모의계좌",
@@ -233,7 +233,7 @@ const tradeJournal = formatTradeJournal({
   positionRatio: 7.64, currency: "USD", brokerLabel: "한투 모의계좌",
 });
 assert.equal(tradeJournal.embed.title, "📘 BUY · 매매 기록");
-assert.equal(tradeJournal.embed.description, "**씨 / Sea Limited (SE)**");
+assert.equal(tradeJournal.embed.description, "**씨 (SE)**");
 assert(tradeJournal.text.includes("**실제 투입**: $7,634.34"));
 assert(tradeJournal.text.includes("**체결 후 계좌 비중**: 7.64%"));
 assert.equal(tradeJournal.embed.footer.text, "한투 모의계좌 체결 기준");
@@ -241,7 +241,7 @@ const legacySeaOrder = formatOrderStatus({
   orderNo: "1903", symbol: "SE", name: "씨이에이(ADS)", side: "BUY", status: "FILLED",
   orderQuantity: 63, filledQuantity: 63, remainingQuantity: 0,
 });
-assert.equal(legacySeaOrder.embed.description, "**씨 / Sea Limited (SE)**");
+assert.equal(legacySeaOrder.embed.description, "**씨 (SE)**");
 
 const approval = formatBuyApproval(base, {
   ticker: "005930", name: "삼성전자",
