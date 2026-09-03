@@ -71,7 +71,8 @@ const fetchImpl = async (url) => {
     "씨 (SE)",
   ]);
   assert.equal(formatInstrumentLabel({ ticker: "BE", name: "Bloom Energy Corporation Class A" }), "블룸 에너지 (BE)");
-  assert.equal(formatInstrumentLabel({ ticker: "UNKNOWN", name: "Unknown Corp" }), "(UNKNOWN)");
+  assert.equal(formatInstrumentLabel({ ticker: "NET", name: "Cloudflare Inc Class A" }), "클라우드플레어 (NET)");
+  assert.equal(formatInstrumentLabel({ ticker: "UNKNOWN", name: "Unknown Corp" }), "Unknown Corp (UNKNOWN)");
 
   const filing = await loadLatestDuquesne13f({ fetchImpl });
   assert.equal(filing.reportDate, "2026-06-30");

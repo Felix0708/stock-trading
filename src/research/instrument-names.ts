@@ -24,9 +24,36 @@ const knownByTicker = new Map<string, InstrumentName>(Object.values(KNOWN_13F_IN
   .filter((item) => item.ticker)
   .map((item) => [item.ticker, item]));
 for (const [ticker, koreanName] of Object.entries({
+  BAC: "뱅크오브아메리카",
   BE: "블룸 에너지",
+  BTGD: "STKd 비트코인·금 ETF",
+  CAT: "캐터필러",
+  COPX: "글로벌 X 구리 광산 ETF",
+  CPER: "미국 구리 인덱스 펀드",
+  CRM: "세일즈포스",
   DELL: "델 테크놀로지스",
+  GLD: "SPDR 골드 셰어즈",
+  GLW: "코닝",
+  IGV: "아이셰어즈 확장 기술 소프트웨어 ETF",
+  JNJ: "존슨앤드존슨",
+  JPM: "JP모건 체이스",
+  KO: "코카콜라",
+  MP: "MP 머티리얼즈",
+  NET: "클라우드플레어",
+  NOW: "서비스나우",
   PLTR: "팔란티어 테크놀로지스",
+  QLD: "프로셰어즈 울트라 QQQ",
+  SOXX: "아이셰어즈 반도체 ETF",
+  SOXL: "디렉시온 데일리 반도체 불 3X ETF",
+  SOXS: "디렉시온 데일리 반도체 베어 3X ETF",
+  STM: "ST마이크로일렉트로닉스",
+  TQQQ: "프로셰어즈 울트라프로 QQQ",
+  TSM: "타이완 반도체 매뉴팩처링 ADR",
+  U: "유니티 소프트웨어",
+  UNH: "유나이티드헬스 그룹",
+  USD: "프로셰어즈 울트라 반도체",
+  XBI: "SPDR S&P 바이오테크 ETF",
+  XLV: "헬스케어 셀렉트 섹터 SPDR ETF",
   ZETA: "제타 글로벌 홀딩스",
 })) knownByTicker.set(ticker, { ticker, koreanName });
 
@@ -48,7 +75,8 @@ function formatInstrumentLabel({ ticker, name, koreanName }: InstrumentName = {}
   const symbol = String(ticker || "").trim().toUpperCase();
   const known = knownByTicker.get(symbol) || {};
   const korean = String(known.koreanName || koreanName || (/[가-힣]/.test(fallback) ? fallback : "")).trim();
-  return `${korean}${korean && symbol ? " " : ""}${symbol ? `(${symbol})` : ""}` || "종목명 미확인";
+  const displayName = korean || fallback;
+  return `${displayName}${displayName && symbol ? " " : ""}${symbol ? `(${symbol})` : ""}` || "종목명 미확인";
 }
 
 async function enrichInstrumentNames(items: InstrumentName[], { fetchImpl = fetch }: { fetchImpl?: typeof fetch } = {}) {

@@ -1266,8 +1266,24 @@ async function updateWatchlist(record) {
   const ticker = String(record.payload?.ticker || "").toUpperCase();
   if (!exchange || !ticker) return;
   const key = `${exchange}:${ticker}`;
-  if (state.watchlist[key]?.koreanName && state.watchlist[key]?.englishName) return;
+  if (state.watchlist[key]?.koreanName) {
+    Object.assign(record.payload, {
+      koreanName: state.watchlist[key].koreanName,
+      englishName: state.watchlist[key].englishName || record.payload.englishName,
+    });
+    return;
+  }
   const [item] = await enrichInstrumentNames([{ ...state.watchlist[key], exchange, ticker, name: String(record.payload?.name || "").trim() }]);
+  if (!item.koreanName && US_EXCHANGES.has(exchange) && KIWOOM_ENABLED) {
+    try {
+      const quote = await getOverseasKiwoomClient().getUsQuote({
+        exchange: ({ NASDAQ: "ND", ND: "ND", NYSE: "NY", NY: "NY", AMEX: "NA", NYSEARCA: "NA", ARCA: "NA", NA: "NA" })[exchange],
+        symbol: ticker,
+      });
+      if (/[가-힣]/.test(quote.name)) item.koreanName = quote.name;
+    } catch { /* 종목명 조회 실패가 신호·주문 처리를 막지는 않는다. */ }
+  }
+  Object.assign(record.payload, { koreanName: item.koreanName, englishName: item.englishName });
   state.watchlist[key] = item;
   saveState();
   await syncWatchlistMessage();
@@ -1508,6 +1524,7 @@ async function queueBuyApproval(record) {
 }
 
 async function publishWebhookRecord(record, options: any = {}) {
+  await updateWatchlist(record);
   if (options.replayOnly) {
     const formatted = formatWebhookRecord(record);
     const channelNames = formatted.targetChannels || [formatted.targetChannel
@@ -1520,7 +1537,6 @@ async function publishWebhookRecord(record, options: any = {}) {
     return;
   }
   supersedeDeferredUsEntry(record);
-  await updateWatchlist(record);
   if (!ACCOUNT_NEUTRAL_SIGNAL_SERVER) record.positionPreview = await buildPositionPreview(record);
   record.risk = tradingController.evaluate(record);
   if (!ACCOUNT_NEUTRAL_SIGNAL_SERVER) {

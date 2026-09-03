@@ -79,7 +79,7 @@ assert.deepEqual(targetSignalChannels({
   payload: { ...base.payload, ticker: "NVDA", name: "NVIDIA", exchange: "NASDAQ" },
   orderAttempt: { status: "ERROR", reason: "키움 주문 실패" },
 }), ["미국-전체신호", "미국-진입신호", "미국-매매신호"]);
-assert(usTrade.embed.description.includes("NVIDIA (NVDA)"));
+assert(usTrade.embed.description.includes("엔비디아 (NVDA)"));
 
 const domesticObservation = formatWebhookRecord({
   ...base,

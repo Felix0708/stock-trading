@@ -1,6 +1,7 @@
 "use strict";
 
 const { encodeSignalEnvelope, TRANSPORT_URL_PREFIX } = require("./discord-signal-envelope");
+const { formatInstrumentLabel } = require("../research/instrument-names");
 
 const DECISION_LABELS = {
   ENTRY_CANDIDATE: "진입 검토",
@@ -146,7 +147,7 @@ function formatWebhookRecord(record) {
   const outcome = record.outcome || {};
   const signal = outcome.signal || {};
   const risk = record.risk || {};
-  const identity = `${display(payload.name)} (${display(payload.ticker)})`;
+  const identity = formatInstrumentLabel(payload);
   const brokerLabel = record.orderAttempt?.brokerLabel || "키움 모의계좌";
   const orderLine = !record.orderAttempt
     ? "**주문**: 🔒 생성 안 됨"
