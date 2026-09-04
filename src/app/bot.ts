@@ -1048,9 +1048,6 @@ function isAlertRegistryQuestion(text) {
 function formatAlertRegistry(items, updatedAt = new Date()) {
   const domestic = items.filter((item) => item.exchange === "KRX").sort((a, b) => a.ticker.localeCompare(b.ticker));
   const overseas = items.filter((item) => item.exchange !== "KRX").sort((a, b) => a.ticker.localeCompare(b.ticker));
-  const lines = (group) => group.length
-    ? group.map((item) => `- ${formatInstrumentLabel(item)}`)
-    : ["- 없음"];
   const clock = zonedClock(updatedAt, ALERTS_SYNC_TIMEZONE);
   return [
     `🔔 **TradingView 알람 설정 (${items.length})**`,
@@ -1059,10 +1056,9 @@ function formatAlertRegistry(items, updatedAt = new Date()) {
     "- 조건: Any alert() function call",
     "- 시간봉: 4시간봉·일봉 (종목별 2개)",
     "- 전달: 고정 비밀 웹훅 → 국가별 관찰·매매신호 → 주문 게이트",
-    `🇰🇷 **국내 (${domestic.length})**`,
-    ...lines(domestic),
+    ...(domestic.length ? [`🇰🇷 **국내 (${domestic.length})**`, ...domestic.map((item) => `- ${formatInstrumentLabel(item)}`)] : []),
     `🇺🇸 **미국 (${overseas.length})**`,
-    ...lines(overseas),
+    ...(overseas.length ? overseas.map((item) => `- ${formatInstrumentLabel(item)}`) : ["- 없음"]),
     TRADINGVIEW_ALERT_WATCHLIST_URL
       ? "※ TradingView 알람설정 전용 공유 목록을 기준으로 매일 동기화합니다."
       : "※ TradingView 비공개 알람 목록은 자동 조회할 수 없어 마지막으로 확인된 운영 목록입니다.",
@@ -2718,6 +2714,8 @@ function selfTest() {
   if (alertItems.length !== 2 || alertItems[0].ticker !== "005930") throw new Error("알람설정 파서 실패");
   const alertRegistry = formatAlertRegistry(alertItems, new Date("2026-08-10T00:00:00Z"));
   if (!alertRegistry.includes("삼성전자 (005930)") || !alertRegistry.includes("Any alert() function call") || !alertRegistry.includes("4시간봉·일봉")) throw new Error("알람설정 목록 실패");
+  const overseasOnlyAlerts = formatAlertRegistry(parseConfiguredAlerts("NASDAQ:NVDA=NVIDIA"));
+  if (overseasOnlyAlerts.includes("국내 (0)") || !overseasOnlyAlerts.includes("미국 (1)")) throw new Error("알람설정 빈 국내 목록 숨김 실패");
   const earningsCalendar = formatEarningsCalendar([
     { exchange: "NASDAQ", ticker: "NVDA", name: "NVIDIA", nextEarningsAt: Date.parse("2026-08-12T12:00:00Z") / 1_000 },
     { exchange: "NASDAQ", ticker: "META", name: "Meta Platforms", nextEarningsAt: null },
