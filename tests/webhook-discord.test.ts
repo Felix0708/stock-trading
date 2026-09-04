@@ -15,6 +15,7 @@ const {
 } = require("../src/discord/order-discord");
 const {
   formatWebhookRecord,
+  timeframeLabel,
   targetSignalChannels,
 } = require("../src/discord/webhook-discord");
 
@@ -42,7 +43,11 @@ assert(normal.text.includes("생성 안 됨"));
 assert(normal.text.includes("`ai_summary`: \"상승 추세\""));
 assert(normal.text.includes("`atr_dot`: false"));
 assert.equal(normal.embed.color, 0x57F287);
-assert.equal(normal.embed.title, "🟢 A · 💰 정석 진입 @SR↩");
+assert.equal(normal.embed.title, "[4시간봉] 🟢 A · 💰 정석 진입 @SR↩");
+assert(normal.text.includes("BUY / 80000 / 4시간봉"));
+assert.equal(timeframeLabel("D"), "일봉");
+assert.equal(timeframeLabel("1D"), "일봉");
+assert.equal(timeframeLabel("240"), "4시간봉");
 assert(normal.embed.description.includes("삼성전자 (005930)"));
 assert(normal.embed.description.includes("80,000원 · SL 77,500원 · R/R 2.2"));
 assert(normal.embed.fields.some((field) => field.name === "AI 평가" && field.value === "상승 추세"));
@@ -80,6 +85,8 @@ assert.deepEqual(targetSignalChannels({
   orderAttempt: { status: "ERROR", reason: "키움 주문 실패" },
 }), ["미국-전체신호", "미국-진입신호", "미국-매매신호"]);
 assert(usTrade.embed.description.includes("엔비디아 (NVDA)"));
+const dailyTrade = formatWebhookRecord({ ...base, payload: { ...base.payload, timeframe: "D" } });
+assert(dailyTrade.embed.title.startsWith("[일봉]"));
 
 const domesticObservation = formatWebhookRecord({
   ...base,

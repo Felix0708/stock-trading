@@ -79,6 +79,13 @@ function signalPrice(value, exchange) {
     : `$${value.toLocaleString("en-US", { maximumFractionDigits: 4 })}`;
 }
 
+function timeframeLabel(value) {
+  const timeframe = String(value || "").trim().toUpperCase();
+  if (["D", "1D", "DAY", "1DAY"].includes(timeframe)) return "일봉";
+  if (timeframe === "240") return "4시간봉";
+  return /^\d+$/.test(timeframe) ? `${timeframe}분봉` : timeframe || "시간봉 미확인";
+}
+
 function signalEmbed(record, identity, orderLine) {
   const payload = record.payload || {};
   const risk = record.risk || {};
@@ -94,7 +101,7 @@ function signalEmbed(record, identity, orderLine) {
     { name: "설명", value: clip(payload.desc, 1024) },
     {
       name: "정보",
-      value: clip([payload.market, payload.exchange, payload.timeframe && `${payload.timeframe}분봉`].filter(Boolean).join(" · "), 512),
+      value: clip([payload.market, payload.exchange, timeframeLabel(payload.timeframe)].filter(Boolean).join(" · "), 512),
     },
     {
       name: "자동매매",
@@ -103,7 +110,7 @@ function signalEmbed(record, identity, orderLine) {
   ].filter((field) => field.value !== "-");
   return {
     color: isTradeSignal(record) ? 0x57F287 : payload.action === "SELL" ? 0xED4245 : 0xFEE75C,
-    title: clip(`${CONVICTION_ICONS[payload.conviction] || "⚪"} ${display(payload.conviction)} · ${display(payload.type)}`, 256),
+    title: clip(`[${timeframeLabel(payload.timeframe)}] ${CONVICTION_ICONS[payload.conviction] || "⚪"} ${display(payload.conviction)} · ${display(payload.type)}`, 256),
     description: clip([
       `**${identity} · ${display(payload.exchange)}**`,
       `${signalPrice(payload.price, payload.exchange)} · SL ${signalPrice(payload.sl, payload.exchange)} · R/R ${display(payload.rr)}`,
@@ -191,7 +198,7 @@ function formatWebhookRecord(record) {
       `**종목**: ${identity} / ${display(payload.exchange)}`,
       `**원본 신호**: ${display(payload.type)}`,
       `**내부 코드**: \`${display(signal.signalCode)}\`${signal.modifiers?.length ? ` / ${signal.modifiers.join(", ")}` : ""}`,
-      `**구분·가격**: ${display(payload.action)} / ${display(payload.price)} / ${display(payload.timeframe)}`,
+      `**구분·가격**: ${display(payload.action)} / ${display(payload.price)} / ${timeframeLabel(payload.timeframe)}`,
       `**손절·손익비**: ${display(payload.sl)} / ${display(payload.rr)}`,
       `**확신·점수**: ${display(payload.conviction)} / ${display(payload.score)}`,
       `**판정**: ${DECISION_LABELS[outcome.decision] || display(outcome.decision)}`,
@@ -208,6 +215,7 @@ function formatWebhookRecord(record) {
 module.exports = {
   formatWebhookRecord,
   positionPreviewLines,
+  timeframeLabel,
   targetSignalChannel,
   targetSignalChannels,
 };

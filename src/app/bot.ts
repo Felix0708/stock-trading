@@ -107,6 +107,7 @@ const ORDER_APPROVAL_CHANNEL = process.env.ORDER_APPROVAL_CHANNEL || "주문승�
 const ORDER_EXECUTION_CHANNEL = process.env.ORDER_EXECUTION_CHANNEL || "체결로그";
 const WATCHLIST_CHANNEL = process.env.WATCHLIST_CHANNEL || "관심종목";
 const ALERTS_CHANNEL = process.env.ALERTS_CHANNEL || "알람설정";
+const EARNINGS_CALENDAR_CHANNEL = process.env.EARNINGS_CALENDAR_CHANNEL || "어닝-캘린더";
 const JOURNAL_CHANNEL = process.env.JOURNAL_CHANNEL || "매매일지";
 const TRADINGVIEW_WATCHLIST_URL = process.env.TRADINGVIEW_WATCHLIST_URL || "";
 const TRADINGVIEW_ALERT_WATCHLIST_URL = process.env.TRADINGVIEW_ALERT_WATCHLIST_URL || "";
@@ -226,6 +227,7 @@ function loadState() {
     myPortfolioMessageId: "", myPortfolioUpdatedAt: "",
     watchlist: {}, watchlistMessageId: "", watchlistMessageIds: [], watchlistSyncRuns: {},
     alertRegistry: {}, alertRegistryMessageIds: [], alertRegistrySyncRuns: {}, alertRegistryUpdatedAt: "",
+    earningsCalendarMessageIds: [], earningsCalendarUpdatedAt: "",
     dailyJournals: {}, journaledOrders: {}, buyApprovals: {}, scheduledPaperExits: {}, deferredUsEntries: {},
   };
   try {
@@ -261,6 +263,8 @@ function loadState() {
       alertRegistryMessageIds: parsed.alertRegistryMessageIds || [],
       alertRegistrySyncRuns: parsed.alertRegistrySyncRuns || {},
       alertRegistryUpdatedAt: parsed.alertRegistryUpdatedAt || "",
+      earningsCalendarMessageIds: parsed.earningsCalendarMessageIds || [],
+      earningsCalendarUpdatedAt: parsed.earningsCalendarUpdatedAt || "",
       dailyJournals: parsed.dailyJournals || {},
       journaledOrders: parsed.journaledOrders || {},
       buyApprovals: parsed.buyApprovals || {},
@@ -1053,7 +1057,7 @@ function formatAlertRegistry(items, updatedAt = new Date()) {
     "**공통 조건**",
     "- 지표: Lazy Alpha Indicator / Custom Webhook (Bot)",
     "- 조건: Any alert() function call",
-    "- 시간봉: 4시간봉",
+    "- 시간봉: 4시간봉·일봉 (종목별 2개)",
     "- 전달: 고정 비밀 웹훅 → 국가별 관찰·매매신호 → 주문 게이트",
     `🇰🇷 **국내 (${domestic.length})**`,
     ...lines(domestic),
@@ -1062,6 +1066,31 @@ function formatAlertRegistry(items, updatedAt = new Date()) {
     TRADINGVIEW_ALERT_WATCHLIST_URL
       ? "※ TradingView 알람설정 전용 공유 목록을 기준으로 매일 동기화합니다."
       : "※ TradingView 비공개 알람 목록은 자동 조회할 수 없어 마지막으로 확인된 운영 목록입니다.",
+    `마지막 갱신: ${clock.date} ${clock.time} KST`,
+  ].join("\n");
+}
+
+function earningsDate(item, now = new Date()) {
+  const timestamp = Number(item.nextEarningsAt);
+  if (!Number.isFinite(timestamp) || timestamp <= 0) return null;
+  const timeZone = item.exchange === "KRX" ? "Asia/Seoul" : "America/New_York";
+  const date = zonedClock(new Date(timestamp * 1_000), timeZone).date;
+  const today = zonedClock(now, timeZone).date;
+  const days = Math.round((Date.parse(`${date}T00:00:00Z`) - Date.parse(`${today}T00:00:00Z`)) / 86_400_000);
+  return days < 0 ? null : { date, days };
+}
+
+function formatEarningsCalendar(items, updatedAt = new Date()) {
+  const rows = items.map((item) => ({ item, schedule: earningsDate(item, updatedAt) }));
+  const scheduled = rows.filter((row) => row.schedule).sort((a, b) => a.schedule.days - b.schedule.days);
+  const unknown = rows.filter((row) => !row.schedule).sort((a, b) => a.item.ticker.localeCompare(b.item.ticker));
+  const dDay = (days) => days === 0 ? "🔴 D-DAY" : days === 1 ? "🟠 D-1" : days <= 7 ? `🟡 D-${days}` : `D-${days}`;
+  const clock = zonedClock(updatedAt, ALERTS_SYNC_TIMEZONE);
+  return [
+    `📅 **알람 종목 어닝 캘린더 (${items.length})**`,
+    ...scheduled.map(({ item, schedule }) => `- ${schedule.date} · ${dDay(schedule.days)} · ${formatInstrumentLabel(item)}`),
+    ...(unknown.length ? ["**일정 미확인**", ...unknown.map(({ item }) => `- ${formatInstrumentLabel(item)}`)] : []),
+    "※ TradingView 제공 다음 실적발표일이며 예상일은 변경될 수 있습니다. 자동 주문 조건에는 사용하지 않습니다.",
     `마지막 갱신: ${clock.date} ${clock.time} KST`,
   ].join("\n");
 }
@@ -1112,12 +1141,13 @@ async function fetchSharedWatchlist(url = TRADINGVIEW_WATCHLIST_URL) {
   const metadataResponse = await fetch("https://scanner.tradingview.com/global/scan", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ symbols: { tickers: symbols, query: { types: [] } }, columns: ["name", "description", "exchange"] }),
+    body: JSON.stringify({ symbols: { tickers: symbols, query: { types: [] } }, columns: ["name", "description", "exchange", "earnings_release_next_date"] }),
     signal: AbortSignal.timeout(20_000),
   });
   const metadata: any = metadataResponse.ok ? await metadataResponse.json() : { data: [] };
   const names = new Map<string, string>((metadata.data || []).map((item: any) => [item.s, item.d?.[1] || item.d?.[0] || ""]));
-  return { symbols, names, modified: list.modified };
+  const earnings = new Map<string, number | null>((metadata.data || []).map((item: any) => [item.s, Number.isFinite(item.d?.[3]) ? item.d[3] : null]));
+  return { symbols, names, earnings, modified: list.modified };
 }
 
 function seedWatchlist() {
@@ -1167,6 +1197,30 @@ async function syncAlertRegistryMessage() {
   state.alertRegistryMessageIds = nextIds;
   state.alertRegistryUpdatedAt = new Date().toISOString();
   saveState();
+  await syncEarningsCalendarMessage(items).catch((error) => console.error("어닝 캘린더 갱신 실패:", error.message));
+  return true;
+}
+
+async function syncEarningsCalendarMessage(items) {
+  const channel = findTextChannelByName(EARNINGS_CALENDAR_CHANNEL);
+  if (!channel) return false;
+  const chunks = splitDiscordText(formatEarningsCalendar(items));
+  const previous = [];
+  for (const id of state.earningsCalendarMessageIds) {
+    try { previous.push(await channel.messages.fetch(id)); } catch { previous.push(null); }
+  }
+  const nextIds = [];
+  for (let index = 0; index < chunks.length; index += 1) {
+    const message = previous[index]
+      ? await previous[index].edit(chunks[index])
+      : await channel.send(chunks[index]);
+    nextIds.push(message.id);
+  }
+  for (const extra of previous.slice(chunks.length)) if (extra) await extra.delete();
+  state.earningsCalendarMessageIds = nextIds;
+  state.earningsCalendarUpdatedAt = new Date().toISOString();
+  saveState();
+  console.log(`어닝 캘린더 갱신: ${items.length}개`);
   return true;
 }
 
@@ -1175,7 +1229,12 @@ async function refreshAlertRegistry() {
     const remote = await fetchSharedWatchlist(TRADINGVIEW_ALERT_WATCHLIST_URL);
     const items = await enrichInstrumentNames(remote.symbols.map((symbol) => {
       const [exchange, ticker] = symbol.split(":");
-      return { exchange, ticker, name: remote.names.get(symbol) || state.alertRegistry[symbol]?.name || "" };
+      return {
+        exchange,
+        ticker,
+        name: remote.names.get(symbol) || state.alertRegistry[symbol]?.name || "",
+        nextEarningsAt: remote.earnings.get(symbol) || null,
+      };
     }));
     state.alertRegistry = Object.fromEntries(items.map((item) => [`${item.exchange}:${item.ticker}`, item]));
   }
@@ -2619,7 +2678,15 @@ function selfTest() {
   const alertItems = parseConfiguredAlerts("KRX:005930=삼성전자,NASDAQ:NVDA=NVIDIA");
   if (alertItems.length !== 2 || alertItems[0].ticker !== "005930") throw new Error("알람설정 파서 실패");
   const alertRegistry = formatAlertRegistry(alertItems, new Date("2026-08-10T00:00:00Z"));
-  if (!alertRegistry.includes("삼성전자 (005930)") || !alertRegistry.includes("Any alert() function call")) throw new Error("알람설정 목록 실패");
+  if (!alertRegistry.includes("삼성전자 (005930)") || !alertRegistry.includes("Any alert() function call") || !alertRegistry.includes("4시간봉·일봉")) throw new Error("알람설정 목록 실패");
+  const earningsCalendar = formatEarningsCalendar([
+    { exchange: "NASDAQ", ticker: "NVDA", name: "NVIDIA", nextEarningsAt: Date.parse("2026-08-12T12:00:00Z") / 1_000 },
+    { exchange: "NASDAQ", ticker: "META", name: "Meta Platforms", nextEarningsAt: null },
+  ], new Date("2026-08-10T12:00:00Z"));
+  if (!earningsCalendar.includes("2026-08-12 · 🟡 D-2 · 엔비디아 (NVDA)")
+      || !earningsCalendar.includes("일정 미확인") || !earningsCalendar.includes("자동 주문 조건에는 사용하지 않습니다")) {
+    throw new Error("어닝 캘린더 형식 실패");
+  }
   if (!isAlertRegistryQuestion("지금 알람 설정된 종목 뭐야?") || isAlertRegistryQuestion("오늘 시장 어때?")) throw new Error("알람설정 질문 식별 실패");
   if (splitDiscordText("a\n".repeat(2_000)).some((chunk) => chunk.length > 1900)) throw new Error("Discord 관심종목 분할 실패");
   const parsedWatchlist = parseSharedWatchlist('<script type="application/prs.init-data+json">{"sharedWatchlist":{"list":{"symbols":["NASDAQ:NVDA"]}}}</script>');
