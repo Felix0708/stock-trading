@@ -1172,6 +1172,13 @@ function splitDiscordSections(text, limit = 1900) {
   return chunks;
 }
 
+function registryMessagePayloads(text) {
+  return splitDiscordSections(text, 4_000).map((description) => ({
+    content: "",
+    embeds: [{ color: 0x2563eb, description }],
+  }));
+}
+
 function parseSharedWatchlist(html) {
   const blocks = html.matchAll(/<script[^>]+type="application\/prs\.init-data\+json"[^>]*>([\s\S]*?)<\/script>/g);
   for (const match of blocks) {
@@ -1236,7 +1243,7 @@ async function syncAlertRegistryMessage() {
   if (!channel) return false;
   const items = await enrichInstrumentNames(Object.values(state.alertRegistry) as any[]);
   state.alertRegistry = Object.fromEntries(items.map((item) => [`${item.exchange}:${item.ticker}`, item]));
-  const chunks = splitDiscordSections(formatAlertRegistry(items));
+  const chunks = registryMessagePayloads(formatAlertRegistry(items));
   const previous = [];
   for (const id of state.alertRegistryMessageIds) {
     try { previous.push(await channel.messages.fetch(id)); } catch { previous.push(null); }
@@ -1325,7 +1332,7 @@ async function syncWatchlistMessage() {
   if (!channel) return;
   const items = await enrichInstrumentNames(Object.values(state.watchlist) as any[]);
   state.watchlist = Object.fromEntries(items.map((item) => [`${item.exchange}:${item.ticker}`, item]));
-  const chunks = splitDiscordSections(formatWatchlist(items));
+  const chunks = registryMessagePayloads(formatWatchlist(items));
   const previousIds = state.watchlistMessageIds.length ? state.watchlistMessageIds : [state.watchlistMessageId].filter(Boolean);
   const previous = [];
   for (const id of previousIds) {
@@ -2812,6 +2819,7 @@ function selfTest() {
   }
   if (splitDiscordText("a\n".repeat(2_000)).some((chunk) => chunk.length > 1900)) throw new Error("Discord 관심종목 분할 실패");
   if (splitDiscordSections(`${"a".repeat(1_000)}\n\n${"b".repeat(1_000)}`).length !== 2) throw new Error("Discord 관심종목 구역 분할 실패");
+  if (registryMessagePayloads("a".repeat(3_000)).length !== 1) throw new Error("Discord 관심종목 단일 상태판 실패");
   const parsedWatchlist = parseSharedWatchlist('<script type="application/prs.init-data+json">{"sharedWatchlist":{"list":{"symbols":["###미국","###⁤하드웨어","NASDAQ:NVDA"]}}}</script>');
   if (!parsedWatchlist.symbols.includes("NASDAQ:NVDA")) throw new Error("공유 관심종목 파서 실패");
   const parsedSections = watchlistSections(parsedWatchlist.symbols);
