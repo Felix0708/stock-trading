@@ -1015,21 +1015,13 @@ function findBriefingChannel() {
 }
 
 function formatWatchlist(items, updatedAt = new Date()) {
-  const domestic = items.filter((item) => item.exchange === "KRX").sort((a, b) => a.ticker.localeCompare(b.ticker));
-  const overseas = items.filter((item) => item.exchange !== "KRX").sort((a, b) => a.ticker.localeCompare(b.ticker));
-  const lines = (group) => group.length
-    ? group.map((item) => `- ${formatInstrumentLabel(item)}`)
-    : ["- 없음"];
   const clock = zonedClock(updatedAt);
   return [
     `📋 **관심종목 (${items.length})**`,
-    `🇰🇷 **국내 (${domestic.length})**`,
-    ...lines(domestic),
-    `🇺🇸 **미국 (${overseas.length})**`,
-    ...lines(overseas),
+    formatInstrumentGroups(items),
     "※ 목록 정리용이며 자동 알림·자동매매 설정과는 별개입니다.",
     `마지막 갱신: ${clock.date} ${clock.time} KST`,
-  ].join("\n");
+  ].join("\n\n");
 }
 
 function parseConfiguredAlerts(value) {
@@ -1045,9 +1037,62 @@ function isAlertRegistryQuestion(text) {
   return ["알람", "알림", "alert"].some((word) => normalized.includes(word));
 }
 
+const WATCHLIST_COUNTRIES = [
+  ["한국", "🇰🇷"],
+  ["미국", "🇺🇸"],
+  ["일본", "🇯🇵"],
+];
+const WATCHLIST_CATEGORIES = ["하드웨어", "소프트웨어", "기타", "ETF"];
+
+function watchlistSections(symbols) {
+  const sections = new Map();
+  let country = "";
+  let category = "";
+  for (const value of symbols) {
+    if (value.startsWith("###")) {
+      const label = value.slice(3).replace(/[\u2060-\u206f\ufeff]/gi, "").trim();
+      if (WATCHLIST_COUNTRIES.some(([name]) => name === label)) {
+        country = label;
+        category = "";
+      } else if (WATCHLIST_CATEGORIES.includes(label)) category = label;
+    } else if (/^[A-Z0-9_.-]+:[A-Z0-9_.-]+$/.test(value)) {
+      sections.set(value, { country, category });
+    }
+  }
+  return sections;
+}
+
+function inferWatchlistCategory(item) {
+  const description = [item.name, item.type, item.sector, item.industry].filter(Boolean).join(" ");
+  if (item.type === "fund" || /\bETF\b|Investment Trust|Mutual Fund/i.test(description)) return "ETF";
+  if (/Technology Services|Software|Data Processing|Internet Software/i.test(description)) return "소프트웨어";
+  if (/Electronic Technology|Producer Manufacturing|Semiconductor|Computer (?:Hardware|Peripherals)|Electronic|Industrial Machinery|Telecommunications Equipment|Electrical Products/i.test(description)) return "하드웨어";
+  return "기타";
+}
+
+function inferWatchlistCountry(item) {
+  if (["KRX", "KOSPI", "KOSDAQ"].includes(item.exchange)) return "한국";
+  if (["TSE", "TYO", "JPX"].includes(item.exchange)) return "일본";
+  return "미국";
+}
+
+function formatInstrumentGroups(items) {
+  return WATCHLIST_COUNTRIES.flatMap(([country, icon]) => {
+    const countryItems = items.filter((item) => (item.country || inferWatchlistCountry(item)) === country);
+    if (!countryItems.length) return [];
+    return [
+      `${icon} **${country} (${countryItems.length})**`,
+      ...WATCHLIST_CATEGORIES.flatMap((category) => {
+        const rows = countryItems
+          .filter((item) => (item.category || inferWatchlistCategory(item)) === category)
+          .sort((left, right) => left.ticker.localeCompare(right.ticker));
+        return rows.length ? [`**${category} (${rows.length})**`, ...rows.map((item) => `- ${formatInstrumentLabel(item)}`)] : [];
+      }),
+    ].join("\n");
+  }).join("\n\n");
+}
+
 function formatAlertRegistry(items, updatedAt = new Date()) {
-  const domestic = items.filter((item) => item.exchange === "KRX").sort((a, b) => a.ticker.localeCompare(b.ticker));
-  const overseas = items.filter((item) => item.exchange !== "KRX").sort((a, b) => a.ticker.localeCompare(b.ticker));
   const clock = zonedClock(updatedAt, ALERTS_SYNC_TIMEZONE);
   return [
     `🔔 **TradingView 알람 설정 (${items.length})**`,
@@ -1056,14 +1101,12 @@ function formatAlertRegistry(items, updatedAt = new Date()) {
     "- 조건: Any alert() function call",
     "- 시간봉: 4시간봉·일봉 (종목별 2개)",
     "- 전달: 고정 비밀 웹훅 → 국가별 관찰·매매신호 → 주문 게이트",
-    ...(domestic.length ? [`🇰🇷 **국내 (${domestic.length})**`, ...domestic.map((item) => `- ${formatInstrumentLabel(item)}`)] : []),
-    `🇺🇸 **미국 (${overseas.length})**`,
-    ...(overseas.length ? overseas.map((item) => `- ${formatInstrumentLabel(item)}`) : ["- 없음"]),
+    formatInstrumentGroups(items),
     TRADINGVIEW_ALERT_WATCHLIST_URL
       ? "※ TradingView 알람설정 전용 공유 목록을 기준으로 매일 동기화합니다."
       : "※ TradingView 비공개 알람 목록은 자동 조회할 수 없어 마지막으로 확인된 운영 목록입니다.",
     `마지막 갱신: ${clock.date} ${clock.time} KST`,
-  ].join("\n");
+  ].filter(Boolean).join("\n\n");
 }
 
 function earningsDate(item, now = new Date()) {
@@ -1115,6 +1158,20 @@ function splitDiscordText(text, limit = 1900) {
   return chunks;
 }
 
+function splitDiscordSections(text, limit = 1900) {
+  const chunks = [];
+  for (const section of text.split("\n\n")) {
+    if (section.length > limit) {
+      chunks.push(...splitDiscordText(section, limit));
+    } else if (!chunks.length || chunks.at(-1).length + section.length + 2 > limit) {
+      chunks.push(section);
+    } else {
+      chunks[chunks.length - 1] += `\n\n${section}`;
+    }
+  }
+  return chunks;
+}
+
 function parseSharedWatchlist(html) {
   const blocks = html.matchAll(/<script[^>]+type="application\/prs\.init-data\+json"[^>]*>([\s\S]*?)<\/script>/g);
   for (const match of blocks) {
@@ -1134,16 +1191,18 @@ async function fetchSharedWatchlist(url = TRADINGVIEW_WATCHLIST_URL) {
   if (!response.ok) throw new Error(`TradingView 워치리스트 HTTP ${response.status}`);
   const list = parseSharedWatchlist(await response.text());
   const symbols: string[] = [...new Set<string>(list.symbols.filter((symbol: string) => /^[A-Z0-9_.-]+:[A-Z0-9_.-]+$/.test(symbol)))];
+  const sections = watchlistSections(list.symbols);
   const metadataResponse = await fetch("https://scanner.tradingview.com/global/scan", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ symbols: { tickers: symbols, query: { types: [] } }, columns: ["name", "description", "exchange", "earnings_release_next_date"] }),
+    body: JSON.stringify({ symbols: { tickers: symbols, query: { types: [] } }, columns: ["name", "description", "exchange", "earnings_release_next_date", "type", "sector", "industry"] }),
     signal: AbortSignal.timeout(20_000),
   });
   const metadata: any = metadataResponse.ok ? await metadataResponse.json() : { data: [] };
   const names = new Map<string, string>((metadata.data || []).map((item: any) => [item.s, item.d?.[1] || item.d?.[0] || ""]));
   const earnings = new Map<string, number | null>((metadata.data || []).map((item: any) => [item.s, Number.isFinite(item.d?.[3]) ? item.d[3] : null]));
-  return { symbols, names, earnings, modified: list.modified };
+  const details = new Map<string, any>((metadata.data || []).map((item: any) => [item.s, { type: item.d?.[4], sector: item.d?.[5], industry: item.d?.[6] }]));
+  return { symbols, names, earnings, sections, details, modified: list.modified };
 }
 
 function seedWatchlist() {
@@ -1177,7 +1236,7 @@ async function syncAlertRegistryMessage() {
   if (!channel) return false;
   const items = await enrichInstrumentNames(Object.values(state.alertRegistry) as any[]);
   state.alertRegistry = Object.fromEntries(items.map((item) => [`${item.exchange}:${item.ticker}`, item]));
-  const chunks = splitDiscordText(formatAlertRegistry(items));
+  const chunks = splitDiscordSections(formatAlertRegistry(items));
   const previous = [];
   for (const id of state.alertRegistryMessageIds) {
     try { previous.push(await channel.messages.fetch(id)); } catch { previous.push(null); }
@@ -1225,11 +1284,14 @@ async function refreshAlertRegistry() {
     const remote = await fetchSharedWatchlist(TRADINGVIEW_ALERT_WATCHLIST_URL);
     const items = await enrichInstrumentNames(remote.symbols.map((symbol) => {
       const [exchange, ticker] = symbol.split(":");
+      const classification = state.watchlist[symbol] || remote.sections.get(symbol) || {};
       return {
         exchange,
         ticker,
         name: remote.names.get(symbol) || state.alertRegistry[symbol]?.name || "",
         nextEarningsAt: remote.earnings.get(symbol) || null,
+        country: classification.country || inferWatchlistCountry({ exchange }),
+        category: classification.category || inferWatchlistCategory({ ...remote.details.get(symbol), name: remote.names.get(symbol) }),
       };
     }));
     state.alertRegistry = Object.fromEntries(items.map((item) => [`${item.exchange}:${item.ticker}`, item]));
@@ -1263,7 +1325,7 @@ async function syncWatchlistMessage() {
   if (!channel) return;
   const items = await enrichInstrumentNames(Object.values(state.watchlist) as any[]);
   state.watchlist = Object.fromEntries(items.map((item) => [`${item.exchange}:${item.ticker}`, item]));
-  const chunks = splitDiscordText(formatWatchlist(items));
+  const chunks = splitDiscordSections(formatWatchlist(items));
   const previousIds = state.watchlistMessageIds.length ? state.watchlistMessageIds : [state.watchlistMessageId].filter(Boolean);
   const previous = [];
   for (const id of previousIds) {
@@ -1286,7 +1348,15 @@ async function refreshSharedWatchlist() {
   const remote = await fetchSharedWatchlist();
   const items = await enrichInstrumentNames(remote.symbols.map((symbol) => {
     const [exchange, ticker] = symbol.split(":");
-    return { exchange, ticker, name: state.watchlist[symbol]?.name || remote.names.get(symbol) || "" };
+    const section = remote.sections.get(symbol) || {};
+    const details = remote.details.get(symbol) || {};
+    return {
+      exchange,
+      ticker,
+      name: state.watchlist[symbol]?.name || remote.names.get(symbol) || "",
+      country: section.country || inferWatchlistCountry({ exchange }),
+      category: section.category || inferWatchlistCategory({ ...details, name: remote.names.get(symbol) }),
+    };
   }));
   state.watchlist = Object.fromEntries(items.map((item) => [`${item.exchange}:${item.ticker}`, item]));
   saveState();
@@ -1294,10 +1364,10 @@ async function refreshSharedWatchlist() {
   return remote;
 }
 
-async function checkWatchlistSync(now = new Date()) {
+async function checkWatchlistSync(now = new Date(), force = false) {
   if (!TRADINGVIEW_WATCHLIST_URL) return false;
   const clock = zonedClock(now, WATCHLIST_SYNC_TIMEZONE);
-  if (clock.time < WATCHLIST_SYNC_TIME || state.watchlistSyncRuns[clock.date]) return false;
+  if (!force && (clock.time < WATCHLIST_SYNC_TIME || state.watchlistSyncRuns[clock.date])) return false;
   const result = await refreshSharedWatchlist();
   state.watchlistSyncRuns[clock.date] = new Date().toISOString();
   for (const oldDate of Object.keys(state.watchlistSyncRuns).sort().slice(0, -90)) delete state.watchlistSyncRuns[oldDate];
@@ -2337,7 +2407,7 @@ async function checkInvestorPortfolioRefresh(now = new Date(), force = false) {
       { name: "JP모건 체이스 / JPMorgan Chase", cik: 19617 },
       { name: "골드만삭스 / Goldman Sachs", cik: 886982 },
       { name: "모건스탠리 / Morgan Stanley", cik: 895421 },
-      { name: "르네상스 테크놀로지스 / Renaissance Technologies", cik: 1037389 },
+      { name: "르네상스 테크놀로지스 (미국 퀀트 투자운용사) / Renaissance Technologies", cik: 1037389 },
     ], Number.POSITIVE_INFINITY, { userAgent: process.env.SEC_USER_AGENT, minimumWeight: 1 });
     const institutionAnswer = `${institutionHoldings}\n\n13F는 지연 공시이며 숏·현금·비상장·공시 후 거래를 보여주지 않습니다. 지수·고객자산·수탁·마켓메이킹·헤지 목적 보유는 기관의 확신 매수로 해석하면 안 됩니다.`.trim();
     if (!institutionAnswer) throw new Error("기관 포트폴리오 문맥이 비어 있습니다.");
@@ -2680,7 +2750,11 @@ async function main() {
   }
   await Promise.all(PERSONAS.map((persona) => clients.get(persona.id).login(process.env[persona.tokenEnv])));
   seedWatchlist();
-  await syncWatchlistMessage();
+  if (TRADINGVIEW_WATCHLIST_URL) {
+    await checkWatchlistSync(new Date(), true).catch((error) => console.error("TradingView 관심종목 갱신 실패:", error.message));
+  } else {
+    await syncWatchlistMessage();
+  }
   startWatchlistScheduler();
   seedAlertRegistry();
   await checkAlertRegistrySync(new Date(), true).catch((error) => console.error("TradingView 알람설정 갱신 실패:", error.message));
@@ -2709,7 +2783,13 @@ function selfTest() {
   if (shouldRetryCodex(Object.assign(new Error("timeout"), { code: "CODEX_TIMEOUT" }), "session-1")) throw new Error("시간초과 재시도 차단 실패");
   if (shouldRetryCodex(Object.assign(new Error("stopped"), { code: "CODEX_STOPPED" }), "session-1")) throw new Error("중지된 대화 재시도 차단 실패");
   if (!shouldRetryCodex(new Error("resume failed"), "session-1")) throw new Error("세션 복구 재시도 실패");
-  if (!formatWatchlist([{ exchange: "KRX", ticker: "005930", name: "삼성전자" }, { exchange: "NASDAQ", ticker: "NVDA", name: "NVIDIA" }], new Date("2026-08-10T00:00:00Z")).includes("삼성전자 (005930)")) throw new Error("관심종목 목록 실패");
+  const groupedWatchlist = formatWatchlist([
+    { exchange: "KRX", ticker: "005930", name: "삼성전자", country: "한국", category: "하드웨어" },
+    { exchange: "NASDAQ", ticker: "NVDA", name: "NVIDIA", country: "미국", category: "하드웨어" },
+    { exchange: "TSE", ticker: "2644", name: "Global X Japan Semiconductor ETF", country: "일본", category: "ETF" },
+  ], new Date("2026-08-10T00:00:00Z"));
+  if (!groupedWatchlist.includes("🇰🇷 **한국 (1)**") || !groupedWatchlist.includes("**하드웨어 (1)**")
+      || !groupedWatchlist.includes("🇯🇵 **일본 (1)**") || !groupedWatchlist.includes("**ETF (1)**")) throw new Error("관심종목 국가·분류 목록 실패");
   const alertItems = parseConfiguredAlerts("KRX:005930=삼성전자,NASDAQ:NVDA=NVIDIA");
   if (alertItems.length !== 2 || alertItems[0].ticker !== "005930") throw new Error("알람설정 파서 실패");
   const alertRegistry = formatAlertRegistry(alertItems, new Date("2026-08-10T00:00:00Z"));
@@ -2731,8 +2811,11 @@ function selfTest() {
     throw new Error("ngrok 터널 상태 식별 실패");
   }
   if (splitDiscordText("a\n".repeat(2_000)).some((chunk) => chunk.length > 1900)) throw new Error("Discord 관심종목 분할 실패");
-  const parsedWatchlist = parseSharedWatchlist('<script type="application/prs.init-data+json">{"sharedWatchlist":{"list":{"symbols":["NASDAQ:NVDA"]}}}</script>');
-  if (parsedWatchlist.symbols[0] !== "NASDAQ:NVDA") throw new Error("공유 관심종목 파서 실패");
+  if (splitDiscordSections(`${"a".repeat(1_000)}\n\n${"b".repeat(1_000)}`).length !== 2) throw new Error("Discord 관심종목 구역 분할 실패");
+  const parsedWatchlist = parseSharedWatchlist('<script type="application/prs.init-data+json">{"sharedWatchlist":{"list":{"symbols":["###미국","###⁤하드웨어","NASDAQ:NVDA"]}}}</script>');
+  if (!parsedWatchlist.symbols.includes("NASDAQ:NVDA")) throw new Error("공유 관심종목 파서 실패");
+  const parsedSections = watchlistSections(parsedWatchlist.symbols);
+  if (parsedSections.get("NASDAQ:NVDA")?.country !== "미국" || parsedSections.get("NASDAQ:NVDA")?.category !== "하드웨어") throw new Error("공유 관심종목 구역 파서 실패");
   if (!formatDailyJournal("2026-08-10", ["- BUY NVDA"]).embed.title.includes("모의매매 일지")) throw new Error("매매일지 형식 실패");
   if (PERSONAS.length !== 5 || new Set(PERSONAS.map((item) => item.id)).size !== 5) throw new Error("페르소나 설정 실패");
   const sharedContextPrompts = PERSONAS.map((persona) => personaPrompt(persona, "테스트"));
