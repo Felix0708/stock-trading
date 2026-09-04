@@ -2590,7 +2590,7 @@ async function main() {
   await syncWatchlistMessage();
   startWatchlistScheduler();
   seedAlertRegistry();
-  await checkAlertRegistrySync(new Date(), true);
+  await checkAlertRegistrySync(new Date(), true).catch((error) => console.error("TradingView 알람설정 갱신 실패:", error.message));
   startAlertRegistryScheduler();
   startTradingController();
   startMyPortfolioScheduler();
