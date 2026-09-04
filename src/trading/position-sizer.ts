@@ -80,8 +80,9 @@ function calculatePositionSize(input: PositionSizeInput = {} as PositionSizeInpu
   const qualityMultiplier = Math.min(1.3, CONVICTION_MULTIPLIER[grade] * setupMultiplier);
   let heatMultiplier = 1;
   if (typeof atrMultiple === "number" && Number.isFinite(atrMultiple) && atrMultiple > atrDotThreshold * 0.7) heatMultiplier *= 0.7;
-  if (sbZScore > 2) heatMultiplier *= 0.5;
-  else if (sbZScore > 1.5) heatMultiplier *= 0.7;
+  if (sbZScore > 3) heatMultiplier *= 0.25;
+  else if (sbZScore > 2.5) heatMultiplier *= 0.5;
+  else if (sbZScore > 2) heatMultiplier *= 0.7;
 
   const baseRisk = equity * (earlyEntry ? 0.0025 : 0.005);
   const riskBudget = Math.min(equity * 0.01, baseRisk * qualityMultiplier * heatMultiplier);
