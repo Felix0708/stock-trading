@@ -111,7 +111,7 @@ const record = {
 
   const autoTracker = new OrderTracker(path.join(directory, "auto-orders.json"));
   const autoRecord = {
-    payload: { ticker: "AAPL", exchange: "NASDAQ", action: "BUY", price: 250 },
+    payload: { ticker: "AAPL", exchange: "NASDAQ", timeframe: "D", action: "BUY", price: 250 },
     risk: { verdict: "PAPER_ADD" },
     positionPreview: {
       quantity: 4, positionValue: 1000, projectedPositionRatio: 12.5,
@@ -154,6 +154,7 @@ const record = {
   assert.equal(auto.initialEntryQuantity, 8);
   assert.equal(auto.limitPrice, 241.2);
   assert.equal(auto.referencePrice, 240);
+  assert.equal(auto.timeframe, "D");
   const usExit = await submitPaperOrder({
     requestId: "sell-se",
     payload: { ticker: "SE", exchange: "NYSE", action: "SELL", price: 113.41 },

@@ -138,6 +138,12 @@ const signalServer = new TradeController({ initialMode: "PAPER_AUTO", accountNeu
 const neutralEntry = entry(13);
 neutralEntry.positionPreview = { blocked: true, reason: "특정 계좌 현금 부족" };
 assert.equal(signalServer.evaluate(neutralEntry).verdict, "PAPER_ENTRY");
+const neutralDaily = entry(131, { timeframe: "D", conviction: "B" });
+assert.equal(signalServer.evaluate(neutralDaily).verdict, "PAPER_ENTRY");
+const neutralDailyC = entry(132, { timeframe: "1D", conviction: "C" });
+assert.equal(signalServer.evaluate(neutralDailyC).verdict, "BUY_PENDING_APPROVAL");
+const neutralDailyMixed = entry(133, { timeframe: "D", conviction: "B", daily_trend: "MIXED", daily_ema_aligned: false });
+assert.equal(signalServer.evaluate(neutralDailyMixed).verdict, "BUY_PENDING_APPROVAL");
 const neutralAdd = { ...entry(14), outcome: { decision: "ADD_CANDIDATE" } };
 assert.equal(signalServer.evaluate(neutralAdd).verdict, "PAPER_ADD");
 const neutralExit = { ...entry(15), payload: { ...entry(15).payload, action: "SELL" }, outcome: { decision: "EXIT_CANDIDATE" } };

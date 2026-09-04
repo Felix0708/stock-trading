@@ -1,6 +1,6 @@
 "use strict";
 
-type SignalPayload = { sl?: number | null; momentum_sl?: number | null; price: number; conviction?: string; daily_setup_stage?: string; atr_multiple?: number | null; atr_dot?: boolean; atr_dot_threshold?: number; sb_z_score?: number; daily_trend?: string; daily_ema_aligned?: boolean; daily_above_200ma?: boolean };
+type SignalPayload = { timeframe?: string; sl?: number | null; momentum_sl?: number | null; price: number; conviction?: string; daily_setup_stage?: string; atr_multiple?: number | null; atr_dot?: boolean; atr_dot_threshold?: number; sb_z_score?: number; daily_trend?: string; daily_ema_aligned?: boolean; daily_above_200ma?: boolean };
 type SignalRecord = { payload: SignalPayload; outcome?: { decision?: string; signal?: { signalCode?: string } } };
 type Holding = { profitLoss?: number; purchaseAmount?: number; evaluationAmount?: number; profitRate?: number };
 type TrackedPosition = { fillPrice?: number };
@@ -8,6 +8,10 @@ type PositionSizeInput = { equity: number; availableCash?: number; entryPrice: n
 type AccountSizingContext = { equity: number; availableCash: number; openPositions: number; maxOpenPositions: number; currentPositionValue: number; currentPositionQuantity?: number; hasExistingPosition?: boolean; positionProfitable?: boolean | null; currency?: string; totalAccountEquity?: number | null; autoCapital?: number | null; autoCapitalRatio?: number; currentOpenRisk?: number | null; maxOpenRisk?: number | null; maxOpenRiskRatio?: number };
 
 const CONVICTION_MULTIPLIER: Record<string, number> = { S: 1.3, A: 1.1, B: 1, C: 0.7, D: 0 };
+
+function isDailyTimeframe(value: unknown) {
+  return ["D", "1D", "DAY", "1DAY"].includes(String(value || "").trim().toUpperCase());
+}
 
 function effectiveStopPrice(record: SignalRecord) {
   const payload: SignalPayload = record?.payload || ({} as SignalPayload);
@@ -124,7 +128,7 @@ function calculateWebhookPositionPreview(record: SignalRecord, account: AccountS
   const capitalOnly = ["PEG_PULLBACK", "PEG_REBREAK"].includes(record?.outcome?.signal?.signalCode || "") && stopPrice === null;
   const dailyProvided = payload.daily_trend !== undefined
     || payload.daily_ema_aligned !== undefined || payload.daily_above_200ma !== undefined;
-  const earlyEntry = capitalOnly || (dailyProvided && (payload.daily_trend !== "BULL"
+  const earlyEntry = capitalOnly || isDailyTimeframe(payload.timeframe) || (dailyProvided && (payload.daily_trend !== "BULL"
     || payload.daily_ema_aligned !== true || payload.daily_above_200ma !== true));
   const result = calculatePositionSize({
     equity: account.equity,
@@ -165,4 +169,4 @@ function calculateWebhookPositionPreview(record: SignalRecord, account: AccountS
   };
 }
 
-module.exports = { calculatePositionSize, calculateWebhookPositionPreview, effectiveStopPrice, inferPositionProfitable, CONVICTION_MULTIPLIER };
+module.exports = { calculatePositionSize, calculateWebhookPositionPreview, effectiveStopPrice, inferPositionProfitable, isDailyTimeframe, CONVICTION_MULTIPLIER };

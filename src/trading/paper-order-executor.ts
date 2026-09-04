@@ -259,6 +259,7 @@ async function submitPaperOrder(record: SignalRecord, options: ExecutorOptions) 
     brokerLabel: options.brokerLabel || "키움 모의계좌",
     environment: options.environment,
     source: record.source || "TRADINGVIEW", market: exchange, name: payload.name,
+    timeframe: payload.timeframe,
     koreanName: payload.koreanName, englishName: payload.englishName,
     signalType: payload.type, signalPrice: payload.price, stopPrice: positionPreview?.stopPrice ?? payload.sl,
     conviction: payload.conviction, requestId: record.requestId,

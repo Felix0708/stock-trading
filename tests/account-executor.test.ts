@@ -1,7 +1,7 @@
 "use strict";
 
 const assert = require("node:assert/strict");
-const { accountCommand, accountContext, accountPortfolioSyncMinutes, accountRiskPolicy, accountSymbol, applyPyramidSizing, approvalText, approvedEntryVerdict, availableApprovalBrokerIds, brokerEnvironments, buyApprovalRequiredForBroker, deferredOrderAttemptDue, discordMessagePayload, enabledBrokerIds, enforceOpenRiskLimit, enforceOwnAccountRules, errorReportDue, executionPreview, invalidationExitReason, liveAutoBuyEligible, marketTransitionRetryDelayMs, momentumExitRecommendation, orderAttemptKey, orderNeedsPortfolioSync, orderNeedsResultReport, orderStatusUnknown, pyramidPlan, readOnlySignalAllowed, reconcilePendingBrokerOrders, requiresExistingPosition, shouldConsumeMessage, shouldRetryMarketTransition, SignalReceiptStore, skippedNoPosition, trackedPortfolio, verificationDelayMs } = require("../src/executor/account-executor");
+const { accountCommand, accountContext, accountPortfolioSyncMinutes, accountRiskPolicy, accountSymbol, applyPyramidSizing, approvalText, approvedEntryVerdict, availableApprovalBrokerIds, brokerEnvironments, buyApprovalRequiredForBroker, deferredOrderAttemptDue, discordMessagePayload, enabledBrokerIds, enforceOpenRiskLimit, enforceOwnAccountRules, errorReportDue, executionPreview, invalidationExitReason, liveAutoBuyEligible, marketTransitionRetryDelayMs, momentumExitRecommendation, orderAttemptKey, orderNeedsPortfolioSync, orderNeedsResultReport, orderStatusUnknown, pendingSymbolOrder, pyramidPlan, readOnlySignalAllowed, reconcilePendingBrokerOrders, requiresExistingPosition, shouldConsumeMessage, shouldRetryMarketTransition, SignalReceiptStore, skippedExistingEntry, skippedNoPosition, trackedPortfolio, verificationDelayMs } = require("../src/executor/account-executor");
 const { calculateWebhookPositionPreview } = require("../src/trading/position-sizer");
 
 assert.deepEqual(enabledBrokerIds({ ACCOUNT_EXECUTOR_ENABLED: "true", EXECUTOR_KIWOOM_ENABLED: "true", EXECUTOR_KIS_ENABLED: "true" }), ["KIWOOM", "KIS"]);
@@ -148,6 +148,7 @@ assert.equal(liveAutoBuyEligible({ payload: { ...strongBuy.payload, conviction: 
 assert.equal(liveAutoBuyEligible(mixedBuy), false);
 assert.equal(buyApprovalRequiredForBroker({ environment: "mock" }, mixedBuy, true), false);
 assert.equal(buyApprovalRequiredForBroker({ environment: "live" }, strongBuy, true), false);
+assert.equal(buyApprovalRequiredForBroker({ environment: "live" }, { payload: { ...strongBuy.payload, timeframe: "D" } }, true), true);
 assert.equal(buyApprovalRequiredForBroker({ environment: "live" }, mixedBuy, true), true);
 assert.equal(buyApprovalRequiredForBroker({ environment: "mock" }, strongBuy, false), true);
 assert.equal(approvedEntryVerdict({ outcome: { decision: "ENTRY_CANDIDATE" } }), "PAPER_ENTRY");
@@ -160,6 +161,14 @@ assert.deepEqual(skippedNoPosition({ payload: { action: "BUY" }, risk: { verdict
 assert.deepEqual(skippedNoPosition({ payload: { action: "SELL" }, risk: { verdict: "PAPER_EXIT" } }, { hasExistingPosition: false }), { status: "SKIPPED_NO_POSITION", reason: "해당 계좌 미보유" });
 assert.equal(skippedNoPosition({ payload: { action: "SELL" }, risk: { verdict: "PAPER_EXIT" } }, { hasExistingPosition: true }), null);
 assert.equal(skippedNoPosition({ payload: { action: "BUY" }, risk: { verdict: "PAPER_ENTRY" } }, { hasExistingPosition: false }), null);
+assert.deepEqual(skippedExistingEntry({ risk: { verdict: "PAPER_ENTRY" } }, { hasExistingPosition: true }), { status: "SKIPPED_EXISTING_POSITION", reason: "해당 계좌 보유 확인 — 추가 주문 없음" });
+assert.equal(skippedExistingEntry({ risk: { verdict: "PAPER_ADD" } }, { hasExistingPosition: true }), null);
+assert.equal(pendingSymbolOrder([
+  { market: "NASDAQ", symbol: "META", side: "BUY", status: "ACCEPTED" },
+], { payload: { exchange: "NASDAQ", ticker: "META", timeframe: "D" } }).side, "BUY");
+assert.equal(pendingSymbolOrder([
+  { market: "NASDAQ", symbol: "META", side: "BUY", status: "FILLED" },
+], { payload: { exchange: "NASDAQ", ticker: "META", timeframe: "240" } }), null);
 const heldSell = { payload: { action: "SELL" }, risk: { verdict: "PAPER_EXIT" } };
 const heldSellPreview = executionPreview(heldSell, { hasExistingPosition: true, currentPositionQuantity: 63, currentPositionValue: 7_000 }, null);
 assert.equal(heldSellPreview.hasExistingPosition, true);

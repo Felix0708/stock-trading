@@ -23,7 +23,7 @@ const {
   usSession,
   usSessionClock,
 } = require("../trading/paper-order-executor");
-const { calculateWebhookPositionPreview, inferPositionProfitable } = require("../trading/position-sizer");
+const { calculateWebhookPositionPreview, inferPositionProfitable, isDailyTimeframe } = require("../trading/position-sizer");
 const { formatBrokerStartup, formatDeferredOrder, formatDeferredVerification, formatExecutorError, formatOrderStatus, formatTradeJournal, formatUncreatedOrder } = require("../discord/order-discord");
 
 const VERIFICATION_RETRY_DELAYS_MS = [60_000, 5 * 60_000, 15 * 60_000];
@@ -66,6 +66,12 @@ function requiresExistingPosition(record) {
 function skippedNoPosition(record, preview) {
   return requiresExistingPosition(record) && preview?.hasExistingPosition !== true
     ? { status: "SKIPPED_NO_POSITION", reason: "해당 계좌 미보유" }
+    : null;
+}
+
+function skippedExistingEntry(record, preview) {
+  return record?.risk?.verdict === "PAPER_ENTRY" && preview?.hasExistingPosition === true
+    ? { status: "SKIPPED_EXISTING_POSITION", reason: "해당 계좌 보유 확인 — 추가 주문 없음" }
     : null;
 }
 
@@ -440,6 +446,7 @@ function momentumExitRecommendation(account, payload) {
 
 function buyApprovalRequiredForBroker(broker, record, autoTrading) {
   if (!autoTrading) return true;
+  if (broker.environment === "live" && isDailyTimeframe(record?.payload?.timeframe)) return true;
   return broker.environment === "live" && !liveAutoBuyEligible(record);
 }
 
@@ -634,6 +641,14 @@ function enforceOpenRiskLimit(preview) {
 
 const PYRAMID_RATIOS = [0.5, 0.25];
 const PENDING_ORDER_STATUSES = new Set(["ACCEPTED", "CANCEL_REQUESTED", "PARTIALLY_FILLED"]);
+
+function pendingSymbolOrder(orders, record) {
+  const market = String(record?.payload?.exchange || "").toUpperCase();
+  const symbol = accountSymbol(record?.payload?.ticker);
+  return orders.find((order) => PENDING_ORDER_STATUSES.has(order.status)
+    && String(order.market || "").toUpperCase() === market
+    && accountSymbol(order.symbol) === symbol) || null;
+}
 
 function pyramidPlan(orders, record) {
   const market = String(record.payload?.exchange || "").toUpperCase();
@@ -876,6 +891,15 @@ async function start() {
       throw verificationError;
     }
     const calculated = executionPreview(sizingRecord, ownAccount, calculateWebhookPositionPreview(sizingRecord, ownAccount));
+    const pendingOrder = pendingSymbolOrder(broker.tracker.list(), sizingRecord);
+    if (pendingOrder) {
+      return { label: broker.label, preview: {
+        ...calculated,
+        blocked: true,
+        quantity: 0,
+        reason: `동일 종목 ${pendingOrder.side === "SELL" ? "매도" : "매수"} 주문 체결 확인 중`,
+      } };
+    }
     const sized = applyPyramidSizing(sizingRecord,
       enforceOwnAccountRules(sizingRecord, ownAccount, calculated),
       broker.tracker.list());
@@ -924,8 +948,17 @@ async function start() {
     }
     record.positionPreview = (await previewFor(broker, record)).preview;
     record.accountVerified = true;
+    const existingEntry = skippedExistingEntry(record, record.positionPreview);
+    if (existingEntry) return existingEntry;
     const skipped = skippedNoPosition(record, record.positionPreview);
     if (skipped) return skipped;
+    if (record.positionPreview?.blocked) {
+      await send(channels.execution, formatUncreatedOrder(brokerAccountLabel(broker), record, {
+        title: "주문 차단",
+        reason: record.positionPreview.reason || "주문 조건 불충족",
+      }));
+      return null;
+    }
     if (shouldDelayOrder(record)) return { status: "DEFER_REQUIRED" };
     if (refreshQuote) record.payload.price = await currentSignalPrice(broker, record.payload);
     const stage = partialExitStage(record);
@@ -1315,6 +1348,7 @@ async function start() {
         const previews = Object.fromEntries(await Promise.all(approvalBrokers.map(async (broker) => [broker.id, await previewFor(broker, structuredClone(record))])));
         const brokerIds = availableApprovalBrokerIds(previews, approvalBrokers.map((broker) => broker.id));
         for (const broker of approvalBrokers.filter((item) => !brokerIds.includes(item.id))) {
+          if (skippedExistingEntry(record, previews[broker.id]?.preview)) continue;
           await send(channels.execution, formatUncreatedOrder(brokerAccountLabel(broker), record, {
             title: "주문 차단",
             reason: previews[broker.id]?.preview?.reason || "주문 조건 불충족",
@@ -1417,4 +1451,4 @@ async function start() {
 
 if (require.main === module) start().catch((error) => { console.error(error); process.exitCode = 1; });
 
-module.exports = { SignalReceiptStore, accountCommand, accountContext, accountPortfolioSyncMinutes, accountRiskPolicy, accountSymbol, applyPyramidSizing, approvalText, approvedEntryVerdict, availableApprovalBrokerIds, brokerEnvironments, buyApprovalRequiredForBroker, deferredOrderAttemptDue, discordMessagePayload, enabledBrokerIds, enforceOpenRiskLimit, enforceOwnAccountRules, errorReportDue, executionPreview, invalidationExitReason, liveAutoBuyEligible, marketTransitionRetryDelayMs, momentumExitRecommendation, orderAttemptKey, orderNeedsPortfolioSync, orderNeedsResultReport, orderStatusUnknown, pyramidPlan, readOnlySignalAllowed, reconcilePendingBrokerOrders, requiresExistingPosition, shouldConsumeMessage, shouldRetryMarketTransition, signalExchange, skippedNoPosition, start, trackedPortfolio, verificationDelayMs };
+module.exports = { SignalReceiptStore, accountCommand, accountContext, accountPortfolioSyncMinutes, accountRiskPolicy, accountSymbol, applyPyramidSizing, approvalText, approvedEntryVerdict, availableApprovalBrokerIds, brokerEnvironments, buyApprovalRequiredForBroker, deferredOrderAttemptDue, discordMessagePayload, enabledBrokerIds, enforceOpenRiskLimit, enforceOwnAccountRules, errorReportDue, executionPreview, invalidationExitReason, liveAutoBuyEligible, marketTransitionRetryDelayMs, momentumExitRecommendation, orderAttemptKey, orderNeedsPortfolioSync, orderNeedsResultReport, orderStatusUnknown, pendingSymbolOrder, pyramidPlan, readOnlySignalAllowed, reconcilePendingBrokerOrders, requiresExistingPosition, shouldConsumeMessage, shouldRetryMarketTransition, signalExchange, skippedExistingEntry, skippedNoPosition, start, trackedPortfolio, verificationDelayMs };

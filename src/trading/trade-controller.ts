@@ -1,7 +1,7 @@
 "use strict";
 
 const fs = require("node:fs");
-const { effectiveStopPrice } = require("./position-sizer");
+const { effectiveStopPrice, isDailyTimeframe } = require("./position-sizer");
 
 const TRADING_MODES = new Set(["OFF", "SHADOW", "PAPER_AUTO"]);
 const ENTRY_DECISIONS = new Set(["ENTRY_CANDIDATE", "ADD_CANDIDATE"]);
@@ -13,6 +13,17 @@ function positionKey(payload) {
 
 function partialExitKey(outcome) {
   return `${outcome?.signal?.signalCode || "UNKNOWN"}:${outcome?.signal?.tpLevel || ""}`;
+}
+
+function dailyEntryApprovalReason(payload) {
+  if (!isDailyTimeframe(payload?.timeframe)) return "";
+  if (!["S", "A", "B"].includes(String(payload.conviction || "").toUpperCase())) {
+    return "일봉 단독 진입 C등급 — 절반 수량 사용자 승인 대기";
+  }
+  if (payload.daily_trend !== "BULL" || payload.daily_ema_aligned !== true || payload.daily_above_200ma !== true) {
+    return "일봉 단독 진입 추세 미확정 — 절반 수량 사용자 승인 대기";
+  }
+  return "";
 }
 
 class TradeController {
@@ -182,10 +193,11 @@ class TradeController {
     const weakDaily = payload.daily_trend === "BEAR" || payload.daily_above_200ma !== true;
     const pegWithoutStop = ["PEG_PULLBACK", "PEG_REBREAK"].includes(record.outcome?.signal?.signalCode)
       && effectiveStopPrice(record) === null;
-    if ((weakDaily || pegWithoutStop) && this.state.mode === "PAPER_AUTO" && record.buyApproved !== true) {
-      return { verdict: "BUY_PENDING_APPROVAL", reason: pegWithoutStop
+    const dailyApprovalReason = dailyEntryApprovalReason(payload);
+    if ((weakDaily || pegWithoutStop || dailyApprovalReason) && this.state.mode === "PAPER_AUTO" && record.buyApproved !== true) {
+      return { verdict: "BUY_PENDING_APPROVAL", reason: dailyApprovalReason || (pegWithoutStop
         ? "PEG 손절가 없음 — 종목 최대 10% 수동 승인 대기"
-        : "일봉 약세 또는 200일선 아래 — 소액 진입 사용자 승인 대기" };
+        : "일봉 약세 또는 200일선 아래 — 소액 진입 사용자 승인 대기") };
     }
     if (payload.daily_trend !== "BULL" || !payload.daily_ema_aligned || payload.daily_above_200ma !== true) {
       if (!this.earlyEntryApprovalEnabled || this.state.mode !== "PAPER_AUTO") {
@@ -282,10 +294,11 @@ class TradeController {
     const payload = record.payload;
     const pegWithoutStop = ["PEG_PULLBACK", "PEG_REBREAK"].includes(record.outcome?.signal?.signalCode)
       && effectiveStopPrice(record) === null;
-    if (pegWithoutStop || payload.daily_trend === "BEAR" || payload.daily_above_200ma !== true) {
+    const dailyApprovalReason = dailyEntryApprovalReason(payload);
+    if (dailyApprovalReason || pegWithoutStop || payload.daily_trend === "BEAR" || payload.daily_above_200ma !== true) {
       return {
         verdict: "BUY_PENDING_APPROVAL",
-        reason: pegWithoutStop ? "PEG 손절가 없음 — 종목 최대 10% 수동 승인 대기" : "일봉 약세 또는 200일선 아래 — 소액 진입 사용자 승인 대기",
+        reason: dailyApprovalReason || (pegWithoutStop ? "PEG 손절가 없음 — 종목 최대 10% 수동 승인 대기" : "일봉 약세 또는 200일선 아래 — 소액 진입 사용자 승인 대기"),
       };
     }
     return {
@@ -334,6 +347,7 @@ class TradeController {
 module.exports = {
   TradeController,
   TRADING_MODES,
+  dailyEntryApprovalReason,
   partialExitKey,
   positionKey,
 };

@@ -1,7 +1,7 @@
 "use strict";
 
 const assert = require("node:assert/strict");
-const { calculatePositionSize, calculateWebhookPositionPreview, effectiveStopPrice, inferPositionProfitable } = require("../src/trading/position-sizer");
+const { calculatePositionSize, calculateWebhookPositionPreview, effectiveStopPrice, inferPositionProfitable, isDailyTimeframe } = require("../src/trading/position-sizer");
 
 const base = { equity: 100000, availableCash: 100000, entryPrice: 100, stopPrice: 95 };
 assert.equal(calculatePositionSize({ ...base, conviction: "B" }).quantity, 100);
@@ -38,6 +38,18 @@ const earlyPreview = calculateWebhookPositionPreview({
 assert.equal(earlyPreview.earlyEntry, true);
 assert.equal(earlyPreview.quantity, 55);
 assert.equal(earlyPreview.positionLimitRatio, 0.1);
+const dailyPreview = calculateWebhookPositionPreview({
+  ...record,
+  payload: { ...record.payload, timeframe: "1D", daily_trend: "BULL", daily_ema_aligned: true, daily_above_200ma: true },
+}, {
+  equity: 100000, availableCash: 100000, openPositions: 0, maxOpenPositions: 5,
+});
+assert.equal(dailyPreview.earlyEntry, true);
+assert.equal(dailyPreview.quantity, 55);
+assert.equal(dailyPreview.positionLimitRatio, 0.1);
+assert.equal(isDailyTimeframe("D"), true);
+assert.equal(isDailyTimeframe("1D"), true);
+assert.equal(isDailyTimeframe("240"), false);
 const pegRecord = {
   ...record,
   payload: { ...record.payload, sl: null, momentum_sl: null, daily_trend: "BULL", daily_ema_aligned: true, daily_above_200ma: true },
