@@ -12,6 +12,9 @@ assert.equal(calculatePositionSize({ ...base, conviction: "C", dailySetupStage: 
 assert.equal(calculatePositionSize({ ...base, conviction: "D" }).blocked, true);
 assert.equal(calculatePositionSize({ ...base, conviction: "B", atrDot: true }).blocked, true);
 assert.equal(calculatePositionSize({ ...base, conviction: "B", sbZScore: 2.2 }).quantity, 50);
+assert.equal(calculatePositionSize({ ...base, conviction: "B", sbZScore: 2.58 }).quantity, 50);
+assert.equal(calculatePositionSize({ ...base, conviction: "B", sbZScore: 3.15 }).quantity, 50);
+assert.deepEqual(calculatePositionSize({ ...base, conviction: "B", sbZScore: 3.51 }), { blocked: true, reason: "Sigma 극심한 과열", quantity: 0 });
 assert.equal(calculatePositionSize({ equity: 100000, entryPrice: 1000, stopPrice: 999 }).quantity, 20);
 assert.equal(calculatePositionSize({ ...base, openPositions: 5 }).blocked, true);
 assert.throws(() => calculatePositionSize({ ...base, stopPrice: 101 }), /손절가/);

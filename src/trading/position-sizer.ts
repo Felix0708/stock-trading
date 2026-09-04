@@ -74,7 +74,7 @@ function calculatePositionSize(input: PositionSizeInput = {} as PositionSizeInpu
   if (atrDot || (typeof atrMultiple === "number" && Number.isFinite(atrMultiple) && atrMultiple > atrDotThreshold)) {
     return { blocked: true, reason: "ATR 과열", quantity: 0 };
   }
-  if (sbZScore > 2.5) return { blocked: true, reason: "Sigma 과열", quantity: 0 };
+  if (sbZScore > 3.5) return { blocked: true, reason: "Sigma 극심한 과열", quantity: 0 };
 
   const setupMultiplier = dailySetupStage === "COMPLETE" ? 1.3 : 1;
   const qualityMultiplier = Math.min(1.3, CONVICTION_MULTIPLIER[grade] * setupMultiplier);
