@@ -1266,7 +1266,7 @@ async function syncAlertRegistryMessage() {
 async function syncEarningsCalendarMessage(items) {
   const channel = findTextChannelByName(EARNINGS_CALENDAR_CHANNEL);
   if (!channel) return false;
-  const chunks = splitDiscordText(formatEarningsCalendar(items));
+  const chunks = registryMessagePayloads(formatEarningsCalendar(items));
   const previous = [];
   for (const id of state.earningsCalendarMessageIds) {
     try { previous.push(await channel.messages.fetch(id)); } catch { previous.push(null); }
