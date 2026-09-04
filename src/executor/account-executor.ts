@@ -752,6 +752,21 @@ function approvalText(record, previews, brokerIds = Object.keys(previews)) {
   ].join("\n");
 }
 
+function approvalCard(record, previews, brokerIds, ttlMs) {
+  const text = approvalText(record, previews, brokerIds);
+  const [, ...description] = text.split("\n");
+  return {
+    text,
+    embed: {
+      color: 0xFEE75C,
+      title: "⏳ BUY 승인 대기",
+      description: description.join("\n"),
+      footer: { text: `${Math.round(ttlMs / 60_000)}분 안에 승인 · 승인 전 주문 생성 안 됨` },
+      ...(record.receivedAt ? { timestamp: record.receivedAt } : {}),
+    },
+  };
+}
+
 function availableApprovalBrokerIds(previews, brokerIds = Object.keys(previews)) {
   return brokerIds.filter((brokerId) => previews[brokerId] && previews[brokerId].preview?.blocked !== true);
 }
@@ -1356,7 +1371,7 @@ async function start() {
         }
         if (brokerIds.length) {
           const channel = await targetChannel(channels.order);
-          const approval = await channel.send(approvalText(record, previews, brokerIds));
+          const approval = await channel.send(discordMessagePayload(approvalCard(record, previews, brokerIds, approvalTtlMs)));
           receipts.putPending(record, approval.id, approvalTtlMs, brokerIds);
         }
       }
@@ -1451,4 +1466,4 @@ async function start() {
 
 if (require.main === module) start().catch((error) => { console.error(error); process.exitCode = 1; });
 
-module.exports = { SignalReceiptStore, accountCommand, accountContext, accountPortfolioSyncMinutes, accountRiskPolicy, accountSymbol, applyPyramidSizing, approvalText, approvedEntryVerdict, availableApprovalBrokerIds, brokerEnvironments, buyApprovalRequiredForBroker, deferredOrderAttemptDue, discordMessagePayload, enabledBrokerIds, enforceOpenRiskLimit, enforceOwnAccountRules, errorReportDue, executionPreview, invalidationExitReason, liveAutoBuyEligible, marketTransitionRetryDelayMs, momentumExitRecommendation, orderAttemptKey, orderNeedsPortfolioSync, orderNeedsResultReport, orderStatusUnknown, pendingSymbolOrder, pyramidPlan, readOnlySignalAllowed, reconcilePendingBrokerOrders, requiresExistingPosition, shouldConsumeMessage, shouldRetryMarketTransition, signalExchange, skippedExistingEntry, skippedNoPosition, start, trackedPortfolio, verificationDelayMs };
+module.exports = { SignalReceiptStore, accountCommand, accountContext, accountPortfolioSyncMinutes, accountRiskPolicy, accountSymbol, applyPyramidSizing, approvalCard, approvalText, approvedEntryVerdict, availableApprovalBrokerIds, brokerEnvironments, buyApprovalRequiredForBroker, deferredOrderAttemptDue, discordMessagePayload, enabledBrokerIds, enforceOpenRiskLimit, enforceOwnAccountRules, errorReportDue, executionPreview, invalidationExitReason, liveAutoBuyEligible, marketTransitionRetryDelayMs, momentumExitRecommendation, orderAttemptKey, orderNeedsPortfolioSync, orderNeedsResultReport, orderStatusUnknown, pendingSymbolOrder, pyramidPlan, readOnlySignalAllowed, reconcilePendingBrokerOrders, requiresExistingPosition, shouldConsumeMessage, shouldRetryMarketTransition, signalExchange, skippedExistingEntry, skippedNoPosition, start, trackedPortfolio, verificationDelayMs };

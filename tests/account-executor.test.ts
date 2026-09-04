@@ -1,7 +1,7 @@
 "use strict";
 
 const assert = require("node:assert/strict");
-const { accountCommand, accountContext, accountPortfolioSyncMinutes, accountRiskPolicy, accountSymbol, applyPyramidSizing, approvalText, approvedEntryVerdict, availableApprovalBrokerIds, brokerEnvironments, buyApprovalRequiredForBroker, deferredOrderAttemptDue, discordMessagePayload, enabledBrokerIds, enforceOpenRiskLimit, enforceOwnAccountRules, errorReportDue, executionPreview, invalidationExitReason, liveAutoBuyEligible, marketTransitionRetryDelayMs, momentumExitRecommendation, orderAttemptKey, orderNeedsPortfolioSync, orderNeedsResultReport, orderStatusUnknown, pendingSymbolOrder, pyramidPlan, readOnlySignalAllowed, reconcilePendingBrokerOrders, requiresExistingPosition, shouldConsumeMessage, shouldRetryMarketTransition, SignalReceiptStore, skippedExistingEntry, skippedNoPosition, trackedPortfolio, verificationDelayMs } = require("../src/executor/account-executor");
+const { accountCommand, accountContext, accountPortfolioSyncMinutes, accountRiskPolicy, accountSymbol, applyPyramidSizing, approvalCard, approvalText, approvedEntryVerdict, availableApprovalBrokerIds, brokerEnvironments, buyApprovalRequiredForBroker, deferredOrderAttemptDue, discordMessagePayload, enabledBrokerIds, enforceOpenRiskLimit, enforceOwnAccountRules, errorReportDue, executionPreview, invalidationExitReason, liveAutoBuyEligible, marketTransitionRetryDelayMs, momentumExitRecommendation, orderAttemptKey, orderNeedsPortfolioSync, orderNeedsResultReport, orderStatusUnknown, pendingSymbolOrder, pyramidPlan, readOnlySignalAllowed, reconcilePendingBrokerOrders, requiresExistingPosition, shouldConsumeMessage, shouldRetryMarketTransition, SignalReceiptStore, skippedExistingEntry, skippedNoPosition, trackedPortfolio, verificationDelayMs } = require("../src/executor/account-executor");
 const { calculateWebhookPositionPreview } = require("../src/trading/position-sizer");
 
 assert.deepEqual(enabledBrokerIds({ ACCOUNT_EXECUTOR_ENABLED: "true", EXECUTOR_KIWOOM_ENABLED: "true", EXECUTOR_KIS_ENABLED: "true" }), ["KIWOOM", "KIS"]);
@@ -327,6 +327,12 @@ assert.equal(enforceOpenRiskLimit(exitRiskPreview), exitRiskPreview);
   assert.match(approval, /`한투만` \/ `안 사`/);
   assert.doesNotMatch(approval, /둘다/);
   assert.match(approval, /피라미딩 1차\(최초 8주의 50%\)/);
+  const card = approvalCard({ receivedAt: "2026-09-04T00:00:00.000Z", payload: { ticker: "SE", name: "Sea Limited" } }, {
+    KIS: { label: "한투", preview: { blocked: false, quantity: 4, currency: "USD", positionValue: 484.72, projectedPositionRatio: 7.64, positionLimitRatio: 0.2 } },
+  }, ["KIS"], 15 * 60_000);
+  assert.equal(card.embed.title, "⏳ BUY 승인 대기");
+  assert.match(card.embed.description, /한투.*4주/);
+  assert.equal(card.embed.footer.text, "15분 안에 승인 · 승인 전 주문 생성 안 됨");
   assert.match(approvalText({ payload: { ticker: "SE", name: "Sea Limited" } }, {
     KIS: { label: "한투", preview: { blocked: false, capitalOnly: true, quantity: 8, currency: "USD", positionValue: 800, projectedPositionRatio: 10, positionLimitRatio: 0.1 } },
   }, ["KIS"]), /PEG 손절가 없음/);
@@ -338,6 +344,9 @@ assert.equal(enforceOpenRiskLimit(exitRiskPreview), exitRiskPreview);
     KIS: { label: "한투", preview: { blocked: false, quantity: 2, currency: "USD", positionValue: 200, projectedPositionRatio: 5, positionLimitRatio: 0.2 } },
   };
   assert.deepEqual(availableApprovalBrokerIds(approvalPreviews, ["KIWOOM", "KIS"]), ["KIS"]);
+  assert.deepEqual(availableApprovalBrokerIds({
+    KIWOOM: { preview: { blocked: true } }, KIS: { preview: { blocked: true } },
+  }, ["KIWOOM", "KIS"]), []);
   assert.match(approvalText({ payload: { ticker: "META" } }, approvalPreviews, ["KIS"]), /`한투만` \/ `안 사`/);
   assert.doesNotMatch(approvalText({ payload: { ticker: "META" } }, approvalPreviews, ["KIS"]), /둘다/);
   assert.match(approvalText({ payload: { ticker: "META" } }, approvalPreviews, []), /승인 가능한 계좌 없음/);
