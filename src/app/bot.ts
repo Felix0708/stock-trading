@@ -2056,6 +2056,44 @@ async function notifySignalServerStartup() {
   ));
 }
 
+function activeNgrokTunnel(payload) {
+  return (payload?.tunnels || []).find((tunnel) => {
+    try {
+      return tunnel.proto === "https" && new URL(tunnel.config?.addr).port === String(WEBHOOK_PORT);
+    } catch { return false; }
+  }) || null;
+}
+
+async function notifyTunnelStartup() {
+  const channel = findTextChannelByName(WEBHOOK_SYSTEM_CHANNEL);
+  const botTag = clients.get("druckenmiller")?.user?.tag;
+  if (!channel || !botTag) return false;
+  try {
+    const response = await fetch("http://127.0.0.1:4040/api/tunnels", { signal: AbortSignal.timeout(2_000) });
+    if (!response.ok) return false;
+    const tunnel = activeNgrokTunnel(await response.json());
+    if (!tunnel) return false;
+    await sendChunks(channel, formatBrokerStartup(
+      "TradingView 웹훅 터널",
+      botTag,
+      `${tunnel.public_url} → ${WEBHOOK_HOST}:${WEBHOOK_PORT}`,
+      "외부 신호 전달 전용 · 주문 권한 없음",
+    ));
+    return true;
+  } catch { return false; }
+}
+
+function startTunnelStartupNotifier(remaining = 15) {
+  void notifyTunnelStartup().then((notified) => {
+    if (notified) return;
+    if (remaining <= 1) {
+      console.warn("ngrok 터널 시작 알림 실패: 로컬 터널을 확인하지 못했습니다.");
+      return;
+    }
+    setTimeout(() => startTunnelStartupNotifier(remaining - 1), 2_000).unref();
+  });
+}
+
 async function runSignalReviewBatch(records) {
   const channel = findTextChannelByName(AI_SIGNAL_REVIEW_CHANNEL);
   if (!channel) throw new Error(`Discord 채널을 찾지 못했습니다: #${AI_SIGNAL_REVIEW_CHANNEL}`);
@@ -2658,6 +2696,7 @@ async function main() {
   startSignalReviewBatcher();
   await startWebhookReceiver();
   await notifySignalServerStartup();
+  startTunnelStartupNotifier();
   startTelegramScheduler();
   startInvestorPortfolioScheduler();
   startBriefingScheduler();
@@ -2688,6 +2727,11 @@ function selfTest() {
     throw new Error("어닝 캘린더 형식 실패");
   }
   if (!isAlertRegistryQuestion("지금 알람 설정된 종목 뭐야?") || isAlertRegistryQuestion("오늘 시장 어때?")) throw new Error("알람설정 질문 식별 실패");
+  const tunnel = activeNgrokTunnel({ tunnels: [{ proto: "https", public_url: "https://example.ngrok.app", config: { addr: "http://localhost:8787" } }] });
+  if (tunnel?.public_url !== "https://example.ngrok.app"
+      || activeNgrokTunnel({ tunnels: [{ proto: "https", config: { addr: "http://localhost:9999" } }] })) {
+    throw new Error("ngrok 터널 상태 식별 실패");
+  }
   if (splitDiscordText("a\n".repeat(2_000)).some((chunk) => chunk.length > 1900)) throw new Error("Discord 관심종목 분할 실패");
   const parsedWatchlist = parseSharedWatchlist('<script type="application/prs.init-data+json">{"sharedWatchlist":{"list":{"symbols":["NASDAQ:NVDA"]}}}</script>');
   if (parsedWatchlist.symbols[0] !== "NASDAQ:NVDA") throw new Error("공유 관심종목 파서 실패");
