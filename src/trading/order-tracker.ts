@@ -5,7 +5,7 @@ const fs = require("node:fs");
 type TrackedOrder = { orderNo: string | number; status: string; revision?: number; updatedAt?: string; market?: string; [key: string]: unknown };
 type OrderState = { revision: number; orders: Record<string, TrackedOrder>; recoveryNotifiedOrderNos?: string[] };
 
-const PENDING_STATUSES = new Set(["ACCEPTED", "CANCEL_REQUESTED", "PARTIALLY_FILLED"]);
+const PENDING_STATUSES = new Set(["ACCEPTED", "CANCEL_REQUESTED", "PARTIALLY_FILLED", "UNKNOWN"]);
 
 /** @param {Date} value @param {string | undefined} market */
 function tradingDate(value: Date, market?: string) {
@@ -43,14 +43,19 @@ class OrderTracker {
     const state = this.snapshot();
     state.revision += 1;
     const orderNo = String(order.orderNo);
+    let storageKey = String(order.storageKey || orderNo);
+    const previous = state.orders[storageKey];
+    if (previous && ["requestId", "market", "environment", "symbol"].some((field) => order[field] && previous[field] && order[field] !== previous[field])) {
+      storageKey = [orderNo, order.environment || "mock", order.market || "", order.requestId || order.symbol].join(":");
+    }
     const saved = {
-      ...(state.orders[orderNo] || {}),
+      ...(state.orders[storageKey] || {}),
       ...order,
-      orderNo,
+      orderNo, storageKey,
       revision: state.revision,
       updatedAt: new Date().toISOString(),
     };
-    state.orders[orderNo] = saved;
+    state.orders[storageKey] = saved;
     const temporary = `${this.file}.tmp`;
     fs.writeFileSync(temporary, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
     fs.renameSync(temporary, this.file);
@@ -70,7 +75,7 @@ class OrderTracker {
     const expired: TrackedOrder[] = [];
     for (const order of Object.values(state.orders)) {
       const updatedAt = new Date(order.updatedAt || "");
-      if (!PENDING_STATUSES.has(order.status) || Number.isNaN(updatedAt.getTime())) continue;
+      if (order.status === "UNKNOWN" || !PENDING_STATUSES.has(order.status) || Number.isNaN(updatedAt.getTime())) continue;
       if (tradingDate(updatedAt, order.market) >= tradingDate(now, order.market)) continue;
       state.revision += 1;
       const saved = {
@@ -81,7 +86,7 @@ class OrderTracker {
         revision: state.revision,
         updatedAt: now.toISOString(),
       };
-      state.orders[String(order.orderNo)] = saved;
+      state.orders[String(order.storageKey || order.orderNo)] = saved;
       expired.push(saved);
     }
     if (expired.length) this.write(state);

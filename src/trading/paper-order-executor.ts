@@ -223,9 +223,11 @@ async function submitPaperOrder(record: SignalRecord, options: ExecutorOptions) 
     orderStrategy = session === "REGULAR"
       ? `최유리 IOC 최대 2회${marketFallbackAllowed ? " 후 급락 손절 잔량만 시장가" : " · 시장가 전환 없음"}`
       : ({ PRE: "장전 시간외 종가", AFTER_CLOSE: "장후 시간외 종가", AFTER_SINGLE: "시간외 단일가 지정가", CLOSED: "장 종료" } as Record<string, string>)[session];
+    if (options.canSubmit && !options.canSubmit()) return blocked("자동매매 OFF · 주문 송신 중지");
     order = await client.placeDomesticMarketOrder({
       side, symbol: payload.ticker, quantity, price: payload.price,
       session, orderStyle,
+      ...(options.canSubmit ? { canSubmit: options.canSubmit } : {}),
     });
   } else {
     client = options.overseasClient;
@@ -245,15 +247,18 @@ async function submitPaperOrder(record: SignalRecord, options: ExecutorOptions) 
       limitPrice = protectedUsBuyLimit(payload.price, referencePrice);
       orderStrategy = "신호가·현재가 기준 상한 지정가";
     } else {
-      orderStrategy = "신호가 지정가";
+      orderStrategy = record.originalSignalPrice !== undefined ? "주문 직전 현재가 지정가" : "신호가 지정가";
     }
+    if (options.canSubmit && !options.canSubmit()) return blocked("자동매매 OFF · 주문 송신 중지");
     order = await client.placeUsLimitOrder({
       side, exchange: kiwoomExchange, symbol: payload.ticker,
       quantity, price: limitPrice,
+      ...(options.canSubmit ? { canSubmit: options.canSubmit } : {}),
     });
     order.exchange = kiwoomExchange;
   }
-  return options.tracker.record({
+  const trackedOrder = {
+    ...(record.executorReportable ? { executorReportable: true } : {}),
     ...order, orderQuantity: quantity, filledQuantity: 0, remainingQuantity: quantity,
     orderStyle, orderStrategy, marketFallbackAllowed, limitPrice, referencePrice,
     brokerLabel: options.brokerLabel || "키움 모의계좌",
@@ -261,7 +266,7 @@ async function submitPaperOrder(record: SignalRecord, options: ExecutorOptions) 
     source: record.source || "TRADINGVIEW", market: exchange, name: payload.name,
     timeframe: payload.timeframe,
     koreanName: payload.koreanName, englishName: payload.englishName,
-    signalType: payload.type, signalPrice: payload.price, stopPrice: positionPreview?.stopPrice ?? payload.sl,
+    signalType: payload.type, signalPrice: record.originalSignalPrice ?? payload.price, executionPrice: payload.price, stopPrice: positionPreview?.stopPrice ?? payload.sl,
     conviction: payload.conviction, requestId: record.requestId,
     partialExitRatio: partialExit ? partialExitRatio(record, options) : null,
     partialExitStage: partialExit ? partialExitStage(record) : null,
@@ -281,7 +286,12 @@ async function submitPaperOrder(record: SignalRecord, options: ExecutorOptions) 
     preTradePositionQuantity: positionPreview?.currentPositionQuantity,
     preTradeAverageEntryPrice: positionPreview?.averageEntryPrice,
     currency: positionPreview?.currency || (exchange === "KRX" ? "KRW" : "USD"),
-  });
+  };
+  try { return options.tracker.record(trackedOrder); } catch (error) {
+    // 증권사 접수 후 디스크 오류: 저장 실패를 미접수로 해석해 재주문하면 안 됩니다.
+    (error as any).orderStatusUnknown = true;
+    throw error;
+  }
 }
 
 async function submitPaperTestOrder(record: SignalRecord, options: ExecutorOptions) {

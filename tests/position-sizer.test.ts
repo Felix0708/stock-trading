@@ -88,3 +88,9 @@ assert.match(calculateWebhookPositionPreview(record, {
 }).reason, /20%/);
 assert.equal(calculateWebhookPositionPreview({ ...record, outcome: { decision: "INFO_ONLY" } }, {}), null);
 console.log("position-sizer test OK");
+assert.equal(calculatePositionSize({ ...base, capitalOnly: true, earlyEntry: true, sbZScore: 3.25 }).quantity, 25);
+assert.equal(calculatePositionSize({ ...base, availableCash: 0 }).blocked, true);
+assert.match(calculatePositionSize({ ...base, environment: "live", capitalOnly: true }).reason, /손절가/);
+assert.equal(calculatePositionSize({ ...base, environment: "live", sbZScore: 2 }).quantity, 70);
+assert.equal(calculatePositionSize({ ...base, environment: "live", sbZScore: 2.25 }).quantity, 50);
+assert.equal(calculatePositionSize({ ...base, environment: "live", sbZScore: 2.75 }).blocked, true);

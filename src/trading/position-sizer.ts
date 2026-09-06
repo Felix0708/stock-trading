@@ -4,7 +4,7 @@ type SignalPayload = { timeframe?: string; sl?: number | null; momentum_sl?: num
 type SignalRecord = { payload: SignalPayload; outcome?: { decision?: string; signal?: { signalCode?: string } } };
 type Holding = { profitLoss?: number; purchaseAmount?: number; evaluationAmount?: number; profitRate?: number };
 type TrackedPosition = { fillPrice?: number };
-type PositionSizeInput = { equity: number; availableCash?: number; entryPrice: number; stopPrice?: number | null; conviction?: string; dailySetupStage?: string; atrMultiple?: number | null; atrDot?: boolean; atrDotThreshold?: number; sbZScore?: number; openPositions?: number; maxOpenPositions?: number; currentPositionValue?: number; hasExistingPosition?: boolean; earlyEntry?: boolean; capitalOnly?: boolean };
+type PositionSizeInput = { environment?: string; equity: number; availableCash?: number; entryPrice: number; stopPrice?: number | null; conviction?: string; dailySetupStage?: string; atrMultiple?: number | null; atrDot?: boolean; atrDotThreshold?: number; sbZScore?: number; openPositions?: number; maxOpenPositions?: number; currentPositionValue?: number; hasExistingPosition?: boolean; earlyEntry?: boolean; capitalOnly?: boolean };
 type AccountSizingContext = { equity: number; availableCash: number; openPositions: number; maxOpenPositions: number; currentPositionValue: number; currentPositionQuantity?: number; hasExistingPosition?: boolean; positionProfitable?: boolean | null; currency?: string; totalAccountEquity?: number | null; autoCapital?: number | null; autoCapitalRatio?: number; currentOpenRisk?: number | null; maxOpenRisk?: number | null; maxOpenRiskRatio?: number };
 
 const CONVICTION_MULTIPLIER: Record<string, number> = { S: 1.3, A: 1.1, B: 1, C: 0.7, D: 0 };
@@ -49,11 +49,15 @@ function calculatePositionSize(input: PositionSizeInput = {} as PositionSizeInpu
     dailySetupStage = "NONE", atrMultiple = null, atrDot = false,
     atrDotThreshold = 7, sbZScore = 0, openPositions = 0, maxOpenPositions = 5,
     currentPositionValue = 0, hasExistingPosition = false, earlyEntry = false,
-    capitalOnly = false,
+    capitalOnly = false, environment = "mock",
   } = input;
-  for (const [name, value] of Object.entries({ equity, availableCash, entryPrice })) {
+  if (!["mock", "live"].includes(environment)) throw new Error("계좌 환경이 올바르지 않습니다.");
+  for (const [name, value] of Object.entries({ equity, entryPrice })) {
     if (!Number.isFinite(value) || value <= 0) throw new Error(`${name}는 0보다 큰 숫자여야 합니다.`);
   }
+  if (!Number.isFinite(availableCash) || availableCash < 0) throw new Error("가용 현금이 올바르지 않습니다.");
+  if (availableCash === 0) return { blocked: true, reason: "가용 주문금액 없음", quantity: 0 };
+  if (environment === "live" && capitalOnly) return { blocked: true, reason: "실계좌는 유효한 손절가 없는 진입 차단", quantity: 0 };
   const validStopPrice = typeof stopPrice === "number" ? stopPrice : Number.NaN;
   if (!capitalOnly && (!Number.isFinite(validStopPrice) || validStopPrice <= 0 || validStopPrice >= entryPrice)) {
     throw new Error("손절가는 0보다 크고 진입가보다 낮아야 합니다.");
@@ -74,13 +78,14 @@ function calculatePositionSize(input: PositionSizeInput = {} as PositionSizeInpu
   if (atrDot || (typeof atrMultiple === "number" && Number.isFinite(atrMultiple) && atrMultiple > atrDotThreshold)) {
     return { blocked: true, reason: "ATR 과열", quantity: 0 };
   }
-  if (sbZScore > 3.5) return { blocked: true, reason: "Sigma 극심한 과열", quantity: 0 };
+  if (sbZScore > (environment === "live" ? 2.5 : 3.5)) return { blocked: true, reason: environment === "live" ? "Sigma 과열 (실계좌 기존 정책)" : "Sigma 극심한 과열", quantity: 0 };
 
   const setupMultiplier = dailySetupStage === "COMPLETE" ? 1.3 : 1;
   const qualityMultiplier = Math.min(1.3, CONVICTION_MULTIPLIER[grade] * setupMultiplier);
   let heatMultiplier = 1;
   if (typeof atrMultiple === "number" && Number.isFinite(atrMultiple) && atrMultiple > atrDotThreshold * 0.7) heatMultiplier *= 0.7;
-  if (sbZScore > 3) heatMultiplier *= 0.25;
+  if (environment === "live") heatMultiplier *= sbZScore > 2 ? 0.5 : sbZScore > 1.5 ? 0.7 : 1;
+  else if (sbZScore > 3) heatMultiplier *= 0.25;
   else if (sbZScore > 2.5) heatMultiplier *= 0.5;
   else if (sbZScore > 2) heatMultiplier *= 0.7;
 
@@ -92,11 +97,11 @@ function calculatePositionSize(input: PositionSizeInput = {} as PositionSizeInpu
   const capitalQuantity = Math.floor(capitalLimit / entryPrice);
   if (capitalQuantity < 1) {
     return {
-      blocked: true, reason: `한 종목 총 보유금액 ${positionLimitRatio * 100}% 한도 도달`, quantity: 0,
+      blocked: true, reason: availableCash < entryPrice ? "가용 주문금액이 1주 가격 미만" : `한 종목 총 보유금액 ${positionLimitRatio * 100}% 한도 도달`, quantity: 0,
       currentPositionValue, positionLimit, positionLimitRatio, capitalLimit, earlyEntry,
     };
   }
-  const quantity = capitalOnly ? capitalQuantity : Math.min(Math.floor(riskBudget / (entryPrice - validStopPrice)), capitalQuantity);
+  const quantity = capitalOnly ? Math.floor(capitalQuantity * heatMultiplier) : Math.min(Math.floor(riskBudget / (entryPrice - validStopPrice)), capitalQuantity);
   if (quantity < 1) return { blocked: true, reason: "계산된 주문수량이 1주 미만", quantity: 0 };
   return {
     blocked: false,
@@ -120,7 +125,7 @@ function calculatePositionSize(input: PositionSizeInput = {} as PositionSizeInpu
  * @param {SignalRecord} record
  * @param {AccountSizingContext} account
  */
-function calculateWebhookPositionPreview(record: SignalRecord, account: AccountSizingContext) {
+function calculateWebhookPositionPreview(record: SignalRecord, account: AccountSizingContext, environment = "mock") {
   const decision = record?.outcome?.decision;
   if (!["ENTRY_CANDIDATE", "ADD_CANDIDATE"].includes(decision || "")) return null;
 
@@ -132,6 +137,7 @@ function calculateWebhookPositionPreview(record: SignalRecord, account: AccountS
   const earlyEntry = capitalOnly || isDailyTimeframe(payload.timeframe) || (dailyProvided && (payload.daily_trend !== "BULL"
     || payload.daily_ema_aligned !== true || payload.daily_above_200ma !== true));
   const result = calculatePositionSize({
+    environment,
     equity: account.equity,
     availableCash: account.availableCash,
     entryPrice: payload.price,

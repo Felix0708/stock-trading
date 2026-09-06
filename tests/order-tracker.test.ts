@@ -31,6 +31,12 @@ try {
   restarted.record({ orderNo: "000000001", status: "FILLED", filledQuantity: 1 });
   assert.equal(new OrderTracker(file).pending().length, 0);
   assert.equal(new OrderTracker(file).list()[0].filledQuantity, 1);
+  const firstDay = restarted.record({ orderNo: "same", requestId: "day1", market: "KRX", symbol: "005930", status: "FILLED", filledQuantity: 2 });
+  const secondDay = restarted.record({ orderNo: "same", requestId: "day2", market: "NASDAQ", symbol: "TEST", status: "ACCEPTED", filledQuantity: 0 });
+  assert.notEqual(firstDay.storageKey, secondDay.storageKey);
+  restarted.record({ ...secondDay, status: "FILLED", filledQuantity: 3 });
+  assert.equal(restarted.list().find(o => o.requestId === "day1").filledQuantity, 2);
+  assert.equal(restarted.list().find(o => o.requestId === "day2").filledQuantity, 3);
   console.log("order-tracker test OK");
 } finally {
   fs.rmSync(directory, { recursive: true, force: true });

@@ -27,6 +27,8 @@ assert.equal(orderNeedsResultReport({ status: "FILLED", source: "USER_SCHEDULED_
 assert.equal(orderNeedsResultReport({ status: "FILLED", source: "USER_SCHEDULED_EXIT", executorReportable: true }), true);
 assert.equal(orderNeedsResultReport({ status: "FILLED", source: "USER_SCHEDULED_EXIT", executorReportable: true, filledQuantity: 127, executionReportedStatus: "FILLED", journalReportedStatus: "FILLED", portfolioSyncedFilledQuantity: 127 }), false);
 assert.equal(orderNeedsResultReport({ status: "ACCEPTED", source: "USER_SCHEDULED_EXIT" }), false);
+assert.equal(orderNeedsResultReport({ status: "FILLED", source: "DISCORD_SIGNAL", executorReportable: true }), true);
+assert.equal(orderNeedsResultReport({ status: "PARTIALLY_FILLED", executorReportable: true, filledQuantity: 3, executionReportedFilledQuantity: 2, executionReportedStatus: "PARTIALLY_FILLED" }), true);
 assert.equal(orderNeedsPortfolioSync({ status: "FILLED", filledQuantity: 63 }), true);
 assert.equal(orderNeedsPortfolioSync({ status: "FILLED", filledQuantity: 63, portfolioSyncedFilledQuantity: 63 }), false);
 assert.equal(orderNeedsPortfolioSync({ status: "REJECTED", filledQuantity: 0 }), false);
@@ -262,7 +264,7 @@ assert.equal(enforceOpenRiskLimit({
   maxOpenRisk: 75_000, maxOpenRiskRatio: 0.015, quantity: 2,
 }).blocked, false);
 const exitRiskPreview = { blocked: false, quantity: 63, hasExistingPosition: true };
-assert.equal(enforceOpenRiskLimit(exitRiskPreview), exitRiskPreview);
+assert.equal(enforceOpenRiskLimit(exitRiskPreview).blocked, true); // 손절위험 검사는 BUY에만 호출하며, 미확인 위험은 허용하지 않음
 
 (async () => {
   const context = await accountContext({

@@ -291,6 +291,7 @@ class TradeController {
     const blocked = this.validateEntry(record);
     if (blocked) return blocked;
     const add = record.outcome.decision === "ADD_CANDIDATE";
+    if (this.state.mode !== "PAPER_AUTO") return { verdict: add ? "SHADOW_ADD" : "SHADOW_ENTRY", reason: "관찰 모드 · 주문 승인 생성 없음" };
     const payload = record.payload;
     const pegWithoutStop = ["PEG_PULLBACK", "PEG_REBREAK"].includes(record.outcome?.signal?.signalCode)
       && effectiveStopPrice(record) === null;

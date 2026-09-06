@@ -4,7 +4,7 @@ const { setTimeout: delay } = require("node:timers/promises");
 
 type Order = { orderNo: string | number; status: string; market: string; symbol: string; exchange?: string; side?: string; orderQuantity: number; filledQuantity?: number; remainingQuantity?: number; fillPrice?: number; activeOrderNo?: string | number; activeOrderQuantity?: number; priorFilledQuantity?: number; priorFilledValue?: number; marketFallbackAllowed?: boolean; orderStyle?: string; [key: string]: any };
 type Fill = { quantity: number; price: number };
-type TrackingOptions = { domesticClient: any; overseasClient: any; tracker: { record(order: Order): Order }; attempts?: number; delayMs?: number; protectionDelayMs?: number; protectionQueryAttempts?: number };
+type TrackingOptions = { domesticClient: any; overseasClient: any; tracker: { record(order: Order): Order }; canSubmit?: () => boolean; attempts?: number; delayMs?: number; protectionDelayMs?: number; protectionQueryAttempts?: number };
 
 function normalizedOrderNo(value: unknown) {
   return String(value).replace(/^0+(?=\d)/, "");
@@ -15,10 +15,12 @@ async function currentExecution(order: Order, options: TrackingOptions): Promise
   const rows = order.market === "KRX"
     ? await client.getDomesticOrderExecutions({ symbol: order.symbol })
     : await client.getUsOrderExecutions({ exchange: order.exchange, symbol: order.symbol });
-  return rows.find((item: Order) => normalizedOrderNo(item.orderNo) === normalizedOrderNo(order.activeOrderNo || order.orderNo));
+  const found = rows.find((item: Order) => normalizedOrderNo(item.orderNo) === normalizedOrderNo(order.activeOrderNo || order.orderNo));
+  return found ? { ...found } : undefined;
 }
 
 async function refreshPaperOrder(order: Order, options: TrackingOptions): Promise<Order> {
+  if (order.status === "UNKNOWN") return order; // 재주문 응답 유실은 자동 추정하지 않습니다.
   const current = await currentExecution(order, options);
   if (!current) return order;
   if (order.activeOrderNo) {
@@ -32,7 +34,7 @@ async function refreshPaperOrder(order: Order, options: TrackingOptions): Promis
   }
   const changed = ["status", "filledQuantity", "remainingQuantity", "fillPrice"]
     .some((key) => current[key] !== undefined && current[key] !== order[key]);
-  return changed ? options.tracker.record({ ...order, ...current, orderNo: order.orderNo }) : order;
+  return changed ? options.tracker.record({ ...order, ...current, orderQuantity: order.orderQuantity, orderNo: order.orderNo }) : order;
 }
 
 async function trackOrdinaryOrder(order: Order, options: TrackingOptions): Promise<Order> {
@@ -88,9 +90,12 @@ async function trackProtectedDomesticOrder(order: Order, options: TrackingOption
 
   for (let attempt = 0; attempt < protectedAttempts; attempt += 1) {
     const current = await waitForIocResult(active, options);
-    if (!current || Number(current.remainingQuantity) > 0) return options.tracker.record(aggregate(order, fills, brokerOrderNos, false, fills.length ? "PARTIALLY_FILLED" : "ACCEPTED"));
-    const quantity = Math.min(active.orderQuantity, Math.max(0, Number(current.filledQuantity) || 0));
-    if (quantity) fills.push({ quantity, price: Number(current.fillPrice) || 0 });
+    const priorFilledQuantity = fills.reduce((sum, fill) => sum + fill.quantity, 0);
+    const priorFilledValue = fills.reduce((sum, fill) => sum + fill.quantity * fill.price, 0);
+    const tracking = { activeOrderNo: active.orderNo, activeOrderQuantity: active.orderQuantity, priorFilledQuantity, priorFilledValue };
+    const quantity = Math.min(active.orderQuantity, Math.max(0, Number(current?.filledQuantity) || 0));
+    if (quantity) fills.push({ quantity, price: Number(current?.fillPrice) || 0 });
+    if (!current || Number(current.remainingQuantity) > 0) return options.tracker.record(aggregate(order, fills, brokerOrderNos, false, fills.length ? "PARTIALLY_FILLED" : "ACCEPTED", tracking));
     const remaining = order.orderQuantity - fills.reduce((sum, fill) => sum + fill.quantity, 0);
     if (remaining <= 0) return options.tracker.record(aggregate(order, fills, brokerOrderNos, false, "FILLED"));
     const retryProtected = attempt + 1 < protectedAttempts;
@@ -98,8 +103,22 @@ async function trackProtectedDomesticOrder(order: Order, options: TrackingOption
       return options.tracker.record(aggregate(order, fills, brokerOrderNos, false, "CANCELLED"));
     }
     const orderStyle = retryProtected ? "PROTECTED" : "MARKET";
-    active = { ...await options.domesticClient.placeDomesticMarketOrder({ side: order.side, symbol: order.symbol, quantity: remaining, session: "REGULAR", orderStyle }), market: "KRX" };
+    if (options.canSubmit && !options.canSubmit()) return options.tracker.record(aggregate(order, fills, brokerOrderNos, false, "CANCELLED"));
+    // 송신 전에 저장: 재주문 도중 재시작해도 첫 주문을 근거로 중복 주문하지 않습니다.
+    options.tracker.record(aggregate(order, fills, brokerOrderNos, false, "UNKNOWN", { retrySubmissionPending: true }));
+    try {
+      active = { ...await options.domesticClient.placeDomesticMarketOrder({ side: order.side, symbol: order.symbol, quantity: remaining, session: "REGULAR", orderStyle, ...(options.canSubmit ? { canSubmit: options.canSubmit } : {}) }), market: "KRX", symbol: order.symbol, orderQuantity: remaining };
+    } catch (error) {
+      const uncertain = (error as any)?.orderStatusUnknown === true;
+      options.tracker.record(aggregate(order, fills, brokerOrderNos, false, uncertain ? "UNKNOWN" : "CANCELLED", { retrySubmissionPending: uncertain }));
+      throw error;
+    }
     brokerOrderNos.push(active.orderNo);
+    options.tracker.record(aggregate(order, fills, brokerOrderNos, orderStyle === "MARKET", "ACCEPTED", {
+      retrySubmissionPending: false, activeOrderNo: active.orderNo, activeOrderQuantity: remaining,
+      priorFilledQuantity: fills.reduce((sum, fill) => sum + fill.quantity, 0),
+      priorFilledValue: fills.reduce((sum, fill) => sum + fill.quantity * fill.price, 0),
+    }));
     if (orderStyle === "MARKET") {
       const priorFilledQuantity = fills.reduce((sum, fill) => sum + fill.quantity, 0);
       const priorFilledValue = fills.reduce((sum, fill) => sum + fill.quantity * fill.price, 0);

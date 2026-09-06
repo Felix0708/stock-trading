@@ -24,7 +24,8 @@ function number(value: unknown) {
 }
 
 function status(orderQuantity: number, filledQuantity: number, remainingQuantity: number) {
-  if (remainingQuantity <= 0 && filledQuantity > 0) return "FILLED";
+  if (orderQuantity > 0 && filledQuantity >= orderQuantity) return "FILLED";
+  if (remainingQuantity <= 0) return "CANCELLED";
   if (filledQuantity > 0) return "PARTIALLY_FILLED";
   return "ACCEPTED";
 }
@@ -128,8 +129,8 @@ class KisClient {
     return this.token;
   }
 
-  async request(path: string, { method = "GET", trId, params, body, retryTransient = method === "GET" }: any = {}): Promise<any> {
-    const sharedTrId = trId === "HHDFS00000300";
+  async request(path: string, { method = "GET", trId, params, body, retryTransient = method === "GET", canSubmit }: any = {}): Promise<any> {
+    const sharedTrId = ["HHDFS00000300", "FHKST01010100"].includes(trId);
     if (!trId || (!sharedTrId && (this.environment === "mock" ? !trId.startsWith("V") : trId.startsWith("V")))) throw new Error(`한투 ${this.environment === "live" ? "실계좌" : "모의"} TR ID가 올바르지 않습니다.`);
     const queued = this.requestQueue.then(async () => {
       const query = params ? `?${new URLSearchParams(params)}` : "";
@@ -141,6 +142,7 @@ class KisClient {
         const waitMs = this.requestIntervalMs - (Date.now() - this.lastRequestAt);
         if (waitMs > 0) await new Promise((resolve) => setTimeout(resolve, waitMs));
         this.lastRequestAt = Date.now();
+        if (canSubmit && !canSubmit()) throw Object.assign(new Error("자동매매 OFF · 주문 송신 중지"), { autoTradingPaused: true });
         let response;
         try {
           response = await this.fetch(`${this.baseUrl}${path}${query}`, {
@@ -165,7 +167,10 @@ class KisClient {
           const message = `한투 ${this.environment === "live" ? "실계좌" : "모의"} 통신 실패 [${trId}]: ${error instanceof Error ? error.message : String(error)}.`;
           throw retryTransient ? new Error(message) : uncertainOrderError(message);
         }
-        const text = await response.text();
+        let text;
+        try { text = await response.text(); } catch (error) {
+          throw retryTransient ? error : uncertainOrderError("한투 주문 응답 본문 수신 중 통신이 끊겼습니다.");
+        }
         let result;
         try {
           result = text ? JSON.parse(text) : {};
@@ -245,7 +250,17 @@ class KisClient {
     return { orderableAmount: number(result.output?.nrcvb_buy_amt || result.output?.ord_psbl_cash) };
   }
 
-  async placeDomesticMarketOrder({ side, symbol, quantity, price, session = "REGULAR", orderStyle = "MARKET" }: any) {
+  async getDomesticQuote({ symbol }: any) {
+    if (!/^\d{6}$/.test(symbol)) throw new Error("국내 종목코드가 올바르지 않습니다.");
+    const result = await this.request("/uapi/domestic-stock/v1/quotations/inquire-price", {
+      trId: "FHKST01010100", params: { FID_COND_MRKT_DIV_CODE: "J", FID_INPUT_ISCD: symbol },
+    });
+    const currentPrice = number(result.output?.stck_prpr);
+    if (currentPrice <= 0) throw new Error("한투 국내주식 현재가 응답이 비어 있습니다.");
+    return { symbol, currentPrice };
+  }
+
+  async placeDomesticMarketOrder({ side, symbol, quantity, price, session = "REGULAR", orderStyle = "MARKET", canSubmit }: any) {
     if (!["BUY", "SELL"].includes(side) || !/^\d{6}$/.test(symbol) || !Number.isInteger(quantity) || quantity < 1) throw new Error("국내 모의주문 값이 올바르지 않습니다.");
     if (!["MARKET", "PROTECTED"].includes(orderStyle)) throw new Error("국내주식 주문방식이 올바르지 않습니다.");
     const orderType = session === "REGULAR" && orderStyle === "PROTECTED" ? "15" : ({ PRE: "05", REGULAR: "01", AFTER_CLOSE: "06", AFTER_SINGLE: "07" } as Record<string, string>)[session];
@@ -253,10 +268,11 @@ class KisClient {
     if (session === "AFTER_SINGLE" && (!Number.isFinite(price) || price <= 0)) throw new Error("시간외 단일가 주문 가격이 필요합니다.");
     const result = await this.request("/uapi/domestic-stock/v1/trading/order-cash", {
       method: "POST", trId: side === "BUY" ? this.trId("VTTC0012U", "TTTC0012U") : this.trId("VTTC0011U", "TTTC0011U"),
+      canSubmit,
       body: this.accountParams({ PDNO: symbol, ORD_DVSN: orderType, ORD_QTY: String(quantity), ORD_UNPR: session === "AFTER_SINGLE" ? String(price) : "0", EXCG_ID_DVSN_CD: "KRX", SLL_TYPE: "01", CNDT_PRIC: "0" }),
     });
     const orderNo = result.output?.ODNO || result.output?.odno;
-    if (!orderNo) throw new Error("한투 국내주식 주문 접수 응답에 주문번호가 없습니다.");
+    if (!orderNo) throw uncertainOrderError("한투 국내주식 주문 접수 응답에 주문번호가 없습니다.");
     return { orderNo: String(orderNo), symbol, side, status: "ACCEPTED" };
   }
 
@@ -269,7 +285,7 @@ class KisClient {
     return (result.output1 || []).map((item: any) => {
       const orderQuantity = number(item.ord_qty);
       const filledQuantity = number(item.tot_ccld_qty);
-      const remainingQuantity = number(item.rmn_qty || orderQuantity - filledQuantity);
+      const remainingQuantity = number(item.rmn_qty ?? orderQuantity - filledQuantity);
       return { orderNo: String(item.odno), symbol: String(item.pdno || "").replace(/^A/, ""), orderQuantity, filledQuantity, remainingQuantity, fillPrice: number(item.avg_prvs || item.avg_pric), status: status(orderQuantity, filledQuantity, remainingQuantity) };
     });
   }
@@ -290,7 +306,7 @@ class KisClient {
       exchange: market,
       holdings: (result.output1 || []).filter((item: any) => number(item.ovrs_cblc_qty) > 0).map((item: any) => ({
         code: item.ovrs_pdno, name: item.ovrs_item_name, exchange, quantity: number(item.ovrs_cblc_qty),
-        tradableQuantity: number(item.ord_psbl_qty || item.ovrs_cblc_qty), price: number(item.now_pric2),
+        tradableQuantity: number(item.ord_psbl_qty ?? item.ovrs_cblc_qty), price: number(item.now_pric2),
         evaluationAmount: number(item.ovrs_stck_evlu_amt), purchaseAmount: number(item.frcr_pchs_amt1),
         profitLoss: number(item.frcr_evlu_pfls_amt), profitRate: number(item.evlu_pfls_rt),
       })),
@@ -339,14 +355,15 @@ class KisClient {
     return { exchange, symbol, currentPrice, previousClose: number(result.output?.base) };
   }
 
-  async placeUsLimitOrder({ side, exchange, symbol, quantity, price }: any) {
+  async placeUsLimitOrder({ side, exchange, symbol, quantity, price, canSubmit }: any) {
     if (!["BUY", "SELL"].includes(side) || !symbol || !Number.isInteger(quantity) || quantity < 1 || !Number.isFinite(price) || price <= 0) throw new Error("미국 모의주문 값이 올바르지 않습니다.");
     const result = await this.request("/uapi/overseas-stock/v1/trading/order", {
       method: "POST", trId: side === "BUY" ? this.trId("VTTT1002U", "TTTT1002U") : this.trId("VTTT1001U", "TTTT1006U"),
+      canSubmit,
       body: this.accountParams({ OVRS_EXCG_CD: this.kisExchange(exchange), PDNO: symbol, ORD_QTY: String(quantity), OVRS_ORD_UNPR: String(price), CTAC_TLNO: "", MGCO_APTM_ODNO: "", SLL_TYPE: "00", ORD_SVR_DVSN_CD: "0", ORD_DVSN: "00" }),
     });
     const orderNo = result.output?.ODNO || result.output?.odno;
-    if (!orderNo) throw new Error("한투 미국주식 주문 접수 응답에 주문번호가 없습니다.");
+    if (!orderNo) throw uncertainOrderError("한투 미국주식 주문 접수 응답에 주문번호가 없습니다.");
     return { orderNo: String(orderNo), symbol, side, status: "ACCEPTED" };
   }
 
@@ -358,9 +375,36 @@ class KisClient {
     return (result.output || result.output1 || []).map((item: any) => {
       const orderQuantity = number(item.ft_ord_qty || item.ord_qty);
       const filledQuantity = number(item.ft_ccld_qty || item.tot_ccld_qty);
-      const remainingQuantity = number(item.nccs_qty || orderQuantity - filledQuantity);
+      const remainingQuantity = number(item.nccs_qty ?? orderQuantity - filledQuantity);
       return { orderNo: String(item.odno), symbol: item.pdno, orderQuantity, filledQuantity, remainingQuantity, fillPrice: number(item.ft_ccld_unpr3 || item.avg_pric), status: status(orderQuantity, filledQuantity, remainingQuantity) };
     });
+  }
+
+  async cancelUsOrder({ orderNo, exchange, symbol, quantity }: any) {
+    if (!/^\d+$/.test(String(orderNo)) || !symbol || !Number.isInteger(quantity) || quantity < 1) throw new Error("취소 주문값이 올바르지 않습니다.");
+    const result = await this.request("/uapi/overseas-stock/v1/trading/order-rvsecncl", {
+      method: "POST", trId: this.trId("VTTT1004U", "TTTT1004U"),
+      body: this.accountParams({ OVRS_EXCG_CD: this.kisExchange(exchange), PDNO: symbol, ORGN_ODNO: String(orderNo), RVSE_CNCL_DVSN_CD: "02", ORD_QTY: String(quantity), OVRS_ORD_UNPR: "0", MGCO_APTM_ODNO: "", ORD_SVR_DVSN_CD: "0" }),
+    });
+    const cancellationOrderNo = result.output?.ODNO || result.output?.odno;
+    if (!cancellationOrderNo) throw uncertainOrderError("한투 취소 접수 번호가 없습니다.");
+    return { status: "CANCEL_REQUESTED", cancellationOrderNo: String(cancellationOrderNo) };
+  }
+
+  async cancelDomesticOrder({ orderNo, symbol }: any) {
+    // 공식 정정취소가능조회는 실전 전용. 모의 IOC는 종료 확인 후 청산을 재개합니다.
+    if (this.environment !== "live") throw new Error("한투 모의 국내 취소가능조회 미지원 · 기존 주문 종료 확인 대기");
+    const result = await this.request("/uapi/domestic-stock/v1/trading/inquire-psbl-rvsecncl", {
+      trId: "TTTC0084R", params: this.accountParams({ INQR_DVSN_1: "0", INQR_DVSN_2: "2", CTX_AREA_FK100: "", CTX_AREA_NK100: "" }),
+    });
+    const row = (result.output || []).find((item: any) => String(item.odno).replace(/^0+/, "") === String(orderNo).replace(/^0+/, "") && item.pdno === symbol);
+    if (!row || number(row.psbl_qty) <= 0) throw new Error("국내 매수 잔량 취소가능수량 확인 실패");
+    const response = await this.request("/uapi/domestic-stock/v1/trading/order-rvsecncl", {
+      method: "POST", trId: "TTTC0013U", body: this.accountParams({ KRX_FWDG_ORD_ORGNO: row.krx_fwdg_ord_orgno, ORGN_ODNO: String(orderNo), ORD_DVSN: row.ord_dvsn_cd || "00", RVSE_CNCL_DVSN_CD: "02", ORD_QTY: String(row.psbl_qty), ORD_UNPR: "0", QTY_ALL_ORD_YN: "Y", EXCG_ID_DVSN_CD: "KRX" }),
+    });
+    const cancellationOrderNo = response.output?.ODNO || response.output?.odno;
+    if (!cancellationOrderNo) throw uncertainOrderError("한투 국내 취소 접수 번호가 없습니다.");
+    return { status: "CANCEL_REQUESTED", cancellationOrderNo: String(cancellationOrderNo) };
   }
 }
 

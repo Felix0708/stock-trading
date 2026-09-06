@@ -32,7 +32,7 @@ const { refreshPaperOrder, trackPaperOrder } = require("../src/trading/order-tra
   assert.deepEqual(completed.brokerOrderNos, ["1001", "1002", "1003"]);
   assert.equal(completed.marketFallback, true);
   assert.deepEqual(placed.map(({ quantity, orderStyle }) => [quantity, orderStyle]), [[5, "PROTECTED"], [3, "MARKET"]]);
-  assert.equal(recorded.length, 1);
+  assert.equal(recorded.length, 5); // 재주문 송신 전/접수 후에도 내구성 있게 저장
 
   placed.length = 0;
   recorded.length = 0;
@@ -104,6 +104,20 @@ const { refreshPaperOrder, trackPaperOrder } = require("../src/trading/order-tra
   assert.equal(protectedBuy.filledQuantity, 2);
   assert.deepEqual(buyRetries.map(({ side, quantity, orderStyle }) => [side, quantity, orderStyle]), [["BUY", 3, "PROTECTED"]]);
 
+  let delayedRows = [{ orderNo: "5001", orderQuantity: 5, filledQuantity: 2, remainingQuantity: 0, fillPrice: 100, status: "CANCELLED" }];
+  const delayedClient = {
+    getDomesticOrderExecutions: async () => delayedRows,
+    placeDomesticMarketOrder: async () => ({ orderNo: "5002", orderQuantity: 3, status: "ACCEPTED" }),
+  };
+  const delayed = await trackPaperOrder({ orderNo: "5001", symbol: "005930", side: "BUY", market: "KRX", orderQuantity: 5, status: "ACCEPTED", orderStyle: "PROTECTED" },
+    { domesticClient: delayedClient, tracker, protectionDelayMs: 0, protectionQueryAttempts: 1 });
+  assert.equal(delayed.activeOrderNo, "5002");
+  delayedRows.push({ orderNo: "5002", orderQuantity: 3, filledQuantity: 3, remainingQuantity: 0, fillPrice: 101, status: "FILLED" });
+  const recovered = await refreshPaperOrder(delayed, { domesticClient: delayedClient, tracker });
+  assert.equal(recovered.filledQuantity, 5);
+  assert.equal(recovered.orderQuantity, 5);
+  assert.equal(recovered.status, "FILLED");
+  assert.equal(recovered.fillPrice, 100.6);
   console.log("order-tracking test OK");
 })().catch((error) => {
   console.error(error);

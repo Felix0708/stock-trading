@@ -125,11 +125,12 @@ class KiwoomClient {
 
   async post(path: string, {
     apiId, body = {}, authorization = false, retryAuthorization = true,
-    retryRateLimit = true, retryTransient = true, transientAttempt = 0,
+    retryRateLimit = true, retryTransient = true, transientAttempt = 0, canSubmit,
   }: any = {}): Promise<any> {
     const headers: Record<string, string> = { "content-type": "application/json;charset=UTF-8" };
     if (apiId) headers["api-id"] = apiId;
     if (authorization) headers.authorization = `Bearer ${await this.getAccessToken()}`;
+    if (canSubmit && !canSubmit()) throw Object.assign(new Error("자동매매 OFF · 주문 송신 중지"), { autoTradingPaused: true });
 
     let response: Response;
     try {
@@ -142,20 +143,23 @@ class KiwoomClient {
     } catch (error) {
       if (retryTransient && transientAttempt < 1) {
         await new Promise((resolve) => setTimeout(resolve, 500));
-        return this.post(path, { apiId, body, authorization, retryAuthorization, retryRateLimit, retryTransient, transientAttempt: transientAttempt + 1 });
+        return this.post(path, { canSubmit, apiId, body, authorization, retryAuthorization, retryRateLimit, retryTransient, transientAttempt: transientAttempt + 1 });
       }
       const message = `키움 ${this.#environmentLabel} 통신 실패: ${error instanceof Error ? error.message : String(error)}.`;
       throw retryTransient ? new Error(message) : uncertainOrderError(message);
     }
 
-    const text = await response.text();
+    let text;
+    try { text = await response.text(); } catch (error) {
+      throw retryTransient ? error : uncertainOrderError("키움 주문 응답 본문 수신 중 통신이 끊겼습니다.");
+    }
     let data;
     try {
       data = text ? JSON.parse(text) : {};
     } catch {
       if (retryTransient && transientAttempt < 1 && transientHttpStatus(response.status)) {
         await new Promise((resolve) => setTimeout(resolve, 500));
-        return this.post(path, { apiId, body, authorization, retryAuthorization, retryRateLimit, retryTransient, transientAttempt: transientAttempt + 1 });
+        return this.post(path, { canSubmit, apiId, body, authorization, retryAuthorization, retryRateLimit, retryTransient, transientAttempt: transientAttempt + 1 });
       }
       const message = `키움 ${this.#environmentLabel} 응답이 JSON이 아닙니다. (HTTP ${response.status}).`;
       throw retryTransient ? new Error(message) : uncertainOrderError(message);
@@ -166,15 +170,15 @@ class KiwoomClient {
       this.#token = null;
       this.#expiresDt = null;
       await this.#refreshAccessToken(rejectedToken);
-      return this.post(path, { apiId, body, authorization, retryAuthorization: false, retryRateLimit, retryTransient, transientAttempt });
+      return this.post(path, { canSubmit, apiId, body, authorization, retryAuthorization: false, retryRateLimit, retryTransient, transientAttempt });
     }
     if (authorization && retryRateLimit && errorCode === 1700) {
       await new Promise((resolve) => setTimeout(resolve, 1100));
-      return this.post(path, { apiId, body, authorization, retryAuthorization, retryRateLimit: false, retryTransient, transientAttempt });
+      return this.post(path, { canSubmit, apiId, body, authorization, retryAuthorization, retryRateLimit: false, retryTransient, transientAttempt });
     }
     if (retryTransient && transientAttempt < 1 && transientHttpStatus(response.status)) {
       await new Promise((resolve) => setTimeout(resolve, response.status === 429 ? 1100 : 500));
-      return this.post(path, { apiId, body, authorization, retryAuthorization, retryRateLimit, retryTransient, transientAttempt: transientAttempt + 1 });
+      return this.post(path, { canSubmit, apiId, body, authorization, retryAuthorization, retryRateLimit, retryTransient, transientAttempt: transientAttempt + 1 });
     }
     if (!response.ok || data.return_code !== 0) {
       const message = `키움 ${this.#environmentLabel} 요청 실패: ${data.return_msg || `HTTP ${response.status}`}`;
@@ -314,7 +318,7 @@ class KiwoomClient {
     return { date, markets };
   }
 
-  async placeDomesticMarketOrder({ side, symbol, quantity, price, session = "REGULAR", orderStyle = "MARKET" }: any = {}) {
+  async placeDomesticMarketOrder({ side, symbol, quantity, price, session = "REGULAR", orderStyle = "MARKET", canSubmit }: any = {}) {
     side = String(side || "").toUpperCase();
     symbol = String(symbol || "");
     if (!["BUY", "SELL"].includes(side)) throw new Error("국내주식 주문 side는 BUY 또는 SELL이어야 합니다.");
@@ -327,6 +331,7 @@ class KiwoomClient {
 
     const data = await this.post("/api/dostk/ordr", {
       apiId: side === "BUY" ? "kt10000" : "kt10001",
+      canSubmit,
       authorization: true,
       retryTransient: false,
       body: {
@@ -338,7 +343,7 @@ class KiwoomClient {
         cond_uv: "",
       },
     });
-    if (!data.ord_no) throw new Error("키움 국내주식 주문 접수 응답에 주문번호가 없습니다.");
+    if (!data.ord_no) throw uncertainOrderError("키움 국내주식 주문 접수 응답에 주문번호가 없습니다.");
     return { status: "ACCEPTED", orderNo: String(data.ord_no), side, symbol, orderQuantity: quantity };
   }
 
@@ -360,7 +365,7 @@ class KiwoomClient {
       const rawStatus = String(item.ord_stt || "");
       let status = "ACCEPTED";
       if (rawStatus.includes("거부")) status = "REJECTED";
-      else if (rawStatus.includes("취소") && filledQuantity === 0) status = "CANCELLED";
+      else if (rawStatus.includes("취소") || (remainingQuantity === 0 && filledQuantity < toNumber(item.ord_qty, "주문수량"))) status = "CANCELLED";
       else if (filledQuantity > 0 && remainingQuantity === 0) status = "FILLED";
       else if (filledQuantity > 0) status = "PARTIALLY_FILLED";
       return {
@@ -445,7 +450,7 @@ class KiwoomClient {
     };
   }
 
-  async placeUsLimitOrder({ side, exchange, symbol, quantity, price }: any = {}) {
+  async placeUsLimitOrder({ side, exchange, symbol, quantity, price, canSubmit }: any = {}) {
     side = String(side || "").toUpperCase();
     exchange = String(exchange || "").toUpperCase();
     symbol = String(symbol || "").toUpperCase();
@@ -465,11 +470,12 @@ class KiwoomClient {
     if (side === "SELL") body.stop_pric = "";
     const data = await this.post("/api/us/ordr", {
       apiId: side === "BUY" ? "ust20000" : "ust20001",
+      canSubmit,
       authorization: true,
       retryTransient: false,
       body,
     });
-    if (!data.ord_no) throw new Error("키움 주문 접수 응답에 주문번호가 없습니다.");
+    if (!data.ord_no) throw uncertainOrderError("키움 주문 접수 응답에 주문번호가 없습니다.");
     return { status: "ACCEPTED", orderNo: String(data.ord_no), side, symbol };
   }
 
@@ -486,8 +492,16 @@ class KiwoomClient {
       retryTransient: false,
       body: { orig_ord_no: orderNo, stex_tp: exchange, stk_cd: symbol },
     });
-    if (!data.ord_no) throw new Error("키움 취소 접수 응답에 주문번호가 없습니다.");
+    if (!data.ord_no) throw uncertainOrderError("키움 취소 접수 응답에 주문번호가 없습니다.");
     return { status: "CANCEL_REQUESTED", orderNo, cancellationOrderNo: String(data.ord_no), symbol };
+  }
+
+  async cancelDomesticOrder({ orderNo, symbol }: any = {}) {
+    if (!/^\d{1,7}$/.test(String(orderNo)) || !/^\d{6}$/.test(symbol)) throw new Error("국내 취소 주문값이 올바르지 않습니다.");
+    const result = await this.post("/api/dostk/ordr", { apiId: "kt10003", authorization: true, retryTransient: false,
+      body: { dmst_stex_tp: "KRX", orig_ord_no: String(orderNo), stk_cd: symbol, cncl_qty: "0" } });
+    if (!result.ord_no) throw uncertainOrderError("키움 국내 취소 접수 번호가 없습니다.");
+    return { status: "CANCEL_REQUESTED", cancellationOrderNo: String(result.ord_no) };
   }
 
   async getUsOrderExecutions({ side = "ALL", exchange = "", symbol = "" }: any = {}) {
@@ -511,7 +525,7 @@ class KiwoomClient {
       const rawStatus = String(item.ord_stat || "");
       let status = "ACCEPTED";
       if (rawStatus.includes("거부")) status = "REJECTED";
-      else if (rawStatus.includes("취소") && filledQuantity === 0) status = "CANCELLED";
+      else if (rawStatus.includes("취소") || (remainingQuantity === 0 && filledQuantity < toNumber(item.ord_qty, "주문수량"))) status = "CANCELLED";
       else if (filledQuantity > 0 && remainingQuantity === 0) status = "FILLED";
       else if (filledQuantity > 0) status = "PARTIALLY_FILLED";
       return {
