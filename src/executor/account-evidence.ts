@@ -120,8 +120,9 @@ async function collectBrokerEvidence(broker, now = new Date()) {
   const discrepancies = holdingDiscrepancies(orders, holdings, broker.environment);
   const affected = new Set(discrepancies.map(row => row.symbol));
   const targets = [...new Map(orders.filter(o => o.market !== "KRX" && affected.has(o.symbol)).map(o => {
-    const target = { date: koreanDate(o.createdAt), exchange: o.exchange || ({ NASDAQ: "ND", NYSE: "NY", AMEX: "NA" })[o.market] };
-    return [`${target.date}:${target.exchange}`, target];
+    const target = { date: koreanDate(o.createdAt), exchange: o.exchange || ({ NASDAQ: "ND", NYSE: "NY", AMEX: "NA" })[o.market],
+      ...(broker.id === "KIWOOM" ? { symbol: normalizedSymbol(o.symbol) } : {}) };
+    return [`${target.date}:${target.exchange}:${target.symbol || ""}`, target];
   })).values()] as any[];
   const executions = [], historyErrors = [];
   for (const target of targets) {
@@ -134,7 +135,12 @@ async function collectBrokerEvidence(broker, now = new Date()) {
   const historyStart = orders.filter(o => o.market !== "KRX").map(o => koreanDate(o.createdAt)).filter(Boolean).sort()[0] || koreanDate(now);
   let transactions = [], transactionError = "";
   try {
-    for (const exchange of broker.id === "KIWOOM" ? ["ND", "NY", "NA"] : ["ND"]) transactions.push(...await overseas.getUsTransactions({ startDate: historyStart, endDate: koreanDate(now), exchange }));
+    // Kiwoom mock rejects an empty ticker despite the history documentation's all-symbol option.
+    const scopes = broker.id === "KIWOOM" ? [...new Map<string, { symbol: string; exchange: string }>(orders.filter(o => o.market !== "KRX").map(o => {
+      const scope = { symbol: normalizedSymbol(o.symbol), exchange: o.exchange || ({ NASDAQ: "ND", NYSE: "NY", AMEX: "NA" })[o.market] };
+      return [`${scope.exchange}:${scope.symbol}`, scope];
+    })).values()] : [{}];
+    for (const scope of scopes) transactions.push(...await overseas.getUsTransactions({ startDate: historyStart, endDate: koreanDate(now), ...scope }));
     transactions = [...new Map(transactions.map(row => [JSON.stringify(row), row])).values()];
   }
   catch (error) { transactions = []; transactionError = error.message; }

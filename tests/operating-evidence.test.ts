@@ -40,14 +40,25 @@ const { probe, monitor, marker } = require("../scripts/monitor-health.cjs");
   assert.ok(Math.abs(settlementCosts("KIS", [kisSettlement], [trade]).updates[0].executionCosts.total - 1.3) < 1e-8);
 
   // A later failed page/exchange must never turn a partial statement into a complete one.
+  const historyScopes = [], transactionScopes = [];
   const api = { getDomesticBalance: async () => ({ holdings: [] }), getUsBalances: async () => [{ holdings: [] }],
-    getUsHistoricalExecutions: async () => { throw Error("unsupported history"); },
-    getUsTransactions: async ({ exchange }) => { if (exchange === "NY") throw Error("unavailable page"); return [transaction]; },
+    getUsHistoricalExecutions: async (scope): Promise<any[]> => { historyScopes.push(scope); throw Error("unavailable history"); },
+    getUsTransactions: async (scope) => { transactionScopes.push(scope); if (scope.exchange === "NY") throw Error("unavailable page"); return [transaction]; },
     getUsEquityHistory: async () => { throw Error("unsupported equity"); } };
   const mismatch = { ...broker, tracker: { list: () => [{ ...trade, side: "BUY", entryType: "PAPER_ENTRY", timeframe: "240" }] }, domesticClient: api, overseasClient: api };
   const collected = await collectBrokerEvidence(mismatch);
   assert.equal(collected.historyErrors.length, 1); assert.deepEqual(collected.executions, []); assert.deepEqual(collected.transactions, []);
   assert.equal(collected.remainingDiscrepancies[0].managedQuantity, 51);
+  assert.equal(historyScopes[0].symbol, "SE"); assert.equal(transactionScopes[0].symbol, "SE");
+  historyScopes.length = 0; transactionScopes.length = 0;
+  api.getUsHistoricalExecutions = async (scope) => { historyScopes.push(scope); return []; };
+  const twoSymbols = { ...mismatch, tracker: { list: () => [
+    { ...trade, symbol: "ZETA", market: "NASDAQ", side: "BUY", entryType: "PAPER_ENTRY", timeframe: "240" },
+    ...mismatch.tracker.list(), { ...trade, orderNo: "other", symbol: "BE", market: "NYSE", side: "BUY", entryType: "PAPER_ENTRY", timeframe: "240" }] } };
+  const partial = await collectBrokerEvidence(twoSymbols);
+  assert.deepEqual(historyScopes.map(s => s.symbol), ["ZETA", "SE", "BE"]); // Same date/exchange still needs each ticker.
+  assert.deepEqual(transactionScopes.map(s => s.symbol), ["ZETA", "SE"]);
+  assert.deepEqual(partial.transactions, []); // Discard the first symbol's rows when the next fails.
 
   const kis = new KisClient({ appKey: "a", appSecret: "b", accountNo: "12345678", requestIntervalMs: 0 });
   const pages = []; kis.request = async (_path, options) => { pages.push(options); return pages.length === 1
