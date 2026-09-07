@@ -19,6 +19,13 @@ const { probe, monitor, marker } = require("../scripts/monitor-health.cjs");
   for (const bad of [{ ...row, filledQuantity: 52 }, { ...row, remainingQuantity: 1 }, { ...row, fillPrice: 0 }]) assert.equal(reconciliationPlan([order], [bad], "mock").updates.length, 0);
   assert.equal(reconciliationPlan([order], [row, row], "mock").conflicts.length, 1);
   assert.equal(reconciliationPlan([order], [row], "live").updates.length, 0);
+  assert.equal(reconciliationPlan([{ ...order, orderStyle: "BROKER_STOP" }], [row], "mock").updates.length, 0); // Stricter protection manager owns STOP state.
+  const usDateRow = { ...row, date: "20260817", orderTime: "02:30:21", filledAt: null, source: "KIWOOM:ust21150:20260817" };
+  const dateFix = reconciliationPlan([order], [usDateRow], "mock").updates[0];
+  assert.equal(dateFix.filledQuantity, 51); assert.equal(dateFix.evidenceFilledAt, null); assert.equal(dateFix.historicalFillDate, null);
+  assert.equal(dateFix.expirationReason, null); assert.equal(dateFix.resultAt, null);
+  assert.equal(reconciliationPlan([order], [{ ...usDateRow, orderTime: "04:30:21" }], "mock").updates.length, 0);
+  assert.equal(reconciliationPlan([order], [{ ...usDateRow, date: "20260816" }], "mock").updates.length, 0);
   const broker = { id: "KIWOOM", environment: "mock", tracker };
   const report = { brokerId: "KIWOOM", environment: "mock", capturedAt: "2026-09-07T00:00:00Z", reconciliation: reconciliationPlan([order], [row], "mock"), costs: { updates: [] } };
   const file = path.join(root, "evidence.json");
@@ -56,7 +63,7 @@ const { probe, monitor, marker } = require("../scripts/monitor-health.cjs");
     { ...trade, symbol: "ZETA", market: "NASDAQ", side: "BUY", entryType: "PAPER_ENTRY", timeframe: "240" },
     ...mismatch.tracker.list(), { ...trade, orderNo: "other", symbol: "BE", market: "NYSE", side: "BUY", entryType: "PAPER_ENTRY", timeframe: "240" }] } };
   const partial = await collectBrokerEvidence(twoSymbols);
-  assert.deepEqual(historyScopes.map(s => s.symbol), ["ZETA", "SE", "BE"]); // Same date/exchange still needs each ticker.
+  assert.deepEqual(historyScopes.map(s => s.symbol), ["ZETA", "ZETA", "SE", "SE", "BE", "BE"]); // KST and US dates, each ticker.
   assert.deepEqual(transactionScopes.map(s => s.symbol), ["ZETA", "SE"]);
   assert.deepEqual(partial.transactions, []); // Discard the first symbol's rows when the next fails.
 

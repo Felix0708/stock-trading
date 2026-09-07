@@ -49,7 +49,7 @@ function fixture(ids = ["KIS"], environment = "mock") {
       placeUsLimitOrder: async (request) => { state.requests.push(request); if (state.unknown) throw Object.assign(new Error("lost response"), { orderStatusUnknown: true }); return { orderNo: String(state.requests.length), status: "ACCEPTED", symbol: request.symbol, side: request.side }; },
       cancelUsOrder: async () => { state.cancels++; return { status: "CANCEL_REQUESTED", cancellationOrderNo: "c1" }; },
     };
-    return { id, label: id, environment, tracker, domesticClient: api, overseasClient: api, state };
+    return { id, label: id, environment, protectionEnabled: false, tracker, domesticClient: api, overseasClient: api, state };
   });
   const guild = { channels: { fetch: async () => new Map([["order", channel], ["execution", channel], ["system", channel], ["journal", channel]]) } };
   const runtime = createAccountRuntime({ brokers, receipts, client: { guilds: { fetch: async () => guild } },
@@ -170,6 +170,35 @@ function message(r) { return { id: r.requestId, channelId: "signal", author: { i
   assert.equal(b.state.requests.length, 1);
   assert.equal(b.state.requests[0].side, "SELL");
   assert.equal(b.state.requests[0].quantity, 2);
+
+  const protectedExit = fixture(["KIWOOM"]), pb = protectedExit.brokers[0];
+  pb.protectionEnabled = true;
+  pb.state.holdings = [{ code: "TEST", quantity: 5, tradableQuantity: 0, evaluationAmount: 500, purchaseAmount: 500 }];
+  pb.tracker.record({ orderNo: "owned", requestId: "owned", market: "NASDAQ", symbol: "TEST", side: "BUY", entryType: "PAPER_ENTRY", environment: "mock",
+    timeframe: "240", status: "FILLED", filledQuantity: 5, fillPrice: 100, stopPrice: 90, createdAt: new Date(clock - 10000).toISOString() });
+  const stop = { orderNo: "stop1", requestId: "protection", market: "NASDAQ", symbol: "TEST", exchange: "ND", side: "SELL", environment: "mock",
+    timeframe: "240", status: "ACCEPTED", orderQuantity: 5, filledQuantity: 0, remainingQuantity: 5, fillPrice: 0, stopPrice: 90,
+    orderStyle: "BROKER_STOP", createdAt: new Date(clock).toISOString(), brokerOrderType: "35", brokerStopPrice: 90,
+    orderTime: new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Seoul", hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" }).format(new Date(clock)) };
+  pb.tracker.record(stop); pb.state.executions = [{ ...stop }];
+  await protectedExit.runtime.executeOrDefer(pb, record("protected-exit", "SELL"));
+  assert.equal(pb.state.cancels, 1); assert.equal(pb.state.requests.length, 0);
+  pb.state.executions = [{ ...stop, status: "CANCELLED", rawStatus: "취소완료", filledQuantity: 2, remainingQuantity: 0, fillPrice: 89 }];
+  pb.state.holdings = [{ code: "TEST", quantity: 3, tradableQuantity: 3, evaluationAmount: 300, purchaseAmount: 300 }];
+  clock += 60001; await protectedExit.runtime.retryDeferred();
+  assert.equal(pb.state.requests.length, 1); assert.equal(pb.state.requests[0].quantity, 3);
+
+  const uncertainStop = fixture(["KIWOOM"]), ub = uncertainStop.brokers[0];
+  ub.tracker.record({ ...stop }); ub.state.holdings = [{ code: "TEST", quantity: 5, tradableQuantity: 5 }];
+  ub.tracker.record({ ...pb.tracker.list().find(o => o.orderNo === "owned") });
+  await uncertainStop.runtime.executeOrDefer(ub, record("unknown-stop-exit", "SELL"));
+  assert.equal(uncertainStop.receipts.listDeferred()[0].kind, "VERIFY");
+  assert.equal(ub.state.requests.length, 0); assert.equal(ub.state.cancels, 0);
+  for (const id of ["KIWOOM", "KIS"]) {
+    const live = fixture([id], "live");
+    const result = await live.runtime.executeOrDefer(live.brokers[0], record("unprotected-live-buy"));
+    assert.equal(result.status, "BLOCKED"); assert.equal(live.brokers[0].state.requests.length, 0);
+  }
 
   for (const environment of ["mock", "live"]) {
     for (const id of ["KIWOOM", "KIS"]) {

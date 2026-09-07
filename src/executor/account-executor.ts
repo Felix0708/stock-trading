@@ -7,6 +7,7 @@ const { syncAccountPortfolio, strategyComparison, formatStrategyComparisonMessag
 const { writeAccountHealth } = require("./account-health");
 const { evidenceFile, readEvidence, writeEvidence, collectBrokerEvidence, applyEvidence, validateStatement, reconciliationPlan } = require("./account-evidence");
 const { equityPerformance, importCashFlows } = require("./equity-performance");
+const { brokerStop, protectionReadiness, currentProtection, ensureProtection, releaseProtection } = require("./broker-protection");
 const { formatLifecycleCard } = require("./signal-lifecycle");
 const { calendarNotices } = require("../trading/market-calendar");
 const { parseBuyApprovalCommand } = require("./buy-approval");
@@ -465,7 +466,7 @@ function discordMessagePayload(message) {
 }
 
 function orderNeedsResultReport(order) {
-  if (order.executorReportable !== true || order.status === "ACCEPTED") return false;
+  if (order.executorReportable !== true || (order.status === "ACCEPTED" && !brokerStop(order))) return false;
   return order.executionReportedStatus !== order.status
     || (order.status === "PARTIALLY_FILLED" && order.executionReportedFilledQuantity !== order.filledQuantity)
     || (order.status === "FILLED" && order.journalReportedStatus !== order.status);
@@ -543,6 +544,7 @@ function accountCommand(content, executorName = "") {
   if (["!account performance", "!계좌 성과", "계좌 전략 성과 보여줘"].includes(text)) return "PERFORMANCE";
   if (["!account reconcile", "!계좌 대조"].includes(text)) return "RECONCILE";
   if (["!account import", "!계좌 증빙반영"].includes(text)) return "IMPORT_EVIDENCE";
+  if (["!account protection", "!계좌 보호"].includes(text)) return "PROTECTION";
   const bangAuto = text.match(/^!(?:account|계좌)\s+(?:auto|자동매매)\s+(on|off|status|켜|꺼|상태)$/);
   if (bangAuto) {
     if (["on", "켜"].includes(bangAuto[1])) return "AUTO_ON";
@@ -736,6 +738,7 @@ function pendingSymbolOrder(orders, record) {
   const market = String(record?.payload?.exchange || "").toUpperCase();
   const symbol = accountSymbol(record?.payload?.ticker);
   return orders.find((order) => PENDING_ORDER_STATUSES.has(order.status)
+    && !(brokerStop(order) && order.status === "ACCEPTED" && !order.cancelSubmitted)
     && String(order.market || "").toUpperCase() === market
     && accountSymbol(order.symbol) === symbol) || null;
 }
@@ -807,6 +810,7 @@ function applyPyramidSizing(record, preview, orders) {
 async function reconcilePendingBrokerOrders(broker) {
   const changes = [];
   for (const previous of broker.tracker.pending()) {
+    if (brokerStop(previous)) continue; // Native protection has stricter identity/trigger verification.
     const current = await refreshPaperOrder(previous, broker);
     if (["status", "filledQuantity", "remainingQuantity", "fillPrice"].some((key) => current[key] !== previous[key])) {
       changes.push({ previous, current });
@@ -907,6 +911,7 @@ async function start() {
     const overseasCredentials = kiwoomCredentials(environments.KIWOOM, "overseas");
     brokers.push({
       id: "KIWOOM", label: "키움", environment: environments.KIWOOM,
+      protectionEnabled: environments.KIWOOM === "live" && process.env.ACCOUNT_BROKER_PROTECTION === "true",
       domesticClient: new KiwoomClient({ ...domesticCredentials, environment: environments.KIWOOM, timeoutMs: Number(process.env.KIWOOM_TIMEOUT_MS || 5_000) }),
       overseasClient: new KiwoomClient({ ...overseasCredentials, environment: environments.KIWOOM, timeoutMs: Number(process.env.KIWOOM_TIMEOUT_MS || 5_000) }),
       tracker: new OrderTracker(process.env.KIWOOM_ORDER_STATE_FILE || "kiwoom-orders.json"),
@@ -1143,6 +1148,10 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
   }
 
   async function previewFor(broker, record) {
+    if (record.payload?.action === "BUY" && broker.environment === "live") {
+      const reason = protectionReadiness(broker, record.payload.exchange);
+      if (reason) return { label: broker.label, preview: { blocked: true, quantity: 0, reason } };
+    }
     const sizingRecord = structuredClone(record);
     if (sizingRecord.risk?.verdict === "BUY_PENDING_APPROVAL") {
       sizingRecord.risk.verdict = approvedEntryVerdict(sizingRecord);
@@ -1230,6 +1239,8 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
       error.orderStatusUnknown = true;
       throw error;
     }
+    try { currentProtection(broker, receipts, record.payload); } // Unknown STOP blocks ordinary orders, but is not their submission.
+    catch (error) { throw Object.assign(new Error(error.message), { accountVerificationFailed: true }); }
     if (Object.entries(receipts.state.attempts).some(([key, a]: [string, any]) => key.startsWith(`${broker.id}:`) && ["SUBMITTING", "UNKNOWN"].includes(a.status)
       && a.market === record.payload.exchange && a.symbol === record.payload.ticker)) {
       return { status: "DEFER_REQUIRED", verificationPending: true };
@@ -1255,6 +1266,15 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
       } catch (error) {
         error.accountVerificationFailed = true;
         throw error;
+      }
+    }
+    if ((record.payload.action === "SELL" || record.risk?.verdict === "PAPER_ADD") && !shouldDelayOrder(record)) {
+      const owned = managedPosition(broker.tracker.list(), record.payload, broker.environment);
+      if (owned.quantity && (emergencyExit(record) || sameTimeframe(owned.timeframe, record.payload.timeframe))
+        && (!Number.isFinite(Date.parse(record.receivedAt)) || Date.parse(record.receivedAt) >= owned.entryAt)) {
+        try {
+          if (!await releaseProtection(broker, receipts, record.payload, () => manual || receipts.autoTrading())) return { status: "DEFER_REQUIRED", verificationPending: true };
+        } catch (error) { throw Object.assign(new Error(error.message), { accountVerificationFailed: true }); }
       }
     }
     await settlePendingBuys(broker, record, manual);
@@ -1325,6 +1345,7 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
     receipts.reconcileTradeStage(broker.id, final);
     void requestOrderReports();
     if (orderNeedsPortfolioSync(final)) void requestPortfolioSync();
+    if (broker.protectionEnabled) await checkManagedStops([broker]);
     return final;
   }
 
@@ -1540,7 +1561,15 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
       const symbols = new Map(orders.filter(order => order.entryType).map(order => [`${order.market}:${order.symbol}`, order]));
       for (const order of symbols.values() as Iterable<any>) {
         const payload = { ticker: order.symbol, exchange: order.market, action: "SELL", koreanName: order.koreanName, name: order.name };
-        const owned = managedPosition(orders, payload, broker.environment);
+        if (broker.protectionEnabled && !shouldDelayOrder({ payload, risk: { verdict: "PAPER_EXIT" } })) {
+          try {
+            const result = await ensureProtection(broker, receipts, payload, () => !readOnly && receipts.autoTrading());
+            if (result.status === "UNPROTECTED") await reportError(`${broker.label} 증권사 보호 미적용`, new Error(result.reason));
+            if (result.order) { void requestOrderReports(); if (orderNeedsPortfolioSync(result.order)) void requestPortfolioSync(); }
+          } catch (error) { await reportError(`${broker.label} 증권사 보호주문 확인 필요`, error); }
+        }
+        const freshOrders = broker.tracker.list();
+        const owned = managedPosition(freshOrders, payload, broker.environment);
         if (!owned.quantity || shouldDelayOrder({ payload, risk: { verdict: "PAPER_EXIT" } })) continue;
         try {
           const account = await accountContext(broker, { payload }, maxOpenPositions, { positionOnly: true });
@@ -1817,7 +1846,14 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
     const command = accountCommand(message.content, executorName);
     if (!command) return false;
     if (command === "HELP") {
-      await message.reply(["🧾 **계좌 주문 실행기 명령어**", "`!account status`", "`!account orders`", "`!account performance` · 전략별 성과·총자산·후보 비교 자료", "`!account reconcile` · 증권사 증빙 대조 (주문 없음)", "`!account import` · 로컬 명세서 체결·입출금 증빙 반영 (주문 없음)", "`!account auto on` / `!account auto off` / `!account auto status`", "수동 BUY 승인: `사줘`·`둘다` / `키움만` / `한투만` / `안 사`"].join("\n"));
+      await message.reply(["🧾 **계좌 주문 실행기 명령어**", "`!account status`", "`!account orders`", "`!account protection` · 증권사 보호주문 상태 (주문 없음)", "`!account performance` · 전략별 성과·총자산·후보 비교 자료", "`!account reconcile` · 증권사 증빙 대조 (주문 없음)", "`!account import` · 로컬 명세서 체결·입출금 증빙 반영 (주문 없음)", "`!account auto on` / `!account auto off` / `!account auto status`", "수동 BUY 승인: `사줘`·`둘다` / `키움만` / `한투만` / `안 사`"].join("\n"));
+    } else if (command === "PROTECTION") {
+      const report = brokers.map(broker => ({ broker: broker.id, environment: broker.environment,
+        enabled: broker.protectionEnabled === true, readiness: protectionReadiness(broker, "NASDAQ") || "STOP API 연계 활성 · 개별 주문 조회 필요",
+        orders: broker.tracker.list().filter(brokerStop).map(o => ({ symbol: o.symbol, status: o.status, quantity: o.orderQuantity,
+          filled: o.filledQuantity, remaining: o.remainingQuantity, stopPrice: o.stopPrice, verifiedAt: o.protectionVerifiedAt || null })) }));
+      await message.reply({ content: "증권사 보호주문 상태입니다. 활성 설정과 실제 주문 접수는 별개이며 장 종료 후 유지 여부를 보장하지 않습니다.",
+        files: [{ name: "broker-protection.json", attachment: Buffer.from(JSON.stringify(report, null, 2)) }] });
     } else if (command === "RECONCILE" || command === "IMPORT_EVIDENCE") {
       if (readOnly || !receipts.file) { await message.reply("읽기 전용 모드에서는 기록도 변경하지 않습니다."); return true; }
       await message.reply("증빙 대조를 시작합니다. 주문·취소 요청은 보내지 않습니다.");
@@ -1877,6 +1913,7 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
       try {
         writeAccountHealth(receipts.file, { discordReady: client.isReady(), initialized, workerAt,
           uncertainOrders: brokers.some(broker => broker.tracker.list().some(order => order.status === "UNKNOWN"))
+            || Object.values(receipts.state.protection || {}).some((intent: any) => intent.status === "UNKNOWN" || (intent.status === "SUBMITTING" && Date.now() - Date.parse(intent.createdAt) > 60_000))
             || Object.entries(receipts.state.attempts).some(([key, attempt]: [string, any]) => attempt.status === "UNKNOWN" || (attempt.status === "SUBMITTING" && !submitting.has(key))) });
       } catch (error) { console.error("실행기 상태 기록 실패:", error.message); }
     };

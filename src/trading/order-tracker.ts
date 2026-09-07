@@ -77,7 +77,7 @@ class OrderTracker {
     const expired: TrackedOrder[] = [];
     for (const order of Object.values(state.orders)) {
       const updatedAt = new Date(order.updatedAt || "");
-      if (order.status === "UNKNOWN" || !PENDING_STATUSES.has(order.status) || Number.isNaN(updatedAt.getTime())) continue;
+      if (order.orderStyle === "BROKER_STOP" || order.status === "UNKNOWN" || !PENDING_STATUSES.has(order.status) || Number.isNaN(updatedAt.getTime())) continue;
       if (tradingDate(updatedAt, order.market) >= tradingDate(now, order.market)) continue;
       state.revision += 1;
       const saved = {

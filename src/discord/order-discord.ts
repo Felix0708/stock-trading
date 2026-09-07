@@ -59,14 +59,16 @@ function formatOrderStatus(order) {
     channel: "system",
     embed: {
       color,
-      title: `${icon} ${display(order.side)} · ${label}`,
+      title: `${icon} ${order.orderStyle === "BROKER_STOP" ? "보호 STOP 매도" : display(order.side)} · ${label}`,
       description: `**${identity}**`,
       fields: [
         { name: "수량", value: `주문 ${display(order.orderQuantity)}주 · 체결 ${display(order.filledQuantity)}주 · 잔량 ${display(order.remainingQuantity)}주` },
         ...(pyramidLine ? [{ name: "피라미딩", value: pyramidLine }] : []),
         ...(order.orderStrategy ? [{ name: "주문 방식", value: clip(order.orderStrategy, 1024) }] : []),
+        ...(order.orderStyle === "BROKER_STOP" ? [{ name: "보호 조건", value: `발동가 ${money(order.stopPrice, currency)} · 발동 후 시장가, 체결가 보장 없음\n${order.protectionVerifiedAt ? "마지막 증권사 조회: " + order.protectionVerifiedAt : "접수 후 유형·수량·가격 확인 중"}\n장 종료 후 유지 여부는 별도 확인 대상` }] : []),
         ...(limitPrice ? [{ name: "매수 상한가", value: money(limitPrice, currency), inline: true }] : []),
         ...(fillPrice > 0 ? [{ name: "체결가", value: money(fillPrice, currency), inline: true }] : []),
+        ...(order.reconciliationEvidence ? [{ name: "체결 증빙 복구", value: `증권사 과거 기록으로 정정 · ${order.evidenceFilledAt ? "체결시각: " + order.evidenceFilledAt : "정확한 체결시각 미제공 (복구 시각과 다름)"}` }] : []),
         ...(filledLine ? [{ name: "실제 투입·비중", value: filledLine, inline: false }] : plannedLine ? [{ name: "예상 투입·비중", value: plannedLine, inline: false }] : []),
         ...(statusReason ? [{ name: "사유", value: clip(statusReason, 1024) }] : []),
         { name: "주문번호", value: `끝 4자리 ${String(order.orderNo || "").slice(-4) || "-"}`, inline: true },

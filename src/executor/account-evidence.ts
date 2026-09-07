@@ -11,10 +11,20 @@ function evidenceNumber(value) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-function koreanDate(value) {
+function koreanDate(value, timeZone = "Asia/Seoul") {
   const time = new Date(value);
   if (!Number.isFinite(time.getTime())) return "";
-  return new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Seoul", year: "numeric", month: "2-digit", day: "2-digit" }).format(time).replaceAll("-", "");
+  return new Intl.DateTimeFormat("en-CA", { timeZone, year: "numeric", month: "2-digit", day: "2-digit" }).format(time).replaceAll("-", "");
+}
+
+function executionDateMatches(order, row) {
+  const date = koreanDate(order.createdAt);
+  if (!String(row.source).startsWith("KIWOOM:ust21150:")) return row.date === date;
+  if (![date, koreanDate(order.createdAt, "America/New_York")].includes(row.date) || !/^\d\d:\d\d:\d\d$/.test(row.orderTime || "")) return false;
+  // Kiwoom mock history uses the US trading date but returns the order clock in KST.
+  // Require the original order clock too: order numbers can be reused on another day.
+  const time = Date.parse(`${date.slice(0, 4)}-${date.slice(4, 6)}-${date.slice(6)}T${row.orderTime}+09:00`);
+  return Math.abs(time - Date.parse(order.createdAt)) < 120_000;
 }
 
 function evidenceFile(receiptFile) { return `${receiptFile}.evidence.json`; }
@@ -35,10 +45,9 @@ function writeEvidence(file, state) {
 
 function reconciliationPlan(orders, rows, environment) {
   const updates = [], conflicts = [];
-  for (const order of orders.filter(item => (item.environment || "mock") === environment && item.market !== "KRX")) {
-    const date = koreanDate(order.createdAt);
+  for (const order of orders.filter(item => (item.environment || "mock") === environment && item.market !== "KRX" && item.orderStyle !== "BROKER_STOP")) {
     const matching = rows.filter(row => String(row.orderNo).replace(/^0+/, "") === String(order.orderNo).replace(/^0+/, "")
-      && normalizedSymbol(row.symbol) === normalizedSymbol(order.symbol) && row.date === date && row.side === order.side);
+      && normalizedSymbol(row.symbol) === normalizedSymbol(order.symbol) && executionDateMatches(order, row) && row.side === order.side);
     if (!matching.length) continue;
     if (matching.length !== 1) { conflicts.push({ symbol: order.symbol, reason: "같은 주문의 증빙이 여러 개입니다." }); continue; }
     const row = matching[0];
@@ -57,7 +66,9 @@ function reconciliationPlan(orders, rows, environment) {
     if (row.remainingQuantity > 0) { conflicts.push({ symbol: order.symbol, reason: "과거 주문 잔량 종료 여부 미확인" }); continue; }
     updates.push({ ...order, ...(costChanged ? { executionCosts: row.executionCosts } : {}), ...(changed ? { filledQuantity: row.filledQuantity, remainingQuantity: 0, fillPrice: row.fillPrice,
       status: row.filledQuantity === row.orderQuantity ? "FILLED" : "CANCELLED",
-      evidenceFilledAt: row.filledAt || null, historicalFillDate: row.date,
+      expirationReason: null, rawStatus: row.rawStatus || "증권사 과거 체결 증빙 확인", resultAt: row.filledAt || null,
+      evidenceFilledAt: row.filledAt || null, historicalFillDate: row.filledAt ? koreanDate(row.filledAt) : String(row.source).startsWith("KIWOOM:") ? null : row.date,
+      historicalQueryDate: row.date,
       reconciliationEvidence: { source: row.source, capturedAt: new Date().toISOString(),
         digest: createHash("sha256").update(JSON.stringify(row)).digest("hex"), previousFilledQuantity: order.filledQuantity, previousStatus: order.status } } : {}) });
   }
@@ -119,10 +130,13 @@ async function collectBrokerEvidence(broker, now = new Date()) {
     ...new Map(usBalances.flatMap(b => b.holdings).map(h => [h.code, { ...h, market: "US" }])).values() as Iterable<any>];
   const discrepancies = holdingDiscrepancies(orders, holdings, broker.environment);
   const affected = new Set(discrepancies.map(row => row.symbol));
-  const targets = [...new Map(orders.filter(o => o.market !== "KRX" && affected.has(o.symbol)).map(o => {
-    const target = { date: koreanDate(o.createdAt), exchange: o.exchange || ({ NASDAQ: "ND", NYSE: "NY", AMEX: "NA" })[o.market],
+  const targets = [...new Map(orders.filter(o => o.market !== "KRX" && affected.has(o.symbol)).flatMap(o => {
+    const dates = broker.id === "KIWOOM" ? [koreanDate(o.createdAt), koreanDate(o.createdAt, "America/New_York")] : [koreanDate(o.createdAt)];
+    return [...new Set(dates)].map(date => {
+    const target = { date, exchange: o.exchange || ({ NASDAQ: "ND", NYSE: "NY", AMEX: "NA" })[o.market],
       ...(broker.id === "KIWOOM" ? { symbol: normalizedSymbol(o.symbol) } : {}) };
     return [`${target.date}:${target.exchange}:${target.symbol || ""}`, target];
+    });
   })).values()] as any[];
   const executions = [], historyErrors = [];
   for (const target of targets) {
@@ -203,4 +217,4 @@ function validateStatement(input, broker) {
   });
 }
 
-module.exports = { evidenceNumber, koreanDate, evidenceFile, orderKey, readEvidence, writeEvidence, reconciliationPlan, holdingDiscrepancies, settlementCosts, collectBrokerEvidence, applyEvidence, validateStatement };
+module.exports = { evidenceNumber, koreanDate, executionDateMatches, evidenceFile, orderKey, readEvidence, writeEvidence, reconciliationPlan, holdingDiscrepancies, settlementCosts, collectBrokerEvidence, applyEvidence, validateStatement };

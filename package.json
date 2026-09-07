@@ -11,7 +11,7 @@
     "start:all": "sh start-all.sh",
     "start:tunnel": "sh start-tunnel.sh",
     "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.strict.json",
-    "preself-test": "node --import tsx tests/operating-evidence.test.ts",
+    "preself-test": "node --import tsx tests/operating-evidence.test.ts && node --import tsx tests/broker-protection.test.ts",
     "test:webhook-live": "node --import tsx --env-file=${SIGNAL_ENV_FILE:-.env.signal} scripts/send-test-webhook.ts",
     "test:account-readonly-e2e": "node --import tsx --env-file=${SIGNAL_ENV_FILE:-.env.signal} scripts/send-test-webhook.ts",
     "setup-discord": "node --import tsx --env-file=${SIGNAL_ENV_FILE:-.env.signal} scripts/setup-discord.ts",
