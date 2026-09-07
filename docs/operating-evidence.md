@@ -68,3 +68,11 @@ GitHub 비밀값은 `MONITOR_HEALTH_URL`, `MONITOR_DISCORD_WEBHOOK` 두 개뿐�
 ## 검증
 
 `npm run self-test`에 증빙의 정확/모호 연결, 오래된 기록 덮어쓰기 차단, 비용 미확인, 연속조회 실패, 입출금 조정, 알람 증빙 만료, 실계좌 정책 지문, 재생 신호 제외, 외부 장애/복구·중복 알림 방지 검증이 포함된다. 이 자동검증은 테스트 데이터이며 실제 브로커 주문을 보내지 않는다.
+
+2026-09-07 실제 외부 연결 확인:
+
+- GitHub 예약 워크플로 `External service health` 활성화 확인.
+- [알림 전달 테스트](https://github.com/Felix0708/stock-trading/actions/runs/34095921349) 성공, 시스템상태 채널에서 `Stock-Trading external health`의 테스트 메시지 도착 확인.
+- [실제 외부 상태 점검](https://github.com/Felix0708/stock-trading/actions/runs/34095963247) 성공, `External health: OK` 확인. 정상 상태에서는 추가 알림을 보내지 않음.
+- 실제 서버를 끄는 장애 실험은 하지 않았다. 장애·복구·중복 억제 분기는 자동검증으로 확인했으며, 예약 실행의 시간 정확도를 보장하지 않는다.
+- 외부 감시는 활성화됐지만, 이번에 추가한 로컬 증빙 수집·알람 증빙 표시·정책 연구 기능은 기존 iTerm 서버 재시작 후 적용된다.
