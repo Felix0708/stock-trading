@@ -5,6 +5,8 @@ const { createHash } = require("node:crypto");
 const { Client, GatewayIntentBits } = require("discord.js");
 const { syncAccountPortfolio, strategyComparison, formatStrategyComparisonMessage } = require("./account-portfolio");
 const { writeAccountHealth } = require("./account-health");
+const { evidenceFile, readEvidence, writeEvidence, collectBrokerEvidence, applyEvidence, validateStatement, reconciliationPlan } = require("./account-evidence");
+const { equityPerformance, importCashFlows } = require("./equity-performance");
 const { formatLifecycleCard } = require("./signal-lifecycle");
 const { calendarNotices } = require("../trading/market-calendar");
 const { parseBuyApprovalCommand } = require("./buy-approval");
@@ -16,7 +18,7 @@ const { stockBriefingSyncReady, syncStockBriefingHoldings } = require("../integr
 const { OrderTracker } = require("../trading/order-tracker");
 const { normalizedSymbol, normalizedTimeframe, sameTimeframe, emergencyExit, managedPosition, scopePositionPreview, restoreOrderSignalMetadata, orderTime } = require("../trading/position-ownership");
 
-const POLICY_VERSION = "2026-09-07-owned-timeframe-v1";
+const { POLICY_VERSION, policyFingerprint, assertLivePolicy } = require("../trading/policy-study");
 const {
   domesticSession,
   domesticSessionClock,
@@ -539,6 +541,8 @@ function accountCommand(content, executorName = "") {
   if (["!account status", "!계좌 상태", "주문 실행기 상태 보여줘", "주문 실행기 상태 확인"].includes(text)) return "STATUS";
   if (["!account orders", "!계좌 주문"].includes(text)) return "ORDERS";
   if (["!account performance", "!계좌 성과", "계좌 전략 성과 보여줘"].includes(text)) return "PERFORMANCE";
+  if (["!account reconcile", "!계좌 대조"].includes(text)) return "RECONCILE";
+  if (["!account import", "!계좌 증빙반영"].includes(text)) return "IMPORT_EVIDENCE";
   const bangAuto = text.match(/^!(?:account|계좌)\s+(?:auto|자동매매)\s+(on|off|status|켜|꺼|상태)$/);
   if (bangAuto) {
     if (["on", "켜"].includes(bangAuto[1])) return "AUTO_ON";
@@ -866,6 +870,9 @@ async function start() {
   if (!brokerIds.length) throw new Error("ACCOUNT_EXECUTOR_ENABLED=true와 사용할 증권사 설정이 필요합니다.");
   const readOnly = process.env.ACCOUNT_READ_ONLY === "true";
   const environments = brokerEnvironments(brokerIds);
+  const approvedHash = policyFingerprint();
+  assertLivePolicy(environments, readOnly, approvedHash);
+  console.log(`정책 지문: ${approvedHash} · 주문 없는 후보 비교와 분리`);
   const sourceChannelIds = csv(process.env.ACCOUNT_SOURCE_CHANNEL_IDS || process.env.KIS_SOURCE_CHANNEL_IDS);
   const sourceBotIds = csv(process.env.ACCOUNT_SOURCE_BOT_IDS || process.env.KIS_SOURCE_BOT_IDS);
   if (!sourceChannelIds.size || !sourceBotIds.size) throw new Error("신뢰할 Discord 원본 채널 ID와 봇 ID가 필요합니다.");
@@ -947,6 +954,7 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
     receipts.state.environments[broker.id] = broker.environment;
   }
   if (!readOnly) receipts.write();
+  const executionPolicyHash = policyFingerprint();
   const brokerQueues = new Map();
   const submitting = new Set();
   const brokerCompletedAt = new Map(brokers.map(broker => [broker.id, Date.now()]));
@@ -965,6 +973,14 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
     return settled;
   }
   let portfolioJob = null;
+  async function reconcileEvidence(broker) {
+    if (readOnly || !receipts.file || !broker.overseasClient.getUsHistoricalExecutions) return null;
+    const report = await collectBrokerEvidence(broker);
+    const changed = applyEvidence(broker, report, evidenceFile(receipts.file));
+    if (changed) void requestPortfolioSync();
+    return { broker: broker.id, changed, discrepancies: report.remainingDiscrepancies.length,
+      historyErrors: report.historyErrors, transactionError: report.transactionError, equityError: report.equityError };
+  }
   function latestOrder(broker, order) {
     return broker.tracker.list().find(item => order.storageKey ? item.storageKey === order.storageKey
       : item.orderNo === order.orderNo && item.requestId === order.requestId) || order;
@@ -1275,6 +1291,7 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
     receipts.attempt(broker.id, record, "SUBMITTING");
     record.executorReportable = true;
     record.policyVersion = POLICY_VERSION;
+    record.policyHash = executionPolicyHash;
     let order;
     const submissionKey = `${broker.id}:${record.requestId}`;
     submitting.add(submissionKey);
@@ -1800,13 +1817,42 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
     const command = accountCommand(message.content, executorName);
     if (!command) return false;
     if (command === "HELP") {
-      await message.reply(["🧾 **계좌 주문 실행기 명령어**", "`!account status`", "`!account orders`", "`!account performance` · 전략별 성과 전체 자료", "`!account auto on` / `!account auto off` / `!account auto status`", "수동 BUY 승인: `사줘`·`둘다` / `키움만` / `한투만` / `안 사`"].join("\n"));
+      await message.reply(["🧾 **계좌 주문 실행기 명령어**", "`!account status`", "`!account orders`", "`!account performance` · 전략별 성과·총자산·후보 비교 자료", "`!account reconcile` · 증권사 증빙 대조 (주문 없음)", "`!account import` · 로컬 명세서 체결·입출금 증빙 반영 (주문 없음)", "`!account auto on` / `!account auto off` / `!account auto status`", "수동 BUY 승인: `사줘`·`둘다` / `키움만` / `한투만` / `안 사`"].join("\n"));
+    } else if (command === "RECONCILE" || command === "IMPORT_EVIDENCE") {
+      if (readOnly || !receipts.file) { await message.reply("읽기 전용 모드에서는 기록도 변경하지 않습니다."); return true; }
+      await message.reply("증빙 대조를 시작합니다. 주문·취소 요청은 보내지 않습니다.");
+      const reports = [];
+      for (const broker of brokers) await brokerWork(broker, async () => {
+        try {
+        if (command === "RECONCILE") { reports.push(await reconcileEvidence(broker)); return; }
+        const file = `${receipts.file}.${broker.id}.statement.json`;
+        if (!fs.existsSync(file)) { reports.push({ broker: broker.id, reason: "로컬 명세서 파일 없음" }); return; }
+        const input = JSON.parse(fs.readFileSync(file, "utf8"));
+        const rows = validateStatement(input, broker);
+        const proofFile = evidenceFile(receipts.file), state = readEvidence(proofFile);
+        importCashFlows(state, input, broker); // Validate the entire cash-flow section before touching orders.
+        const reconciliation = reconciliationPlan(broker.tracker.list(), rows, broker.environment);
+        if (reconciliation.conflicts.length) throw Error("명세서 충돌 · 주문번호/날짜/수량을 확인하세요.");
+        writeEvidence(proofFile, state);
+        const changed = applyEvidence(broker, { brokerId: broker.id, environment: broker.environment, capturedAt: new Date().toISOString(), reconciliation, costs: { updates: [] }, source: input.source }, proofFile);
+        reports.push({ broker: broker.id, changed, cashFlowCoverageImported: Boolean(input.cashFlowCoverage) });
+        } catch (error) { reports.push({ broker: broker.id, error: error.message }); throw error; }
+      }, "evidence");
+      await message.reply({ content: "대조 결과입니다. 미지원 조회는 명세서 증빙이 필요하며 잔고 차이만으로 체결을 만들지 않습니다.", files: [{ name: "account-reconciliation.json", attachment: Buffer.from(JSON.stringify(reports, null, 2)) }] });
+      void requestPortfolioSync();
     } else if (command === "PERFORMANCE") {
       const file = process.env.TRADING_DECISION_LOG_FILE || "trading-decisions.jsonl";
       const decisions = fs.existsSync(file) ? fs.readFileSync(file, "utf8").split(/\r?\n/).filter(Boolean).map(line => JSON.parse(line)) : [];
       const latest = new Map(decisions.map(row => [row.requestId, row]));
+      const evidence = receipts.file ? readEvidence(evidenceFile(receipts.file)) : { equity: [], cashFlows: [], cashFlowCoverage: [] };
+      const studyFile = "forward-policy-study.json";
       const report = { at: new Date().toISOString(), notes: "실제 체결·최종청산 기준. 비용 미확인은 null. 신호가 대비 체결 차이는 실제 손익에 이미 반영되어 재차 차감하지 않음. 실현손익 낙폭은 계좌 MDD가 아님.",
         accounts: brokers.map(broker => ({ broker: broker.id, environment: broker.environment, ...strategyComparison(broker, receipts.state.signals) })),
+        accountEquity: brokers.flatMap(broker => ["KRW", "USD"].map(currency => equityPerformance(evidence, broker.id, broker.environment, currency))),
+        evidenceStatus: Object.values(evidence.brokers || {}).map((row: any) => ({ brokerId: row.brokerId, environment: row.environment,
+          capturedAt: row.capturedAt, discrepancies: row.remainingDiscrepancies, historyErrors: row.historyErrors,
+          transactionError: row.transactionError, equityError: row.equityError })),
+        forwardStudy: fs.existsSync(studyFile) ? JSON.parse(fs.readFileSync(studyFile, "utf8")) : { observations: [], reason: "새 신호 수신 후 비교 시작" },
         commonSignalBlocks: [...latest.values() as Iterable<any>].filter(row => String(row.verdict).startsWith("BLOCKED"))
           .map(({ requestId, at, ticker, timeframe, signalCode, sigmaZ, policyVersion, verdict, reason }) => ({ requestId, at, ticker, timeframe, signalCode, sigmaZ, policyVersion, verdict, reason })) };
       await message.reply({ ...formatStrategyComparisonMessage(brokers, receipts.state.signals), files: [{ name: "strategy-performance.json", attachment: Buffer.from(JSON.stringify(report, null, 2)) }] });
@@ -1864,6 +1910,18 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
       ) }).catch(error => reportError("시작 알림 전송 실패", error));
       if (!readOnly) for (const broker of brokers) void brokerWork(broker, () => reconcileOrders([broker]), "reconcile");
       void requestPortfolioSync();
+      const refreshEvidence = () => {
+        if (readOnly || !receipts.file) return;
+        let saved;
+        try { saved = readEvidence(evidenceFile(receipts.file)); }
+        catch (error) { void reportError("증빙 파일 확인 필요", error); return; }
+        for (const broker of brokers) {
+          const at = Date.parse(saved.brokers[`${broker.id}:${broker.environment}`]?.capturedAt || "");
+          if (!Number.isFinite(at) || Date.now() - at >= 24 * 60 * 60_000) void brokerWork(broker, () => reconcileEvidence(broker), "evidence");
+        }
+      };
+      refreshEvidence();
+      setInterval(refreshEvidence, 60 * 60_000).unref();
       setInterval(() => {
         void requestPortfolioSync();
       }, portfolioSyncMinutes * 60_000).unref();

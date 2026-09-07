@@ -1,6 +1,7 @@
 "use strict";
 
 const fs = require("node:fs");
+const { POLICY_VERSION } = require("./policy-study");
 const { effectiveStopPrice, isDailyTimeframe } = require("./position-sizer");
 
 const TRADING_MODES = new Set(["OFF", "SHADOW", "PAPER_AUTO"]);
@@ -175,7 +176,7 @@ class TradeController {
         at: new Date().toISOString(), requestId: record.requestId, ticker: payload.ticker,
         signalCode: outcome.signal?.signalCode, ...result,
         exchange: payload.exchange, timeframe: payload.timeframe, sigmaZ: payload.sb_z_score,
-        signalPrice: payload.price, policyVersion: "2026-09-07-owned-timeframe-v1",
+        signalPrice: payload.price, policyVersion: POLICY_VERSION,
       })}\n`, { mode: 0o600 });
     }
     return result;

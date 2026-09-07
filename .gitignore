@@ -23,5 +23,10 @@ kis-signal-receipts.json
 .paper-order-test-lock.json
 runtime.log
 .runtime/
+*.evidence.json
+*.evidence.json.tmp
+*.statement.json
+forward-policy-study.json
+forward-policy-study.json.tmp
 docs/tradingview-webhook-v6.2.md
 npm-debug.log*

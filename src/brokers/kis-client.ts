@@ -129,7 +129,7 @@ class KisClient {
     return this.token;
   }
 
-  async request(path: string, { method = "GET", trId, params, body, retryTransient = method === "GET", canSubmit }: any = {}): Promise<any> {
+  async request(path: string, { method = "GET", trId, params, body, retryTransient = method === "GET", canSubmit, trCont = "" }: any = {}): Promise<any> {
     const sharedTrId = ["HHDFS00000300", "FHKST01010100"].includes(trId);
     if (!trId || (!sharedTrId && (this.environment === "mock" ? !trId.startsWith("V") : trId.startsWith("V")))) throw new Error(`한투 ${this.environment === "live" ? "실계좌" : "모의"} TR ID가 올바르지 않습니다.`);
     const queued = this.requestQueue.then(async () => {
@@ -153,6 +153,7 @@ class KisClient {
               appsecret: this.appSecret,
               tr_id: trId,
               custtype: "P",
+              ...(trCont ? { tr_cont: trCont } : {}),
               ...(body ? { "content-type": "application/json" } : {}),
             },
             ...(body ? { body: JSON.stringify(body) } : {}),
@@ -204,6 +205,7 @@ class KisClient {
           const message = `한투 ${this.environment === "live" ? "실계좌" : "모의"} API 실패 [${trId}]: ${result.msg1 || response.status}`;
           throw !retryTransient && transientHttpStatus(response.status) ? uncertainOrderError(`${message}.`) : new Error(message);
         }
+        Object.defineProperty(result, "continuation", { value: ["M", "F"].includes(response.headers.get("tr_cont") || "") });
         return result;
       }
       throw new Error("한투 인증 재시도에 실패했습니다.");
@@ -378,6 +380,53 @@ class KisClient {
       const remainingQuantity = number(item.nccs_qty ?? orderQuantity - filledQuantity);
       return { orderNo: String(item.odno), symbol: item.pdno, orderQuantity, filledQuantity, remainingQuantity, fillPrice: number(item.ft_ccld_unpr3 || item.avg_pric), status: status(orderQuantity, filledQuantity, remainingQuantity) };
     });
+  }
+
+  async getUsHistoryPages(path: string, trId: string, params: Record<string, string>, size = 200) {
+    const rows: any[] = [], seen = new Set<string>();
+    let trCont = "";
+    for (let page = 0; page < 100; page += 1) {
+      const result = await this.request(path, { trId, params: this.accountParams(params), trCont });
+      const items = result.output1 || result.output;
+      if (!Array.isArray(items)) throw new Error("한투 이력 목록 형식 오류");
+      rows.push(...items);
+      if (!result.continuation) return rows;
+      const fk = String(result[`ctx_area_fk${size}`] || "").trim(), nk = String(result[`ctx_area_nk${size}`] || "").trim();
+      if (!nk || seen.has(`${fk}:${nk}`)) throw new Error("한투 이력 연속조회 중단 · 일부 자료를 전체로 사용하지 않습니다.");
+      seen.add(`${fk}:${nk}`);
+      params = { ...params, [`CTX_AREA_FK${size}`]: fk, [`CTX_AREA_NK${size}`]: nk };
+      trCont = "N";
+    }
+    throw new Error("한투 이력 조회 페이지 한도 초과");
+  }
+
+  async getUsHistoricalExecutions({ date, symbol = "" }: any) {
+    if (!/^\d{8}$/.test(date) || (symbol && !/^[A-Z0-9.-]{1,12}$/.test(symbol))) throw new Error("이력 조회 날짜·종목 오류");
+    const rows = await this.getUsHistoryPages("/uapi/overseas-stock/v1/trading/inquire-ccnl", this.trId("VTTS3035R", "TTTS3035R"), {
+      PDNO: this.environment === "mock" ? "" : symbol || "%", ORD_STRT_DT: date, ORD_END_DT: date, SLL_BUY_DVSN: "00", CCLD_NCCS_DVSN: "00",
+      OVRS_EXCG_CD: this.environment === "mock" ? "" : "NASD", SORT_SQN: "DS", ORD_DT: "", ORD_GNO_BRNO: "", ODNO: "", CTX_AREA_FK200: "", CTX_AREA_NK200: "" });
+    return rows.map(item => ({ orderNo: String(item.odno), symbol: item.pdno,
+      side: item.sll_buy_dvsn_cd === "01" ? "SELL" : item.sll_buy_dvsn_cd === "02" ? "BUY" : "",
+      orderQuantity: number(item.ft_ord_qty || item.ord_qty), filledQuantity: number(item.ft_ccld_qty || item.tot_ccld_qty),
+      remainingQuantity: number(item.nccs_qty), fillPrice: number(item.ft_ccld_unpr3 || item.avg_pric), date: String(item.ord_dt || ""),
+      filledAt: null, source: `KIS:inquire-ccnl:${date}` }));
+  }
+
+  async getUsTransactions({ startDate, endDate }: any) {
+    if (this.environment !== "live") throw new Error("한투 모의 거래비용 API 미지원 · 증권사 명세서 증빙으로 확인 필요");
+    if (![startDate, endDate].every(date => /^\d{8}$/.test(date)) || startDate > endDate) throw new Error("거래내역 조회 범위 오류");
+    return this.getUsHistoryPages("/uapi/overseas-stock/v1/trading/inquire-period-trans", "CTOS4001R", {
+      ERLM_STRT_DT: startDate, ERLM_END_DT: endDate, OVRS_EXCG_CD: "NASD", PDNO: "", SLL_BUY_DVSN_CD: "00", LOAN_DVSN_CD: "", CTX_AREA_FK100: "", CTX_AREA_NK100: "" }, 100);
+  }
+
+  async getAccountEquity() {
+    const result = await this.request("/uapi/overseas-stock/v1/trading/inquire-present-balance", { trId: this.trId("VTRP6504R", "CTRP6504R"),
+      params: this.accountParams({ WCRC_FRCR_DVSN_CD: "02", NATN_CD: "000", TR_MKET_CD: "00", INQR_DVSN_CD: "00" }) });
+    const summary = Array.isArray(result.output3) ? result.output3[0] : result.output3;
+    if (!summary || summary.tot_asst_amt === undefined || String(summary.tot_asst_amt).trim() === "") throw new Error("한투 총자산 응답 미확인");
+    if (!Number.isFinite(Number(summary.tot_asst_amt)) || Number(summary.tot_asst_amt) < 0) throw new Error("한투 총자산 숫자 오류");
+    if (summary.tot_loan_amt === undefined || String(summary.tot_loan_amt).trim() === "" || Number(summary.tot_loan_amt) !== 0) throw new Error("대출 포함 자산은 순자산 명세서로 확인해야 합니다.");
+    return { currency: "KRW", equity: Number(summary.tot_asst_amt), source: "KIS:inquire-present-balance:tot_asst_amt", scope: "account-total-assets" };
   }
 
   async cancelUsOrder({ orderNo, exchange, symbol, quantity }: any) {

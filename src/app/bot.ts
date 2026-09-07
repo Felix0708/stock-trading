@@ -20,8 +20,11 @@ const {
 } = require("../discord/webhook-discord");
 const { createWebhookService, loadOrCreateWebhookToken } = require("../signals/webhook-server");
 const { readAccountHealth } = require("../executor/account-health");
+const { recordAlertReceipt, confirmAlert, applyAlertSnapshot, alertEvidenceSummary } = require("../signals/alert-evidence");
 const { SignalReviewBatcher, buildSignalReviewTopic } = require("../ai/signal-review");
 const { TradeController } = require("../trading/trade-controller");
+const { policyFingerprint, recordForwardStudy } = require("../trading/policy-study");
+const SIGNAL_POLICY_HASH = policyFingerprint();
 const { OrderTracker } = require("../trading/order-tracker");
 const { KiwoomClient } = require("../brokers/kiwoom-client");
 const {
@@ -227,7 +230,7 @@ function loadState() {
     institutionPortfolioContext: "", institutionPortfolioUpdatedAt: "", institutionPortfolioMessageId: "", institutionPortfolioMessageIds: [],
     myPortfolioMessageId: "", myPortfolioUpdatedAt: "",
     watchlist: {}, watchlistMessageId: "", watchlistMessageIds: [], watchlistSyncRuns: {},
-    alertRegistry: {}, alertRegistryMessageIds: [], alertRegistrySyncRuns: {}, alertRegistryUpdatedAt: "",
+    alertRegistry: {}, alertEvidence: {}, alertRegistryMessageIds: [], alertRegistrySyncRuns: {}, alertRegistryUpdatedAt: "",
     earningsCalendarMessageIds: [], earningsCalendarUpdatedAt: "",
     dailyJournals: {}, journaledOrders: {}, buyApprovals: {}, scheduledPaperExits: {}, deferredUsEntries: {},
   };
@@ -261,6 +264,7 @@ function loadState() {
       watchlistMessageIds: parsed.watchlistMessageIds || (parsed.watchlistMessageId ? [parsed.watchlistMessageId] : []),
       watchlistSyncRuns: parsed.watchlistSyncRuns || {},
       alertRegistry: parsed.alertRegistry || {},
+      alertEvidence: parsed.alertEvidence || {},
       alertRegistryMessageIds: parsed.alertRegistryMessageIds || [],
       alertRegistrySyncRuns: parsed.alertRegistrySyncRuns || {},
       alertRegistryUpdatedAt: parsed.alertRegistryUpdatedAt || "",
@@ -1095,17 +1099,20 @@ function formatInstrumentGroups(items) {
 
 function formatAlertRegistry(items, updatedAt = new Date()) {
   const clock = zonedClock(updatedAt, ALERTS_SYNC_TIMEZONE);
+  const evidence = alertEvidenceSummary(items, state.alertEvidence, updatedAt);
   return [
-    `🔔 **TradingView 알람 설정 (${items.length})**`,
+    `🔔 **TradingView 알람 설정 대상 (${items.length}종목)**`,
+    `목표 ${items.length * 2}개 · 최근 7일 내 활성 확인 ${evidence.verified}개 · 수신 이력 ${evidence.received}개\n확인 필요 ${items.length * 2 - evidence.verified}개 (무신호가 곧 장애라는 뜻은 아닙니다.)`,
     "**공통 조건**",
     "- 지표: Lazy Alpha Indicator / Custom Webhook (Bot)",
     "- 조건: Any alert() function call",
-    "- 시간봉: 4시간봉·일봉 (종목별 2개)",
+    "- 시간봉: 4시간봉·일봉 (종목별 2개를 목표로 함)",
     "- 전달: 고정 비밀 웹훅 → 국가별 관찰·매매신호 → 주문 게이트",
     formatInstrumentGroups(items),
     TRADINGVIEW_ALERT_WATCHLIST_URL
-      ? "※ TradingView 알람설정 전용 공유 목록을 기준으로 매일 동기화합니다."
+      ? "※ 공유 목록은 설정 대상만 동기화합니다. 실제 알람 활성·만료 여부와는 다릅니다."
       : "※ TradingView 비공개 알람 목록은 자동 조회할 수 없어 마지막으로 확인된 운영 목록입니다.",
+    "개별 확인일·만료일·최종 수신: `!alerts status` · 설정 변경 시 기존 알람을 다시 생성하고 활성 여부를 재확인하세요.",
     `마지막 갱신: ${clock.date} ${clock.time} KST`,
   ].filter(Boolean).join("\n\n");
 }
@@ -1303,6 +1310,11 @@ async function refreshAlertRegistry() {
       };
     }));
     state.alertRegistry = Object.fromEntries(items.map((item) => [`${item.exchange}:${item.ticker}`, item]));
+  }
+  const proofFile = path.join(ROOT, ".runtime", "tradingview-alert-verification.json");
+  if (fs.existsSync(proofFile)) {
+    try { if (applyAlertSnapshot(state.alertEvidence, Object.values(state.alertRegistry), JSON.parse(fs.readFileSync(proofFile, "utf8")))) saveState(); }
+    catch (error) { console.error("알람 확인 자료 재확인 필요:", error.message); }
   }
   return syncAlertRegistryMessage();
 }
@@ -1657,6 +1669,7 @@ async function queueBuyApproval(record) {
 }
 
 async function publishWebhookRecord(record, options: any = {}) {
+  if (recordAlertReceipt(state.alertEvidence, record)) saveState();
   await updateWatchlist(record);
   if (options.replayOnly && !ACCOUNT_NEUTRAL_SIGNAL_SERVER) {
     const formatted = formatWebhookRecord(record);
@@ -1672,6 +1685,8 @@ async function publishWebhookRecord(record, options: any = {}) {
   supersedeDeferredUsEntry(record);
   if (!ACCOUNT_NEUTRAL_SIGNAL_SERVER) record.positionPreview = await buildPositionPreview(record);
   record.risk = tradingController.evaluate(record);
+  try { recordForwardStudy(path.join(ROOT, "forward-policy-study.json"), record, { recovered: Boolean(options.replayOnly), policyHash: SIGNAL_POLICY_HASH }); }
+  catch (error) { console.error("주문 없는 정책 비교 기록 실패:", error.message); }
   if (!ACCOUNT_NEUTRAL_SIGNAL_SERVER) {
     if (record.risk.verdict === "BUY_PENDING_APPROVAL") await queueBuyApproval(record);
     else await submitAndTrackOrder(record);
@@ -2173,7 +2188,10 @@ async function startWebhookReceiver() {
   const token = loadOrCreateWebhookToken(path.join(ROOT, ".webhook-token"));
   webhookService = createWebhookService({
     token,
-    healthCheck: () => [...clients.values()].every(client => client.isReady()) && readAccountHealth(path.join(ROOT, ".runtime")).healthy,
+    healthCheck: () => {
+      const executors = readAccountHealth(path.join(ROOT, ".runtime"));
+      return [...clients.values()].every(client => client.isReady()) && executors.healthy && (!ACCOUNT_NEUTRAL_SIGNAL_SERVER || executors.registered > 0);
+    },
     logFile: path.resolve(ROOT, WEBHOOK_LOG_FILE),
     onProcessed: (record, { recovered }) => publishWebhookRecord(record, { replayOnly: recovered }),
   });
@@ -2530,6 +2548,22 @@ async function handleMessage(persona, client, message, edited = false) {
   botRelayCount.set(message.channel.id, 0);
   const content = message.content.trim();
   if (!content) return;
+  if (content.startsWith("!alerts")) {
+    if (persona.id !== PERSONAS[0].id) return;
+    try {
+      if (content.startsWith("!alerts verify ")) {
+        const key = confirmAlert(state.alertEvidence, content);
+        saveState();
+        await message.reply(`${key} · 사용자가 확인한 활성 상태를 기록했습니다. 7일 후 재확인 대상으로 표시합니다.`);
+        await syncAlertRegistryMessage();
+      } else {
+        const report = alertEvidenceSummary(Object.values(state.alertRegistry), state.alertEvidence);
+        await message.reply({ content: `설정 대상 ${report.rows.length}개 · 활성 확인 ${report.verified}개\n수신 이력은 현재 활성 상태의 보장이 아닙니다.`,
+          files: [{ name: "alert-status.json", attachment: Buffer.from(JSON.stringify(report, null, 2)) }] });
+      }
+    } catch (error) { await message.reply(error.message); }
+    return;
+  }
   if (isAccountExecutorRequest(content)) return;
   if (isStopRequest(content)) {
     if (persona.id === PERSONAS[0].id) {

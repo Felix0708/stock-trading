@@ -51,9 +51,10 @@ function addExecutionCosts(position, order) {
   const costs = order.executionCosts;
   const known = costs && costs.currency === marketCurrency(order) && costs.filledQuantity === order.filledQuantity
     && typeof costs.source === "string" && costs.source.trim()
-    && [costs.fees, costs.taxes].every(value => typeof value === "number" && Number.isFinite(value) && value >= 0);
+    && (costs.total !== undefined ? typeof costs.total === "number" && Number.isFinite(costs.total) && costs.total >= 0
+      : [costs.fees, costs.taxes].every(value => typeof value === "number" && Number.isFinite(value) && value >= 0));
   position.costsKnown &&= Boolean(known);
-  if (known) position.costs += costs.fees + costs.taxes;
+  if (known) position.costs += costs.total ?? costs.fees + costs.taxes;
   if (positiveNumber(order.signalPrice) && positiveNumber(order.fillPrice)) {
     position.signalPriceDifference += (order.fillPrice - order.signalPrice) * order.filledQuantity * (order.side === "BUY" ? 1 : -1);
   } else position.signalPriceKnown = false;
@@ -125,7 +126,7 @@ function calculateTradingPerformance(orders, now = new Date()) {
     // A full-exit intent or FILLED order does not mean the entire position has closed.
     if (position.quantity === 0) {
       if (position.reliable && position.realizedBasis > 0) completed.push({
-        completedAt: order.lastFillAt || order.resultAt || order.createdAt || order.updatedAt,
+        completedAt: order.reconciliationEvidence ? order.evidenceFilledAt : order.lastFillAt || order.resultAt || order.createdAt || order.updatedAt,
         currency: marketCurrency(order),
         costBasis: position.realizedBasis,
         profitLoss: position.profitLoss,

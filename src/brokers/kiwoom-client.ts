@@ -125,10 +125,11 @@ class KiwoomClient {
 
   async post(path: string, {
     apiId, body = {}, authorization = false, retryAuthorization = true,
-    retryRateLimit = true, retryTransient = true, transientAttempt = 0, canSubmit,
+    retryRateLimit = true, retryTransient = true, transientAttempt = 0, canSubmit, continuation,
   }: any = {}): Promise<any> {
     const headers: Record<string, string> = { "content-type": "application/json;charset=UTF-8" };
     if (apiId) headers["api-id"] = apiId;
+    if (continuation) Object.assign(headers, { "cont-yn": "Y", "next-key": continuation });
     if (authorization) headers.authorization = `Bearer ${await this.getAccessToken()}`;
     if (canSubmit && !canSubmit()) throw Object.assign(new Error("자동매매 OFF · 주문 송신 중지"), { autoTradingPaused: true });
 
@@ -143,7 +144,7 @@ class KiwoomClient {
     } catch (error) {
       if (retryTransient && transientAttempt < 1) {
         await new Promise((resolve) => setTimeout(resolve, 500));
-        return this.post(path, { canSubmit, apiId, body, authorization, retryAuthorization, retryRateLimit, retryTransient, transientAttempt: transientAttempt + 1 });
+        return this.post(path, { continuation, canSubmit, apiId, body, authorization, retryAuthorization, retryRateLimit, retryTransient, transientAttempt: transientAttempt + 1 });
       }
       const message = `키움 ${this.#environmentLabel} 통신 실패: ${error instanceof Error ? error.message : String(error)}.`;
       throw retryTransient ? new Error(message) : uncertainOrderError(message);
@@ -159,7 +160,7 @@ class KiwoomClient {
     } catch {
       if (retryTransient && transientAttempt < 1 && transientHttpStatus(response.status)) {
         await new Promise((resolve) => setTimeout(resolve, 500));
-        return this.post(path, { canSubmit, apiId, body, authorization, retryAuthorization, retryRateLimit, retryTransient, transientAttempt: transientAttempt + 1 });
+        return this.post(path, { continuation, canSubmit, apiId, body, authorization, retryAuthorization, retryRateLimit, retryTransient, transientAttempt: transientAttempt + 1 });
       }
       const message = `키움 ${this.#environmentLabel} 응답이 JSON이 아닙니다. (HTTP ${response.status}).`;
       throw retryTransient ? new Error(message) : uncertainOrderError(message);
@@ -170,20 +171,21 @@ class KiwoomClient {
       this.#token = null;
       this.#expiresDt = null;
       await this.#refreshAccessToken(rejectedToken);
-      return this.post(path, { canSubmit, apiId, body, authorization, retryAuthorization: false, retryRateLimit, retryTransient, transientAttempt });
+      return this.post(path, { continuation, canSubmit, apiId, body, authorization, retryAuthorization: false, retryRateLimit, retryTransient, transientAttempt });
     }
     if (authorization && retryRateLimit && errorCode === 1700) {
       await new Promise((resolve) => setTimeout(resolve, 1100));
-      return this.post(path, { canSubmit, apiId, body, authorization, retryAuthorization, retryRateLimit: false, retryTransient, transientAttempt });
+      return this.post(path, { continuation, canSubmit, apiId, body, authorization, retryAuthorization, retryRateLimit: false, retryTransient, transientAttempt });
     }
     if (retryTransient && transientAttempt < 1 && transientHttpStatus(response.status)) {
       await new Promise((resolve) => setTimeout(resolve, response.status === 429 ? 1100 : 500));
-      return this.post(path, { canSubmit, apiId, body, authorization, retryAuthorization, retryRateLimit, retryTransient, transientAttempt: transientAttempt + 1 });
+      return this.post(path, { continuation, canSubmit, apiId, body, authorization, retryAuthorization, retryRateLimit, retryTransient, transientAttempt: transientAttempt + 1 });
     }
     if (!response.ok || data.return_code !== 0) {
       const message = `키움 ${this.#environmentLabel} 요청 실패: ${data.return_msg || `HTTP ${response.status}`}`;
       throw !retryTransient && transientHttpStatus(response.status) ? uncertainOrderError(`${message}.`) : new Error(message);
     }
+    Object.defineProperty(data, "pagination", { value: { more: response.headers.get("cont-yn") === "Y", next: response.headers.get("next-key") || "" } });
     return data;
   }
 
@@ -541,6 +543,44 @@ class KiwoomClient {
         fillPrice: toNumber(item.cntr_uv, "미국주식 체결단가"),
       };
     });
+  }
+
+  async getUsAccountHistory(apiId: string, body: Record<string, string>) {
+    if (!["ust21150", "ust21100", "ust21132"].includes(apiId)) throw new Error("허용되지 않은 이력 조회입니다.");
+    const rows: any[] = [], seen = new Set<string>();
+    let continuation = "";
+    for (let page = 0; page < 100; page += 1) {
+      const data = await this.post("/api/us/acnt", { apiId, body, authorization: true, continuation });
+      if (!Array.isArray(data.result_list)) throw new Error("키움 이력 목록 형식 오류");
+      rows.push(...data.result_list);
+      if (!data.pagination.more) return rows;
+      continuation = data.pagination.next;
+      if (!continuation || seen.has(continuation)) throw new Error("키움 이력 연속조회 중단 · 일부 자료를 전체로 사용하지 않습니다.");
+      seen.add(continuation);
+    }
+    throw new Error("키움 이력 조회 페이지 한도 초과");
+  }
+
+  async getUsHistoricalExecutions({ date, symbol = "", exchange = "ND" }: any) {
+    if (!/^\d{8}$/.test(date) || !["ND", "NY", "NA"].includes(exchange) || (symbol && !/^[A-Z0-9.-]{1,12}$/.test(symbol))) throw new Error("이력 조회 날짜·종목 오류");
+    const rows = await this.getUsAccountHistory("ust21150", { ord_dt: date, query_tp: "1", slby_tp: "0", stex_tp: exchange, stk_cd: symbol, oppo_trde_tp: "%", fr_ord_no: "" });
+    return rows.map(item => ({ orderNo: String(item.ord_no), symbol: item.stk_cd,
+      side: item.slby_tp_nm === "매도" ? "SELL" : item.slby_tp_nm === "매수" ? "BUY" : "",
+      orderQuantity: toNumber(item.ord_qty, "과거 주문수량"), filledQuantity: toNumber(item.cntr_qty, "과거 체결수량"),
+      remainingQuantity: toNumber(item.ord_remnq, "과거 잔량"), fillPrice: toNumber(item.cntr_uv, "과거 체결가"),
+      date, filledAt: /^\d\d:\d\d:\d\d$/.test(item.cntr_time || "") ? `${date.slice(0,4)}-${date.slice(4,6)}-${date.slice(6)}T${item.cntr_time}+09:00` : null,
+      rawStatus: item.ord_stat_nm, source: `KIWOOM:ust21150:${date}` }));
+  }
+
+  async getUsTransactions({ startDate, endDate, symbol = "", exchange = "ND" }: any) {
+    if (![startDate, endDate].every(date => /^\d{8}$/.test(date)) || startDate > endDate || (symbol && !/^[A-Z0-9.-]{1,12}$/.test(symbol))) throw new Error("거래내역 조회 범위 오류");
+    if (!["ND", "NY", "NA"].includes(exchange)) throw new Error("이력 거래소 오류");
+    return this.getUsAccountHistory("ust21100", { strt_dt: startDate, end_dt: endDate, tp: "0", stex_tp: exchange, stk_cd: symbol, krw_repl_skip_yn: "N" });
+  }
+
+  async getUsEquityHistory({ date }: any) {
+    if (!/^\d{8}$/.test(date)) throw new Error("평가액 기준일 오류");
+    return this.getUsAccountHistory("ust21132", { base_dt: date });
   }
 }
 

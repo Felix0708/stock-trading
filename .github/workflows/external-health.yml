@@ -1,0 +1,31 @@
+name: External service health
+on:
+  schedule:
+    - cron: '2-59/5 * * * *'
+  workflow_dispatch:
+    inputs:
+      notify_test:
+        description: Send a clearly labelled notification test (no incident)
+        type: boolean
+        default: false
+permissions:
+  contents: read
+  issues: write
+concurrency:
+  group: external-service-health
+  cancel-in-progress: false
+jobs:
+  health:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Check deployed service and report incident changes
+        run: node scripts/monitor-health.cjs
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          MONITOR_HEALTH_URL: ${{ secrets.MONITOR_HEALTH_URL }}
+          MONITOR_DISCORD_WEBHOOK: ${{ secrets.MONITOR_DISCORD_WEBHOOK }}
+          MONITOR_NOTIFY_TEST: ${{ inputs.notify_test || 'false' }}

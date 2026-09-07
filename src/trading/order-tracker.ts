@@ -52,8 +52,9 @@ class OrderTracker {
       ...(state.orders[storageKey] || {}),
       ...order,
       orderNo, storageKey,
-      lastFillAt: Number(order.filledQuantity || 0) > Number(state.orders[storageKey]?.filledQuantity || 0)
-        ? new Date().toISOString() : state.orders[storageKey]?.lastFillAt || order.lastFillAt,
+      lastFillAt: order.reconciliationEvidence ? order.evidenceFilledAt || null
+        : Number(order.filledQuantity || 0) > Number(state.orders[storageKey]?.filledQuantity || 0)
+          ? new Date().toISOString() : state.orders[storageKey]?.lastFillAt || order.lastFillAt,
       createdAt: state.orders[storageKey]?.createdAt || order.createdAt || state.orders[storageKey]?.resultAt || state.orders[storageKey]?.updatedAt || new Date().toISOString(),
       revision: state.revision,
       updatedAt: new Date().toISOString(),

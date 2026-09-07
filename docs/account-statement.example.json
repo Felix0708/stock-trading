@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "brokerId": "KIWOOM",
+  "environment": "mock",
+  "source": "증권사 명세서 파일명/발급일 등 실제 출처로 변경",
+  "executions": [],
+  "_executionExample": {
+    "orderNo": "증권사 실제 주문번호",
+    "symbol": "실제 티커",
+    "date": "YYYYMMDD (한국시간 주문일)",
+    "side": "SELL",
+    "orderQuantity": 0,
+    "filledQuantity": 0,
+    "remainingQuantity": 0,
+    "fillPrice": 0,
+    "filledAt": null,
+    "executionCosts": { "fees": 0, "taxes": 0, "currency": "USD" }
+  },
+  "_note": "예시 0은 실제 값이 아닙니다. executionCosts는 비용 전체가 명세서에서 확인된 경우에만 포함하세요. 확인한 행을 executions 배열에 넣으세요.",
+  "_cashFlowCoverageExample": {
+    "start": "2026-09-01T00:00:00+09:00",
+    "end": "2026-09-02T00:00:00+09:00",
+    "currency": "USD",
+    "scope": "overseas"
+  },
+  "_cashFlowsExample": [{ "id": "명세서의 고유 입출금 ID", "at": "2026-09-01T12:00:00+09:00", "amount": 0 }],
+  "_cashFlowNote": "기간 전체를 확인했을 때만 _cashFlowCoverageExample과 _cashFlowsExample을 cashFlowCoverage와 cashFlows로 바꾸세요. 한투 계좌 전체 총자산은 KRW/account-total-assets 범위입니다."
+}

@@ -308,6 +308,7 @@ async function submitPaperOrder(record: SignalRecord, options: ExecutorOptions) 
     source: record.source || "TRADINGVIEW", market: exchange, name: payload.name,
     timeframe: payload.timeframe,
     policyVersion: record.policyVersion || "legacy",
+    policyHash: record.policyHash || null,
     sizingContext: { sigmaZ: payload.sb_z_score, heatMultiplier: positionPreview?.heatMultiplier,
       riskBudget: positionPreview?.riskBudget, entryTimeframe: positionPreview?.entryTimeframe },
     koreanName: payload.koreanName, englishName: payload.englishName,
