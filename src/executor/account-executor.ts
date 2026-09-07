@@ -1079,9 +1079,20 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
   async function targetChannel(configured) {
     const guild = await client.guilds.fetch(targetGuildId);
     const available = await guild.channels.fetch();
-    const channel = available.get(configured) || available.find((item) => item?.name === configured);
+    const matches = available.has(configured) ? [available.get(configured)]
+      : [...available.values()].filter((item: any) => item?.name === configured);
+    const channel = matches.length === 1 ? matches[0] : null;
     if (!channel?.isTextBased()) throw new Error(`Discord 기록 채널을 찾을 수 없습니다: ${configured || "미설정"}`);
     return channel;
+  }
+
+  async function acceptsOwnerMessage(message, allowedChannels) {
+    if (message.author?.bot || message.author?.id !== ownerId || !targetGuildId || message.guildId !== targetGuildId) return false;
+    for (const configured of allowedChannels.filter(Boolean)) {
+      if (message.channelId === configured) return true;
+      if (message.channel?.name === configured && message.channelId === (await targetChannel(configured)).id) return true;
+    }
+    return false;
   }
 
   async function send(channelName, message) {
@@ -1685,9 +1696,7 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
   }
 
   async function processApproval(message) {
-    if (message.author.bot || message.author.id !== ownerId) return false;
-    const approvalChannel = channels.order;
-    if (message.channelId !== approvalChannel && message.channel?.name !== approvalChannel) return false;
+    if (!await acceptsOwnerMessage(message, [channels.order])) return false;
     const command = parseBuyApprovalCommand(message.content);
     if (!command.matched) return false;
     if (readOnly) {
@@ -1841,8 +1850,7 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
   }
 
   async function processOwnerCommand(message) {
-    if (message.author.bot || message.author.id !== ownerId) return false;
-    if (![channels.system, channels.order].includes(message.channelId) && ![channels.system, channels.order].includes(message.channel?.name)) return false;
+    if (!await acceptsOwnerMessage(message, [channels.system, channels.order])) return false;
     const command = accountCommand(message.content, executorName);
     if (!command) return false;
     if (command === "HELP") {
@@ -1920,11 +1928,6 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
     publishHealth();
     setInterval(publishHealth, 15_000).unref();
     client.on("messageCreate", (message) => {
-      if (!message.author.bot && message.author.id === ownerId && accountCommand(message.content, executorName) === "AUTO_OFF"
-        && ([channels.system, channels.order].includes(message.channelId) || [channels.system, channels.order].includes(message.channel?.name))) {
-        void processOwnerCommand(message).catch((error) => reportError("자동매매 OFF 응답 실패", error));
-        return;
-      }
       void (async () => {
         if (await processOwnerCommand(message)) return;
         if (await processApproval(message)) return;

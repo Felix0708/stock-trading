@@ -43,6 +43,11 @@ async function assertNamedExecutorIsSkipped() {
 }
 
 (async () => {
+  const selected = spawnSync("sh", ["-c", ". ./scripts/use-project-node.sh; node --version"], {
+    cwd: path.resolve(__dirname, ".."), encoding: "utf8", env: process.env,
+  });
+  assert.equal(selected.status, 0, selected.stderr);
+  assert.equal(selected.stdout.trim(), fs.readFileSync(path.resolve(__dirname, "../.nvmrc"), "utf8").trim());
   await assertSecondStartIsSkipped("start-signal.sh", "stock-trading-signal.lock");
   await assertSecondStartIsSkipped("start-executor.sh", "stock-trading-executor-empty.env.lock");
   await assertNamedExecutorIsSkipped();

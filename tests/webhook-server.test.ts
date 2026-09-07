@@ -3,6 +3,7 @@
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
+const net = require("node:net");
 const { createWebhookService } = require("../src/signals/webhook-server");
 
 const specification = fs.readFileSync(path.join(__dirname, "..", "docs", "tradingview-webhook-v6.2.md"), "utf8");
@@ -18,6 +19,19 @@ async function run() {
   try {
     const address = await service.listen(0);
     const origin = `http://127.0.0.1:${address.port}`;
+
+    const malformed = await new Promise<string>((resolve, reject) => {
+      let data = "";
+      const socket = net.connect(address.port, "127.0.0.1", () => {
+        socket.end("GET //[ HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+      });
+      socket.setTimeout(2000, () => socket.destroy(new Error("Malformed URL test timeout")));
+      socket.on("data", chunk => { data += chunk; });
+      socket.on("end", () => resolve(data));
+      socket.on("error", reject);
+    });
+    assert.match(malformed, /^HTTP\/1\.1 400 /);
+    assert.equal(processed.length, 0);
 
     const health = await fetch(`${origin}/health`);
     assert.equal(health.status, 200);

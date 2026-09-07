@@ -24,7 +24,7 @@ function fixture(ids = ["KIS"], environment = "mock") {
   const sent = [];
   const messages = new Map();
   let discordFails = false;
-  const channel = { isTextBased: () => true, messages: { fetch: async id => {
+  const channel = { id: "order", isTextBased: () => true, messages: { fetch: async id => {
     if (discordFails) throw new Error("Discord offline");
     if (typeof id !== "string") return messages;
     if (!messages.has(id)) throw Object.assign(new Error("Unknown Message"), { code: 10008 });
@@ -51,12 +51,14 @@ function fixture(ids = ["KIS"], environment = "mock") {
     };
     return { id, label: id, environment, protectionEnabled: false, tracker, domesticClient: api, overseasClient: api, state };
   });
-  const guild = { channels: { fetch: async () => new Map([["order", channel], ["execution", channel], ["system", channel], ["journal", channel]]) } };
+  const guild = { channels: { fetch: async () => new Map(["order", "execution", "system", "journal"]
+    .map(id => [id, id === "order" ? channel : { ...channel, id, name: id }])) } };
+  const channels = { order: "order", execution: "execution", system: "system", journal: "journal" };
   const runtime = createAccountRuntime({ brokers, receipts, client: { guilds: { fetch: async () => guild } },
-    ownerId: "owner", channels: { order: "order", execution: "execution", system: "system", journal: "journal" },
+    ownerId: "owner", targetGuildId: "guild", channels,
     trusted: { sourceChannelIds: new Set(["signal"]), sourceBotIds: new Set(["source"]) },
     trackingOptions: { attempts: 0 }, enrichNames: async items => items });
-  return { runtime, receipts, brokers, sent, messages, failDiscord: value => { discordFails = value; } };
+  return { runtime, receipts, brokers, sent, messages, channels, channel, guild, failDiscord: value => { discordFails = value; } };
 }
 
 function message(r) { return { id: r.requestId, channelId: "signal", author: { id: "source", bot: true }, embeds: [{ footer: { text: encodeSignalEnvelope(r) } }] }; }
@@ -85,11 +87,34 @@ function message(r) { return { id: r.requestId, channelId: "signal", author: { i
   await mixed.runtime.retryInbox();
   assert.deepEqual(mixed.receipts.findPending().brokerIds.sort(), ["KIS", "KIWOOM"].sort());
   assert.equal(mixed.receipts.state.inbox.approval, undefined);
-  await mixed.runtime.processApproval({ author: { id: "owner", bot: false }, channelId: "order", content: "둘다", reply: async () => {} });
+  const ownerMessage = { author: { id: "owner", bot: false }, guildId: "guild", channelId: "order", content: "둘다", reply: async () => {} };
+  for (const invalid of [{ guildId: "other" }, { guildId: undefined }, { author: { id: "other", bot: false } }, { author: { id: "owner", bot: true } }, { channelId: "other", channel: { name: "order" } }]) {
+    assert.equal(await mixed.runtime.processApproval({ ...ownerMessage, ...invalid }), false);
+    assert.equal(await mixed.runtime.processOwnerCommand({ ...ownerMessage, ...invalid, content: "!account auto off" }), false);
+    assert.equal(mixed.receipts.autoTrading(), true);
+    assert.equal(mixed.brokers.reduce((sum, broker) => sum + broker.state.requests.length, 0), 0);
+  }
+  await mixed.runtime.processOwnerCommand({ ...ownerMessage, content: "!account auto off" });
+  assert.equal(mixed.receipts.autoTrading(), false);
+  await mixed.runtime.processOwnerCommand({ ...ownerMessage, content: "!account auto on" });
+  assert.equal(mixed.receipts.autoTrading(), true);
+  await mixed.runtime.processApproval(ownerMessage);
   assert.deepEqual(mixed.brokers.map(b => b.state.requests.length), [1, 1]);
   assert.equal(mixed.sent.filter(item => item.embeds?.[0]?.title === "신호별 주문 진행").length, 1);
   const lifecycle = mixed.messages.get(mixed.receipts.state.signals.approval.messageId);
   assert(lifecycle.embeds[0].fields.every(field => /주문 접수/.test(field.value)));
+
+  const named = fixture();
+  named.channels.order = "named-orders";
+  Object.assign(named.channel, { name: "named-orders" });
+  const namedCommand = { ...ownerMessage, channel: { name: "named-orders" }, content: "!account auto off" };
+  assert.equal(await named.runtime.processOwnerCommand(namedCommand), true);
+  assert.equal(named.receipts.autoTrading(), false);
+  const available = await named.guild.channels.fetch();
+  available.set("duplicate", { ...named.channel, id: "duplicate" });
+  named.guild.channels.fetch = async () => available;
+  await assert.rejects(named.runtime.processOwnerCommand({ ...namedCommand, content: "!account auto on" }), /기록 채널을 찾을 수 없습니다/);
+  assert.equal(named.receipts.autoTrading(), false);
 
   const isolated = fixture(["KIWOOM", "KIS"]);
   let releaseBalance;
@@ -100,7 +125,7 @@ function message(r) { return { id: r.requestId, channelId: "signal", author: { i
   assert.equal(isolated.brokers[0].state.requests.length, 1);
   assert.equal(isolated.brokers[1].state.requests.length, 0);
   let replied = false;
-  await isolated.runtime.processOwnerCommand({ author: { id: "owner", bot: false }, channelId: "order", content: "!account status", reply: async () => { replied = true; } });
+  await isolated.runtime.processOwnerCommand({ author: { id: "owner", bot: false }, guildId: "guild", channelId: "order", content: "!account status", reply: async () => { replied = true; } });
   assert(replied);
   const secondSignal = record("next-kiwoom"); secondSignal.payload.ticker = "SECOND";
   const secondJob = isolated.runtime.processMessage(message(secondSignal));

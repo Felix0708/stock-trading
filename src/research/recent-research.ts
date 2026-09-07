@@ -78,12 +78,19 @@ function hasResearchBody(text) {
   return Boolean(String(text || "").replace(/^\s*--- page \d+ ---\s*$/gim, "").trim());
 }
 
-function markdownImagePaths(file) {
+function markdownImagePaths(file, allowedDirectory = path.dirname(file)) {
   if (path.extname(file).toLowerCase() !== ".md") return [];
   const directory = path.dirname(file);
+  const root = fs.realpathSync(allowedDirectory);
   return [...fs.readFileSync(file, "utf8").matchAll(/!\[[^\]]*\]\(<([^>]+)>\)/g)]
-    .map((match) => path.resolve(directory, match[1]))
-    .filter((image) => IMAGE_EXTENSIONS.has(path.extname(image).toLowerCase()) && fs.existsSync(image));
+    .flatMap((match) => {
+      try {
+        const image = fs.realpathSync(path.resolve(directory, match[1]));
+        const relative = path.relative(root, image);
+        if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) return [];
+        return IMAGE_EXTENSIONS.has(path.extname(image).toLowerCase()) && fs.statSync(image).isFile() ? [image] : [];
+      } catch { return []; } // Missing/inaccessible links are not attachments.
+    });
 }
 
 function loadRecentResearch({
@@ -110,7 +117,7 @@ function loadRecentResearch({
       text = `[본문 인식 실패: ${error.message}]`;
     }
     const name = path.basename(item.file).normalize("NFC");
-    item.images = markdownImagePaths(item.file);
+    item.images = markdownImagePaths(item.file, directory);
     const added = new Date(item.addedAt).toLocaleString("ko-KR", { timeZone: "Asia/Seoul" });
     return `[자료 ${index + 1}] ${name}\n추가·수정: ${added}\n본문 발췌:\n${text.slice(0, charsPerFile)}`;
   });

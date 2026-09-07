@@ -1,5 +1,6 @@
 #!/bin/sh
 set -eu
+umask 077
 
 cd "$(dirname "$0")"
 env_file=${1:-${ACCOUNT_EXECUTOR_ENV_FILE:-.env.account}}
@@ -13,8 +14,11 @@ fi
 lock_file=${TMPDIR:-/tmp}/$lock_name
 /usr/bin/shlock -f "$lock_file" -p "$$" || { printf '계좌 주문 실행기가 이미 실행 중입니다.\n'; exit 0; }
 
+. ./scripts/use-project-node.sh
+chmod 600 "$env_file"
 signal_env=${SIGNAL_ENV_FILE:-.env.signal}
 if [ -f "$signal_env" ] && [ "$signal_env" != "$env_file" ]; then
+  chmod 600 "$signal_env"
   exec node --import tsx --env-file="$signal_env" --env-file="$env_file" src/executor/account-executor.ts
 fi
 

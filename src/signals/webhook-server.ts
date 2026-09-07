@@ -230,7 +230,13 @@ function createWebhookService(options: any = {}) {
   }
 
   const server = http.createServer((request, response) => {
-    const url = new URL(request.url, "http://localhost");
+    let url;
+    try { url = new URL(request.url, "http://localhost"); }
+    catch {
+      sendJson(response, 400, { ok: false, error: "invalid_url" });
+      request.resume();
+      return;
+    }
     if (request.method === "GET" && url.pathname === "/health") {
       let healthy = true;
       try { healthy = !storageFailed && failures.size === 0 && (options.healthCheck ? options.healthCheck() === true : true); } catch { healthy = false; }
