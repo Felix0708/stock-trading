@@ -22,8 +22,19 @@ function record(id, action = "BUY") {
 function fixture(ids = ["KIS"], environment = "mock") {
   const receipts = new SignalReceiptStore(null, true);
   const sent = [];
+  const messages = new Map();
   let discordFails = false;
-  const channel = { isTextBased: () => true, send: async (message) => { if (discordFails) throw new Error("Discord offline"); sent.push(message); return { id: String(sent.length) }; } };
+  const channel = { isTextBased: () => true, messages: { fetch: async id => {
+    if (discordFails) throw new Error("Discord offline");
+    if (typeof id !== "string") return messages;
+    if (!messages.has(id)) throw Object.assign(new Error("Unknown Message"), { code: 10008 });
+    return messages.get(id);
+  } }, send: async (message) => {
+    if (discordFails) throw new Error("Discord offline");
+    sent.push(message); const id = String(sent.length);
+    const saved = { id, embeds: message.embeds, edit: async payload => { if (discordFails) throw new Error("Discord offline"); saved.embeds = payload.embeds; return saved; } };
+    messages.set(id, saved); return saved;
+  } };
   const brokers = ids.map((id) => {
     const state = { orders: [], requests: [], executions: [], holdings: [], price: 120, failBalance: false, unknown: false, cancels: 0 };
     const tracker = { list: () => state.orders, pending: () => state.orders.filter(o => ["ACCEPTED", "PARTIALLY_FILLED", "CANCEL_REQUESTED"].includes(o.status)),
@@ -45,7 +56,7 @@ function fixture(ids = ["KIS"], environment = "mock") {
     ownerId: "owner", channels: { order: "order", execution: "execution", system: "system", journal: "journal" },
     trusted: { sourceChannelIds: new Set(["signal"]), sourceBotIds: new Set(["source"]) },
     trackingOptions: { attempts: 0 }, enrichNames: async items => items });
-  return { runtime, receipts, brokers, sent, failDiscord: value => { discordFails = value; } };
+  return { runtime, receipts, brokers, sent, messages, failDiscord: value => { discordFails = value; } };
 }
 
 function message(r) { return { id: r.requestId, channelId: "signal", author: { id: "source", bot: true }, embeds: [{ footer: { text: encodeSignalEnvelope(r) } }] }; }
@@ -76,6 +87,58 @@ function message(r) { return { id: r.requestId, channelId: "signal", author: { i
   assert.equal(mixed.receipts.state.inbox.approval, undefined);
   await mixed.runtime.processApproval({ author: { id: "owner", bot: false }, channelId: "order", content: "둘다", reply: async () => {} });
   assert.deepEqual(mixed.brokers.map(b => b.state.requests.length), [1, 1]);
+  assert.equal(mixed.sent.filter(item => item.embeds?.[0]?.title === "신호별 주문 진행").length, 1);
+  const lifecycle = mixed.messages.get(mixed.receipts.state.signals.approval.messageId);
+  assert(lifecycle.embeds[0].fields.every(field => /주문 접수/.test(field.value)));
+
+  const isolated = fixture(["KIWOOM", "KIS"]);
+  let releaseBalance;
+  const balanceGate = new Promise(resolve => { releaseBalance = resolve; });
+  isolated.brokers[1].domesticClient.getDomesticBalance = async () => { await balanceGate; return { estimatedAssets: 100000, holdings: [] }; };
+  const firstJob = isolated.runtime.processMessage(message(record("slow-kis")));
+  for (let i = 0; i < 20 && isolated.brokers[0].state.requests.length === 0; i++) await new Promise(resolve => setImmediate(resolve));
+  assert.equal(isolated.brokers[0].state.requests.length, 1);
+  assert.equal(isolated.brokers[1].state.requests.length, 0);
+  let replied = false;
+  await isolated.runtime.processOwnerCommand({ author: { id: "owner", bot: false }, channelId: "order", content: "!account status", reply: async () => { replied = true; } });
+  assert(replied);
+  const secondSignal = record("next-kiwoom"); secondSignal.payload.ticker = "SECOND";
+  const secondJob = isolated.runtime.processMessage(message(secondSignal));
+  for (let i = 0; i < 20 && isolated.brokers[0].state.requests.length < 2; i++) await new Promise(resolve => setImmediate(resolve));
+  assert.equal(isolated.brokers[0].state.requests.length, 2); // not held behind the first signal's KIS response
+  releaseBalance(); await Promise.all([firstJob, secondJob]);
+  assert.equal(isolated.brokers[1].state.requests.length, 2);
+
+  const crossing = fixture(["KIWOOM", "KIS"]);
+  let releasePreview;
+  const previewGate = new Promise(resolve => { releasePreview = resolve; });
+  crossing.brokers[1].domesticClient.getDomesticBalance = async () => { await previewGate; return { estimatedAssets: 100000, holdings: [] }; };
+  const older = record("older-approval"); older.risk.verdict = "BUY_PENDING_APPROVAL";
+  const oldJob = crossing.runtime.processMessage(message(older));
+  for (let i = 0; i < 20 && !crossing.receipts.findPending(); i++) await new Promise(resolve => setImmediate(resolve));
+  clock++;
+  const newer = record("newer-approval"); newer.risk.verdict = "BUY_PENDING_APPROVAL";
+  const newJob = crossing.runtime.processMessage(message(newer));
+  releasePreview(); await Promise.all([oldJob, newJob]);
+  assert.equal(Object.keys(crossing.receipts.state.pending).length, 2); // completion order cannot replace another signal's approval
+  assert.equal(crossing.receipts.findPending(), null); // reply to the exact card when ambiguous
+
+  const interruptedBuy = fixture();
+  let releaseQuote;
+  const quoteGate = new Promise(resolve => { releaseQuote = resolve; });
+  interruptedBuy.brokers[0].overseasClient.getUsQuote = async () => { await quoteGate; return { currentPrice: 100 }; };
+  const buying = interruptedBuy.runtime.processMessage(message(record("waiting-buy")));
+  await new Promise(resolve => setImmediate(resolve));
+  clock++;
+  const exiting = interruptedBuy.runtime.processMessage(message(record("incoming-exit", "SELL")));
+  releaseQuote(); await Promise.all([buying, exiting]);
+  assert.equal(interruptedBuy.brokers[0].state.requests.length, 0); // new exit seen while a broker request was in flight
+
+  const restoredAck = fixture();
+  restoredAck.receipts.attempt("KIS", record("acknowledged"), "SUBMITTING");
+  restoredAck.brokers[0].tracker.record({ requestId: "acknowledged", orderNo: "known-ack", status: "FILLED", market: "NASDAQ", symbol: "TEST", filledQuantity: 1, fillPrice: 100 });
+  await restoredAck.runtime.reconcileOrders();
+  assert.equal(restoredAck.receipts.attempt("KIS", record("acknowledged")).status, "ACCEPTED");
 
   const disconnected = fixture();
   disconnected.failDiscord(true);
@@ -84,6 +147,7 @@ function message(r) { return { id: r.requestId, channelId: "signal", author: { i
   await disconnected.runtime.processMessage(message(record("discord")));
   assert.equal(disconnected.brokers[0].state.requests.length, 1);
   await disconnected.runtime.reconcileOrders();
+  await disconnected.runtime.refreshLifecycleCards();
   assert(disconnected.brokers[0].state.orders[0].statusMessageId);
 
   const unknown = fixture(); unknown.brokers[0].state.unknown = true;

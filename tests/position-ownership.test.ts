@@ -51,4 +51,10 @@ assert.equal(restoreOrderSignalMetadata([{ ...entry, timeframe: undefined, statu
 assert.deepEqual(restoreOrderSignalMetadata([{ ...entry, requestId: "wrong", timeframe: undefined }], [original]), []);
 assert.deepEqual(restoreOrderSignalMetadata([{ ...entry, symbol: "OTHER", timeframe: undefined }], [original]), []);
 assert.deepEqual(restoreOrderSignalMetadata([{ ...entry, timeframe: undefined }], [{ ...original, validation: { ok: false } }]), []);
+const exactMetadata = { ...original, payload: { ...original.payload, sb_z_score: 2.4 }, outcome: { ...original.outcome, signal: { signalCode: "ENTRY_STANDARD" } } };
+const metadataRestored = restoreOrderSignalMetadata([entry], [exactMetadata])[0];
+assert.equal(metadataRestored.signalCode, "ENTRY_STANDARD");
+assert.equal(metadataRestored.sizingContext.sigmaZ, 2.4);
+assert.equal(metadataRestored.policyVersion, undefined); // old policy is never fabricated
+assert.deepEqual(restoreOrderSignalMetadata([metadataRestored], [exactMetadata]), []);
 console.log("position-ownership test OK: manual holdings, timeframe, partial fills, cost basis, legacy evidence");

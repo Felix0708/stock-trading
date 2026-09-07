@@ -107,8 +107,8 @@ TP1·TP2는 증권사 계좌별 현재 포지션에서 각 한 번만 주문합�
 - 기존 기록의 누락된 시간봉은 원본 웹훅의 요청 ID·종목·방향이 정확히 일치할 때만 보완합니다. 과거 신호를 재주문하지 않습니다. 증거가 없거나 시간봉이 섞였으면 일반 청산·추가매수를 차단하고 원본 대조를 요구합니다.
 - 실제 보유량이 자동매매 기록보다 적으면 해당 종목의 신규 진입도 차단하며 주문 가능 시간의 감시에서 대조 필요를 알립니다. 수동 매도·주식분할·이체 등은 잔고와 체결 기록의 별도 대조가 필요합니다. 이 구분은 주문 기록 기준의 수량 제한이며 증권사에서 개별 주식의 소유 출처를 식별하는 기능은 아닙니다.
 - 저장된 유효 손절 기준은 주문 가능 시간에 30초 주기로 현재가와 비교하여 이탈 시 알립니다. 이 감시는 **알림 전용**이고 증권사 보호 주문이나 추가 자동매도가 아닙니다. PC·통신이 꺼진 동안에는 작동하지 않으며, 기준가 체결을 보장하지 않습니다.
-- 새 주문에는 정책 버전 `2026-09-07-owned-timeframe-v1`, Sigma 값·위험예산·수량 축소 배율을 남깁니다. 이번 변경에서 Sigma 수치를 더 완화하지 않았습니다. 수수료·슬리피지를 포함한 정책별 성과 비교와 실계좌 종단간 검증은 별도로 남아 있습니다.
+- 새 주문에는 정책 버전 `2026-09-07-owned-timeframe-v1`, Sigma 값·위험예산·수량 축소 배율·신호 코드를 남깁니다. Sigma 수치를 더 완화하지 않았습니다. 실제 체결 기준 정책별 성과 비교와 비용 미확인 구분은 [실행 신뢰성 문서](./execution-reliability.md)에 정리했습니다. 실제 거래비용 증빙 자동 수집과 실계좌 주문 종단간 검증은 별도로 남아 있습니다.
 
-검증은 `npm run self-test`의 기존 회귀 검사와 `account-runtime.test.ts`, `broker-safety.test.ts`, `position-ownership.test.ts`, `account-health.test.ts`의 가짜 증권사/Discord 응답 및 로컬 상태 파일로 수행합니다. 실제 계좌 주문·취소의 종단간 검증과 전략 성과 비교는 별도입니다.
+검증은 `npm run self-test`의 기존 회귀 검사와 `account-runtime.test.ts`, `broker-safety.test.ts`, `position-ownership.test.ts`, `account-health.test.ts`의 가짜 증권사/Discord 응답 및 로컬 상태 파일로 수행합니다. `주문승인`의 신호별 카드는 같은 메시지를 갱신하며, `!account performance`로 전략 비교 전체 자료를 조회합니다. 실제 계좌 주문·취소의 종단간 검증과 충분한 실전 수익성 표본은 별도입니다.
 
 취소 API 근거: [한투 해외 취소](https://github.com/koreainvestment/open-trading-api/blob/main/examples_llm/overseas_stock/order_rvsecncl/order_rvsecncl.py), [한투 국내 취소가능조회](https://github.com/koreainvestment/open-trading-api/blob/main/examples_llm/domestic_stock/inquire_psbl_rvsecncl/inquire_psbl_rvsecncl.py), [키움 국내 취소](https://openapi.kiwoom.com/m/guide/apiguide/13/kt10003).

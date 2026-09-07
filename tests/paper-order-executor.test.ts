@@ -11,6 +11,7 @@ const {
   shouldDeferEntry, shouldDeferOrder, shouldDeferUsEntry, shouldDelayEntry, shouldDelayOrder, shouldDelayUsEntry, usSession,
   partialExitQuantity, partialExitRatio, partialExitStage,
   previewTradableQuantity,
+  nextOrderCheck,
   refreshPaperOrder, submitPaperOrder, trackPaperOrder, submitPaperTestOrder, trackPaperTestOrder,
 } = require("../src/trading/paper-order-executor");
 
@@ -40,6 +41,24 @@ const record = {
 };
 
 (async () => {
+  const calendarBuy = { payload: { exchange: "NASDAQ", action: "BUY" }, risk: { verdict: "PAPER_ENTRY" } };
+  assert.equal(usSession(new Date("2026-09-07T14:00:00Z")), "CLOSED");
+  assert.equal(new Date(nextOrderCheck(calendarBuy, new Date("2026-09-07T14:00:00Z"))).toISOString(), "2026-09-08T13:30:00.000Z");
+  assert.equal(usSession(new Date("2026-11-27T17:59:00Z")), "REGULAR");
+  assert.equal(usSession(new Date("2026-11-27T18:00:00Z")), "AFTER");
+  assert.equal(usSession(new Date("2026-11-27T22:00:00Z")), "CLOSED");
+  assert.equal(new Date(nextOrderCheck(calendarBuy, new Date("2026-03-08T12:00:00Z"))).toISOString(), "2026-03-09T13:30:00.000Z");
+  assert.equal(new Date(nextOrderCheck(calendarBuy, new Date("2026-11-01T12:00:00Z"))).toISOString(), "2026-11-02T14:30:00.000Z");
+  assert.equal(new Date(nextOrderCheck(calendarBuy, new Date("2026-11-27T16:00:00Z"), "2026-11-27:REGULAR")).toISOString(), "2026-11-27T18:00:00.000Z");
+  assert.equal(domesticSession(new Date("2026-09-24T01:00:00Z")), "CLOSED");
+  assert.equal(domesticSession(new Date("2026-06-03T01:00:00Z")), "CLOSED");
+  assert.equal(domesticSession(new Date("2026-12-31T01:00:00Z")), "CLOSED");
+  assert.equal(domesticSession(new Date("2027-01-04T01:00:00Z")), "CLOSED"); // no unverified calendar assumption
+  const { calendarNotices } = require("../src/trading/market-calendar");
+  assert(calendarNotices(new Date("2026-10-21T00:00:00Z")).some(notice => notice.includes("2026-11-19")));
+  assert(calendarNotices(new Date("2026-12-15T00:00:00Z")).some(notice => notice.includes("KR 2027")));
+  assert.deepEqual(calendarNotices(new Date("2026-09-07T00:00:00Z")), []);
+  assert.equal(new Date(nextOrderCheck({ ...calendarBuy, payload: { exchange: "KRX", action: "BUY" } }, new Date("2026-09-24T01:00:00Z"))).toISOString(), "2026-09-28T00:00:00.000Z");
   assert.equal(isUsMarketClosedError(new Error("키움 모의투자 요청 실패: [20000](RC4058:모의투자 장종료)")), true);
   assert.equal(isUsMarketClosedError(new Error("한투 모의 API 실패 [VTTT1002U]: 모의투자 장종료 입니다.")), true);
   assert.equal(isUsMarketClosedError(new Error("키움 모의투자 요청 실패: 주문가능금액 부족")), false);

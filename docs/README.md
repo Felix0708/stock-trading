@@ -10,6 +10,8 @@
 | `tradingview-webhook-v6.2.md` | 로컬에서만 보관하는 TradingView 원본 신호 명세 |
 | [`shared-trading-context.md`](./shared-trading-context.md) | 다섯 AI가 모든 대화에서 함께 사용하는 핵심 신호·위험·사용자 원칙 요약 |
 | [`development-history.md`](./development-history.md) | 구현 과정, 설계 이유, 현재 상태와 다음 작업 기록 |
+| [`execution-reliability.md`](./execution-reliability.md) | 수신 원본 복구, 증권사 큐, 신호별 진행 카드, 전략 성과와 비용 검증 한계 |
+| [`market-calendar.md`](./market-calendar.md) | 확인된 휴장·조기 폐장 범위, 공식 출처와 갱신 대상 |
 | [`tradingview-webhook-test.pine`](./tradingview-webhook-test.pine) | TradingView 서버의 실제 웹훅 경로를 확인하는 일회성 테스트 지표 |
 | [`tradingview-mock-order-test.pine`](./tradingview-mock-order-test.pine) | `005930` 실제 알람으로 키움 국내 모의주문 1주·1회를 확인하는 테스트 지표 |
 

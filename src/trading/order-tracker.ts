@@ -52,14 +52,14 @@ class OrderTracker {
       ...(state.orders[storageKey] || {}),
       ...order,
       orderNo, storageKey,
+      lastFillAt: Number(order.filledQuantity || 0) > Number(state.orders[storageKey]?.filledQuantity || 0)
+        ? new Date().toISOString() : state.orders[storageKey]?.lastFillAt || order.lastFillAt,
       createdAt: state.orders[storageKey]?.createdAt || order.createdAt || state.orders[storageKey]?.resultAt || state.orders[storageKey]?.updatedAt || new Date().toISOString(),
       revision: state.revision,
       updatedAt: new Date().toISOString(),
     };
     state.orders[storageKey] = saved;
-    const temporary = `${this.file}.tmp`;
-    fs.writeFileSync(temporary, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
-    fs.renameSync(temporary, this.file);
+    this.write(state);
     return saved;
   }
 
@@ -118,8 +118,11 @@ class OrderTracker {
   /** @param {OrderState} state */
   write(state: OrderState) {
     const temporary = `${this.file}.tmp`;
-    fs.writeFileSync(temporary, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
+    const fd = fs.openSync(temporary, "w", 0o600);
+    try { fs.writeFileSync(fd, `${JSON.stringify(state, null, 2)}\n`); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
     fs.renameSync(temporary, this.file);
+    const directory = fs.openSync(require("node:path").dirname(this.file), "r");
+    try { fs.fsyncSync(directory); } finally { fs.closeSync(directory); }
   }
 }
 

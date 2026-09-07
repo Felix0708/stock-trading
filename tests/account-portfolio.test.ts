@@ -1,7 +1,7 @@
 "use strict";
 
 const assert = require("node:assert/strict");
-const { calculateTradingPerformance, harmonizePortfolioNames, syncAccountPortfolio, tradingPerformanceSnapshot } = require("../src/executor/account-portfolio");
+const { calculateTradingPerformance, harmonizePortfolioNames, syncAccountPortfolio, tradingPerformanceSnapshot, strategyComparison, formatStrategyComparisonMessage, sigmaBand } = require("../src/executor/account-portfolio");
 
 const emptyBroker = (id, label): any => ({
   id, label, environment: id === "KIS" ? "live" : "mock",
@@ -56,6 +56,30 @@ const emptyBroker = (id, label): any => ({
   assert.equal(performance.all.currencies.USD.returnRate, -4);
   assert.equal(performance.month.count, 1);
   assert.equal(performance.excludedFullExits, 1);
+  assert.equal(performance.completed[0].netProfitLoss, null);
+  assert.deepEqual([2, 2.01, 2.5, 2.51, 3, 3.01, 3.5, 3.51, undefined].map(sigmaBand), ["≤2", "2~2.5", "2~2.5", "2.5~3", "2.5~3", "3~3.5", "3~3.5", ">3.5", "미확인"]);
+  const cost = quantity => ({ fees: 1, taxes: 0, currency: "USD", filledQuantity: quantity, source: "broker-statement-test" });
+  const strategyOrders = [
+    { environment: "mock", side: "BUY", entryType: "PAPER_ENTRY", market: "NASDAQ", symbol: "TEST", status: "FILLED", filledQuantity: 10, fillPrice: 100, signalPrice: 99,
+      timeframe: "4H", signalCode: "ENTRY_STANDARD", sizingContext: { sigmaZ: 2.5 }, policyVersion: "test-v1", executionCosts: cost(10), createdAt: "2026-09-01T00:00:00Z" },
+    { environment: "mock", side: "SELL", market: "NASDAQ", symbol: "TEST", status: "CANCELLED", filledQuantity: 2, fillPrice: 120, signalPrice: 118, executionCosts: cost(2), createdAt: "2026-09-02T00:00:00Z" },
+    { environment: "mock", side: "SELL", market: "NASDAQ", symbol: "TEST", status: "FILLED", filledQuantity: 8, fillPrice: 90, signalPrice: 95, executionCosts: cost(8), createdAt: "2026-09-03T00:00:00Z" },
+  ];
+  const comparisonBroker = { ...emptyBroker("KIWOOM", "키움"), tracker: { list: () => strategyOrders } };
+  const comparison = strategyComparison(comparisonBroker, { blocked: { record: { payload: { timeframe: "D", sb_z_score: 3.6 }, outcome: { signal: { signalCode: "ENTRY_MOMENTUM" } } }, progress: { KIWOOM: { status: "BLOCKED", reason: "Sigma 과열" } } } });
+  assert.equal(comparison.groups.length, 4);
+  assert.equal(comparison.groups[0].label, "240");
+  assert.equal(comparison.groups[0].profitLoss, -40);
+  assert.equal(comparison.groups[0].netProfitLoss, -43);
+  assert.equal(comparison.groups[0].signalPriceDifference, 46); // already in actual P/L, do not subtract again
+  assert.equal(comparison.groups[0].realizedDrawdown, 40);
+  assert.equal(comparison.blocked[0].count, 1);
+  assert.equal(comparison.groups[0].count, 1); // blocked signals are never fictional trades
+  strategyOrders[0].executionCosts.filledQuantity = 9; // stale cost evidence after another fill
+  assert.equal(strategyComparison(comparisonBroker).groups[0].netProfitLoss, null);
+  const comparisonCard = formatStrategyComparisonMessage([comparisonBroker, comparisonBroker]);
+  assert(JSON.stringify(comparisonCard).length < 6000);
+  assert.match(JSON.stringify(comparisonCard), /비용 미확인을 0원으로 보지 않음/);
   const snapshot = tradingPerformanceSnapshot([{ ...emptyBroker("KIWOOM", "키움"), tracker: { list: () => [
     { environment: "mock", revision: 1, status: "FILLED", side: "SELL", fullExit: true, market: "KRX", symbol: "005930", filledQuantity: 1, fillPrice: 80_000, preTradeAverageEntryPrice: 70_000, updatedAt: "2026-08-04T00:00:00.000Z" },
   ] } }], "2026-08-10T00:00:00.000Z");

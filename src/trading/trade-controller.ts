@@ -174,6 +174,8 @@ class TradeController {
       fs.appendFileSync(this.decisionLogFile, `${JSON.stringify({
         at: new Date().toISOString(), requestId: record.requestId, ticker: payload.ticker,
         signalCode: outcome.signal?.signalCode, ...result,
+        exchange: payload.exchange, timeframe: payload.timeframe, sigmaZ: payload.sb_z_score,
+        signalPrice: payload.price, policyVersion: "2026-09-07-owned-timeframe-v1",
       })}\n`, { mode: 0o600 });
     }
     return result;

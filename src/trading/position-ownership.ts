@@ -93,17 +93,21 @@ function scopePositionPreview(record, preview, orders, environment) {
 function restoreOrderSignalMetadata(orders, records) {
   const byRequest = new Map(records.map(record => [record.requestId, record]));
   return orders.flatMap(order => {
-    if (!order.requestId || (order.timeframe && order.createdAt)) return [];
+    if (!order.requestId) return [];
     const record: any = byRequest.get(order.requestId);
     if (!record?.validation?.ok || !sameInstrument(order, record.payload) || order.side !== record.payload.action
       || !normalizedTimeframe(record.payload.timeframe) || !Number.isFinite(Date.parse(record.receivedAt))) return [];
     const entryType = record.outcome?.decision === "ENTRY_CANDIDATE" ? "PAPER_ENTRY"
       : record.outcome?.decision === "ADD_CANDIDATE" ? "PAPER_ADD" : null;
-    return [{ ...order, timeframe: order.timeframe || normalizedTimeframe(record.payload.timeframe),
+    const metadata = { timeframe: order.timeframe || normalizedTimeframe(record.payload.timeframe),
       createdAt: order.createdAt || record.receivedAt,
-      ...(["FILLED", "CANCELLED", "EXPIRED", "REJECTED"].includes(order.status) && !order.resultAt && order.updatedAt
+      ...((!order.timeframe || !order.createdAt) && ["FILLED", "CANCELLED", "EXPIRED", "REJECTED"].includes(order.status) && !order.resultAt && order.updatedAt
         ? { resultAt: order.updatedAt } : {}),
-      ...(order.side === "BUY" && entryType ? { entryType: order.entryType || entryType } : {}) }];
+      ...(!order.signalCode && record.outcome?.signal?.signalCode ? { signalCode: record.outcome.signal.signalCode } : {}),
+      ...(!Number.isFinite(order.sizingContext?.sigmaZ) && Number.isFinite(record.payload.sb_z_score)
+        ? { sizingContext: { ...order.sizingContext, sigmaZ: record.payload.sb_z_score } } : {}),
+      ...(order.side === "BUY" && entryType ? { entryType: order.entryType || entryType } : {}) };
+    return Object.entries(metadata).some(([key, value]) => JSON.stringify(value) !== JSON.stringify(order[key])) ? [{ ...order, ...metadata }] : [];
   });
 }
 

@@ -4,6 +4,7 @@ const fs = require("node:fs");
 const { setTimeout: delay } = require("node:timers/promises");
 const { refreshPaperOrder, trackPaperOrder } = require("./order-tracking");
 const { scopePositionPreview, managedPosition, normalizedSymbol, normalizedTimeframe } = require("./position-ownership");
+const { tradingDay } = require("./market-calendar");
 
 type SignalRecord = { payload: any; risk?: any; positionPreview?: any; outcome?: any; source?: string; requestId?: string; [key: string]: any };
 type ExecutorOptions = { enabled: boolean; environment: string; domesticClient: any; overseasClient: any; tracker: any; brokerLabel?: string; partialExit1Ratio?: number; partialExit2Ratio?: number; now?: Date; symbol?: string; lockFile?: string; client?: any; attempts?: number; delayMs?: number; [key: string]: any };
@@ -38,8 +39,8 @@ function domesticSessionClock(value = new Date()) {
 }
 
 function domesticSession(value = new Date()): Session {
-  const { weekday, minutes } = domesticSessionClock(value);
-  if (["Sat", "Sun"].includes(weekday)) return "CLOSED";
+  const { date, weekday, minutes } = domesticSessionClock(value);
+  if (tradingDay("KRX", date, weekday).closed) return "CLOSED";
   if (minutes >= 8 * 60 + 30 && minutes < 8 * 60 + 40) return "PRE";
   if (minutes >= 9 * 60 && minutes < 15 * 60 + 30) return "REGULAR";
   if (minutes >= 15 * 60 + 40 && minutes < 16 * 60) return "AFTER_CLOSE";
@@ -78,11 +79,14 @@ function isUsRegularSession(value = new Date()) {
 }
 
 function usSession(value = new Date()) {
-  const { weekday, minutes } = usSessionClock(value);
-  if (["Sat", "Sun"].includes(weekday)) return "CLOSED";
+  const { date, weekday, minutes } = usSessionClock(value);
+  const day = tradingDay("US", date, weekday);
+  if (day.closed) return "CLOSED";
+  const close = (day.early ? 13 : 16) * 60;
+  const extendedClose = (day.early ? 17 : 20) * 60;
   if (minutes >= 4 * 60 && minutes < 9 * 60 + 30) return "PRE";
-  if (minutes >= 9 * 60 + 30 && minutes < 16 * 60) return "REGULAR";
-  if (minutes >= 16 * 60 && minutes < 20 * 60) return "AFTER";
+  if (minutes >= 9 * 60 + 30 && minutes < close) return "REGULAR";
+  if (minutes >= close && minutes < extendedClose) return "AFTER";
   return "CLOSED";
 }
 
@@ -138,6 +142,26 @@ function shouldDelayOrder(record: SignalRecord, value = new Date()) {
     return buy ? !isDomesticBuySession(value) : !isDomesticOrderSession(value);
   }
   return false;
+}
+
+function nextOrderCheck(record: SignalRecord, from = new Date(), afterSession = ""): number | null {
+  if (!isExecutableOrder(record)) return null;
+  const sessionKey = (value: Date) => record.payload.exchange === "KRX"
+    ? `${domesticSessionClock(value).date}:${domesticSession(value)}` : `${usSessionClock(value).date}:${usSession(value)}`;
+  if (!shouldDelayOrder(record, from) && sessionKey(from) !== afterSession) return from.getTime();
+  // Offset at UTC noon is after the NY DST switch, before every possible next session.
+  const clock = record.payload.exchange === "KRX" ? domesticSessionClock : usSessionClock;
+  const boundaries = record.payload.exchange === "KRX" ? [510, 540, 940, 960] : [240, 570, 780, 960];
+  const noon = Math.floor(from.getTime() / 86400_000) * 86400_000 + 12 * 3600_000;
+  for (let day = -1; day <= 10; day++) {
+    const seed = noon + day * 86400_000;
+    const midnight = seed - clock(new Date(seed)).minutes * 60_000;
+    for (const minutes of boundaries) {
+      const value = new Date(midnight + minutes * 60_000);
+      if (value.getTime() >= from.getTime() && !shouldDelayOrder(record, value) && sessionKey(value) !== afterSession) return value.getTime();
+    }
+  }
+  return null;
 }
 
 function shouldDeferEntry(record: SignalRecord, error: unknown) {
@@ -289,6 +313,7 @@ async function submitPaperOrder(record: SignalRecord, options: ExecutorOptions) 
     koreanName: payload.koreanName, englishName: payload.englishName,
     signalType: payload.type, signalPrice: record.originalSignalPrice ?? payload.price, executionPrice: payload.price, stopPrice: positionPreview?.stopPrice ?? payload.sl,
     conviction: payload.conviction, requestId: record.requestId,
+    signalCode: record.outcome?.signal?.signalCode,
     partialExitRatio: partialExit ? partialExitRatio(record, options) : null,
     partialExitStage: partialExit ? partialExitStage(record) : null,
     fullExit: exit,
@@ -360,6 +385,7 @@ module.exports = {
   isRetryablePreOrderError,
   isUsOrderSession,
   isUsRegularSession,
+  nextOrderCheck,
   partialExitQuantity,
   partialExitRatio,
   partialExitStage,

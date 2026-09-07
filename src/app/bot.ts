@@ -1658,7 +1658,7 @@ async function queueBuyApproval(record) {
 
 async function publishWebhookRecord(record, options: any = {}) {
   await updateWatchlist(record);
-  if (options.replayOnly) {
+  if (options.replayOnly && !ACCOUNT_NEUTRAL_SIGNAL_SERVER) {
     const formatted = formatWebhookRecord(record);
     const channelNames = formatted.targetChannels || [formatted.targetChannel
       || (formatted.channel === "signal" ? WEBHOOK_SIGNAL_CHANNEL : WEBHOOK_SYSTEM_CHANNEL)];
@@ -1685,30 +1685,6 @@ async function publishWebhookRecord(record, options: any = {}) {
     await sendFormattedWebhook(channel, formatted);
   }
   signalReviewBatcher?.add(record);
-}
-
-async function replayUndeliveredWebhooks() {
-  const logFile = path.resolve(ROOT, WEBHOOK_LOG_FILE);
-  if (!fs.existsSync(logFile)) return;
-  const deliveredFile = `${logFile}.delivered`;
-  const delivered = new Set(fs.existsSync(deliveredFile)
-    ? fs.readFileSync(deliveredFile, "utf8").split(/\r?\n/).filter(Boolean)
-    : []);
-  const records = fs.readFileSync(logFile, "utf8").split(/\r?\n/).filter(Boolean).map(JSON.parse);
-  const cutoff = Date.now() - 24 * 60 * 60 * 1000;
-  const old = records.filter((record) => new Date(record.receivedAt).getTime() < cutoff && !delivered.has(record.requestId));
-  if (old.length) fs.appendFileSync(deliveredFile, `${old.map((record) => record.requestId).join("\n")}\n`, { mode: 0o600 });
-  const pending = records.filter((record) => new Date(record.receivedAt).getTime() >= cutoff && !delivered.has(record.requestId));
-  if (!pending.length) return;
-  console.log(`Discord 미전달 웹훅 복구: ${pending.length}건`);
-  for (const record of pending) {
-    try {
-      await publishWebhookRecord(record, { replayOnly: true });
-      fs.appendFileSync(deliveredFile, `${record.requestId}\n`, { mode: 0o600 });
-    } catch (error) {
-      console.error(`Discord 미전달 웹훅 복구 실패 (${record.requestId}):`, error.message);
-    }
-  }
 }
 
 function getDomesticKiwoomClient() {
@@ -2199,10 +2175,9 @@ async function startWebhookReceiver() {
     token,
     healthCheck: () => [...clients.values()].every(client => client.isReady()) && readAccountHealth(path.join(ROOT, ".runtime")).healthy,
     logFile: path.resolve(ROOT, WEBHOOK_LOG_FILE),
-    onProcessed: publishWebhookRecord,
+    onProcessed: (record, { recovered }) => publishWebhookRecord(record, { replayOnly: recovered }),
   });
   await webhookService.listen(WEBHOOK_PORT, WEBHOOK_HOST);
-  await replayUndeliveredWebhooks();
   console.log(`웹훅 수신기: http://${WEBHOOK_HOST}:${WEBHOOK_PORT}/webhook/<secret> (${!ACCOUNT_NEUTRAL_SIGNAL_SERVER && KIWOOM_ENABLED && KIWOOM_ENV === "mock" ? "모의주문 연결" : "계좌 중립 · 주문 분리"})`);
 }
 
