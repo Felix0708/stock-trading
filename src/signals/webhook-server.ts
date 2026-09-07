@@ -113,7 +113,9 @@ function createWebhookService(options: any = {}) {
   const server = http.createServer((request, response) => {
     const url = new URL(request.url, "http://localhost");
     if (request.method === "GET" && url.pathname === "/health") {
-      sendJson(response, 200, { ok: true, queue_size: queue.size, role: "signal_server" });
+      let healthy = true;
+      try { healthy = options.healthCheck ? options.healthCheck() === true : true; } catch { healthy = false; }
+      sendJson(response, healthy ? 200 : 503, { ok: healthy, queue_size: queue.size, role: "signal_server" });
       return;
     }
     if (request.method !== "POST" || !secureEqual(url.pathname, webhookPath)) {

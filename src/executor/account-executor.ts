@@ -3,6 +3,7 @@
 const fs = require("node:fs");
 const { Client, GatewayIntentBits } = require("discord.js");
 const { syncAccountPortfolio } = require("./account-portfolio");
+const { writeAccountHealth } = require("./account-health");
 const { parseBuyApprovalCommand } = require("./buy-approval");
 const { decodeSignalEmbed } = require("../discord/discord-signal-envelope");
 const { KiwoomClient, kiwoomCredentials } = require("../brokers/kiwoom-client");
@@ -10,6 +11,9 @@ const { KisClient, kisCredentials } = require("../brokers/kis-client");
 const { enrichInstrumentNames, formatInstrumentLabel } = require("../research/instrument-names");
 const { stockBriefingSyncReady, syncStockBriefingHoldings } = require("../integrations/stock-briefing");
 const { OrderTracker } = require("../trading/order-tracker");
+const { normalizedSymbol, normalizedTimeframe, sameTimeframe, emergencyExit, managedPosition, scopePositionPreview, restoreOrderSignalMetadata, orderTime } = require("../trading/position-ownership");
+
+const POLICY_VERSION = "2026-09-07-owned-timeframe-v1";
 const {
   domesticSession,
   domesticSessionClock,
@@ -142,12 +146,13 @@ class SignalReceiptStore {
 
   supersededEntry(brokerId, record) {
     const key = `${brokerId}:${record.payload.exchange}:${record.payload.ticker}`;
-    return record.payload.action === "BUY" && Number(this.state.exits[key]) >= new Date(record.receivedAt).getTime();
+    const exitedAt = Math.max(Number(this.state.exits[`${key}:${normalizedTimeframe(record.payload.timeframe)}`] || 0), Number(this.state.exits[`${key}:ALL`] || 0), Number(this.state.exits[key] || 0));
+    return record.payload.action === "BUY" && exitedAt >= new Date(record.receivedAt).getTime();
   }
 
   rememberExit(brokerId, record) {
     if (record.payload.action !== "SELL" || !["PAPER_EXIT", "PAPER_PARTIAL_EXIT"].includes(record.risk?.verdict)) return;
-    const key = `${brokerId}:${record.payload.exchange}:${record.payload.ticker}`;
+    const key = `${brokerId}:${record.payload.exchange}:${record.payload.ticker}:${emergencyExit(record) ? "ALL" : normalizedTimeframe(record.payload.timeframe)}`;
     this.state.exits[key] = Math.max(this.state.exits[key] || 0, new Date(record.receivedAt).getTime());
     for (const deferred of this.listDeferred()) {
       if (deferred.brokerId === brokerId && this.supersededEntry(brokerId, deferred.record)) delete this.state.deferred[deferred.key];
@@ -170,7 +175,7 @@ class SignalReceiptStore {
   }
 
   putPending(record, messageId, ttlMs, brokerIds) {
-    const key = `${record.payload.exchange}:${record.payload.ticker}`;
+    const key = `${record.payload.exchange}:${record.payload.ticker}:${normalizedTimeframe(record.payload.timeframe)}`;
     this.state.pending[key] = { key, record, messageId, brokerIds, createdAt: Date.now(), expiresAt: Date.now() + ttlMs };
     this.write();
     return this.state.pending[key];
@@ -191,7 +196,7 @@ class SignalReceiptStore {
   }
 
   putInvalidation(brokerId, record, entryPrice, now = Date.now()) {
-    const key = `${brokerId}:${record.payload.exchange}:${record.payload.ticker}`;
+    const key = `${brokerId}:${record.payload.exchange}:${record.payload.ticker}:${normalizedTimeframe(record.payload.timeframe)}`;
     this.state.invalidations[key] = {
       key, brokerId, record, entryPrice,
       guardRequestId: `entry-invalidation-${brokerId}-${record.requestId}`,
@@ -211,10 +216,11 @@ class SignalReceiptStore {
   }
 
   clearInvalidations(record) {
-    const suffix = `:${record.payload.exchange}:${record.payload.ticker}`;
     let removed = 0;
     for (const key of Object.keys(this.state.invalidations)) {
-      if (!key.endsWith(suffix)) continue;
+      const pending = this.state.invalidations[key];
+      if (pending.record?.payload?.exchange !== record.payload.exchange || pending.record?.payload?.ticker !== record.payload.ticker) continue;
+      if (!emergencyExit(record) && !sameTimeframe(pending.record?.payload?.timeframe, record.payload.timeframe)) continue;
       delete this.state.invalidations[key];
       removed += 1;
     }
@@ -350,7 +356,7 @@ class SignalReceiptStore {
   }
 
   reconcileTradeStage(brokerId, order) {
-    if (order.fullExit && order.status === "FILLED") {
+    if (order.fullExit && order.status === "FILLED" && Number(order.filledQuantity) >= Number(order.preTradeManagedQuantity ?? order.preTradePositionQuantity ?? order.filledQuantity)) {
       this.resetPartialExits(brokerId, order.market, order.symbol);
       return;
     }
@@ -453,6 +459,7 @@ function orderStatusUnknown(error) {
 function liveAutoBuyEligible(record) {
   const payload = record?.payload || {};
   return payload.action === "BUY"
+    && normalizedTimeframe(payload.timeframe) === "240"
     && ["A", "S"].includes(payload.conviction)
     && payload.daily_trend === "BULL"
     && payload.daily_ema_aligned === true
@@ -549,20 +556,19 @@ function signalExchange(exchange) {
 }
 
 function accountSymbol(symbol) {
-  const value = String(symbol || "").toUpperCase();
-  return /^A\d{6}$/.test(value) ? value.slice(1) : value;
+  return normalizedSymbol(symbol);
 }
 
 function trackedPortfolio(orders, domesticHoldings, usHoldings, usdExchangeRate = 1) {
   const positions = new Map();
   const marketOf = (market) => String(market || "").toUpperCase() === "KRX" ? "KRX" : "US";
   const keyOf = (market, symbol) => `${marketOf(market)}:${accountSymbol(symbol)}`;
-  const ordered = [...orders].sort((a, b) => Number(a.revision || 0) - Number(b.revision || 0));
+  const ordered = [...orders].sort((a, b) => orderTime(a) - orderTime(b));
   for (const order of ordered) {
     const key = keyOf(order.market, order.symbol);
-    if (order.fullExit && order.status === "FILLED") positions.delete(key);
-    else if (order.entryType && Number(order.filledQuantity || 0) > 0) {
-      positions.set(key, { market: marketOf(order.market), symbol: accountSymbol(order.symbol), stopPrice: Number(order.stopPrice) || null });
+    if (order.entryType && Number(order.filledQuantity || 0) > 0 && !positions.has(key)) {
+      const owned = managedPosition(orders, { exchange: order.market, ticker: order.symbol }, order.environment || "mock");
+      if (owned.quantity) positions.set(key, { ...owned, market: marketOf(order.market), symbol: accountSymbol(order.symbol) });
     }
   }
 
@@ -572,12 +578,13 @@ function trackedPortfolio(orders, domesticHoldings, usHoldings, usdExchangeRate 
   for (const position of positions.values()) {
     const holdings = position.market === "KRX" ? domesticHoldings : usHoldings;
     const held = holdings.filter((holding) => accountSymbol(holding.code) === position.symbol);
-    const quantity = held.reduce((sum, holding) => sum + Number(holding.quantity || 0), 0);
-    const evaluation = held.reduce((sum, holding) => sum + Number(holding.evaluationAmount || 0), 0);
+    const accountQuantity = held.reduce((sum, holding) => sum + Number(holding.quantity || 0), 0);
+    const quantity = Math.min(accountQuantity, position.quantity);
+    const evaluation = accountQuantity > 0 ? held.reduce((sum, holding) => sum + Number(holding.evaluationAmount || 0), 0) * quantity / accountQuantity : 0;
     if (quantity <= 0 || evaluation <= 0) continue;
     const purchaseAmount = held.reduce((sum, holding) => sum + Number(holding.purchaseAmount || 0), 0);
-    const purchasePrice = purchaseAmount > 0 ? purchaseAmount / quantity
-      : held.reduce((sum, holding) => sum + Number(holding.purchasePrice || 0) * Number(holding.quantity || 0), 0) / quantity;
+    const purchasePrice = position.averagePrice || (purchaseAmount > 0 ? purchaseAmount / accountQuantity
+      : held.reduce((sum, holding) => sum + Number(holding.purchasePrice || 0) * Number(holding.quantity || 0), 0) / accountQuantity);
     const fx = position.market === "KRX" ? 1 : usdExchangeRate;
     if (position.market === "US") hasUsExposure = true;
     deployedKrw += evaluation * fx;
@@ -704,24 +711,28 @@ function pendingSymbolOrder(orders, record) {
 
 function pyramidPlan(orders, record) {
   const market = String(record.payload?.exchange || "").toUpperCase();
-  const symbol = String(record.payload?.ticker || "").replace(/^A/, "").toUpperCase();
+  const symbol = accountSymbol(record.payload?.ticker);
   let initialEntryQuantity = 0;
   let completedAdds = 0;
   let initialEntryPending = false;
 
-  for (const order of [...orders].sort((a, b) => Number(a.revision || 0) - Number(b.revision || 0))) {
+  let remainingOwned = 0;
+  for (const order of [...orders].sort((a, b) => orderTime(a) - orderTime(b))) {
     if (String(order.market || "").toUpperCase() !== market
-        || String(order.symbol || "").replace(/^A/, "").toUpperCase() !== symbol) continue;
+        || accountSymbol(order.symbol) !== symbol) continue;
     const filledQuantity = Number(order.filledQuantity || 0);
-    if (order.fullExit && order.status === "FILLED") {
+    if (order.side === "SELL" || order.fullExit) remainingOwned = Math.max(0, remainingOwned - filledQuantity);
+    if (order.fullExit && remainingOwned === 0 && filledQuantity > 0) {
       initialEntryQuantity = 0;
       completedAdds = 0;
       initialEntryPending = false;
     } else if (order.entryType === "PAPER_ENTRY" && filledQuantity > 0) {
+      remainingOwned += filledQuantity;
       initialEntryQuantity = filledQuantity;
       completedAdds = 0;
       initialEntryPending = PENDING_ORDER_STATUSES.has(order.status);
     } else if (initialEntryQuantity > 0 && order.entryType === "PAPER_ADD") {
+      remainingOwned += filledQuantity;
       if (PENDING_ORDER_STATUSES.has(order.status)) {
         return { blocked: true, reason: "이전 피라미딩 추가매수 체결 확인 중" };
       }
@@ -879,9 +890,18 @@ async function start() {
     });
     brokers.push({ id: "KIS", label: "한투", environment: environments.KIS, domesticClient: kis, overseasClient: kis, tracker: new OrderTracker(process.env.KIS_ORDER_STATE_FILE || "kis-orders.json") });
   }
-  return createAccountRuntime({ brokers, receipts, client, readOnly, sourceChannelIds, trusted, targetGuildId, channels,
+  const runtime = createAccountRuntime({ brokers, receipts, client, readOnly, sourceChannelIds, trusted, targetGuildId, channels,
     maxAgeMs, maxOpenPositions, riskPolicy, ownerId, approvalTtlMs, deferredTtlMs, portfolioSyncMinutes,
-    executorName, accountLabel, errorReports }).listen();
+    executorName, accountLabel, errorReports });
+  // Restore only exact request/action/instrument matches after environment validation; never guess a legacy entry timeframe.
+  const eventFile = process.env.WEBHOOK_LOG_FILE || "webhook-events.jsonl";
+  if (!readOnly && fs.existsSync(eventFile)) {
+    const records = fs.readFileSync(eventFile, "utf8").split(/\r?\n/).filter(Boolean).flatMap(line => {
+      try { return [JSON.parse(line)]; } catch { return []; }
+    });
+    for (const broker of brokers) for (const order of restoreOrderSignalMetadata(broker.tracker.list(), records)) broker.tracker.record(order);
+  }
+  return runtime.listen();
 }
 
 function createAccountRuntime({ brokers, receipts, client, readOnly = false, sourceChannelIds = new Set(), trusted,
@@ -901,6 +921,8 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
   }
   if (!readOnly) receipts.write();
   let queue: Promise<any> = Promise.resolve();
+  let workerAt = Date.now();
+  let initialized = false;
 
   async function targetChannel(configured) {
     const guild = await client.guilds.fetch(targetGuildId);
@@ -990,7 +1012,7 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
       } };
     }
     const sized = applyPyramidSizing(sizingRecord,
-      enforceOwnAccountRules(sizingRecord, ownAccount, calculated),
+      scopePositionPreview(sizingRecord, enforceOwnAccountRules(sizingRecord, ownAccount, calculated), broker.tracker.list(), broker.environment),
       broker.tracker.list());
     const preview = liveRiskPolicy && record.payload.action === "BUY" ? enforceOpenRiskLimit(sized) : sized;
     return { label: broker.label, preview };
@@ -1066,6 +1088,10 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
     record.positionPreview = (await previewFor(broker, record)).preview;
     record.accountVerified = true;
     if (record.positionPreview?.retryable) return { status: "DEFER_REQUIRED", verificationPending: true };
+    if (record.positionPreview?.skipStatus) {
+      console.log(`${record.positionPreview.skipStatus}: ${record.payload.ticker} · ${record.positionPreview.reason}`);
+      return { status: record.positionPreview.skipStatus, reason: record.positionPreview.reason };
+    }
     const existingEntry = skippedExistingEntry(record, record.positionPreview);
     if (existingEntry) return existingEntry;
     const skipped = skippedNoPosition(record, record.positionPreview);
@@ -1089,6 +1115,7 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
     if (!manual && !receipts.autoTrading()) return { status: "DEFER_REQUIRED" };
     receipts.attempt(broker.id, record, "SUBMITTING");
     record.executorReportable = true;
+    record.policyVersion = POLICY_VERSION;
     let order;
     try {
       order = await submitPaperOrder(record, {
@@ -1145,6 +1172,7 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
   async function settlePendingBuys(broker, record, manual = false) {
     if (record.payload.action !== "SELL" || shouldDelayOrder(record)) return;
     for (const previous of broker.tracker.list().filter((order) => order.side === "BUY" && pendingSymbolOrder([order], record))) {
+      if (!emergencyExit(record) && !sameTimeframe(previous.timeframe, record.payload.timeframe)) continue;
       const current = await refreshPaperOrder(previous, broker);
       if (!PENDING_ORDER_STATUSES.has(current.status)) continue;
       if (current.status === "UNKNOWN" || current.cancelSubmitted) continue;
@@ -1367,6 +1395,31 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
     })).currentPrice;
   }
 
+  async function checkManagedStops() {
+    for (const broker of brokers) {
+      const orders = broker.tracker.list();
+      const symbols = new Map(orders.filter(order => order.entryType).map(order => [`${order.market}:${order.symbol}`, order]));
+      for (const order of symbols.values() as Iterable<any>) {
+        const payload = { ticker: order.symbol, exchange: order.market, action: "SELL", koreanName: order.koreanName, name: order.name };
+        const owned = managedPosition(orders, payload, broker.environment);
+        if (!owned.quantity || shouldDelayOrder({ payload, risk: { verdict: "PAPER_EXIT" } })) continue;
+        try {
+          const account = await accountContext(broker, { payload }, maxOpenPositions, { positionOnly: true });
+          if (!Number.isInteger(account.currentPositionQuantity) || account.currentPositionQuantity < owned.quantity) {
+            await reportError(`${broker.label} 자동매매 보유 기록 대조 필요`,
+              new Error("실제 잔고가 자동매매 기록보다 적습니다. 기록을 임의로 청산 처리하지 않으며 해당 종목 신규 주문을 차단합니다."), { payload });
+            continue;
+          }
+          if (!(owned.stopPrice > 0)) continue;
+          const price = await currentSignalPrice(broker, payload);
+          if (!Number.isFinite(price) || price <= 0) throw new Error("유효한 현재가 없음");
+          if (price <= owned.stopPrice) await reportError(`${broker.label} 손절 기준 이탈 · 보유 확인 필요`,
+            new Error("저장된 손절 기준 이하입니다. 이 감시는 알림 전용이며 증권사 보호 주문이 아닙니다."), { payload });
+        } catch (error) { await reportError(`${broker.label} 손절 기준 감시 조회 실패`, error, { payload }); }
+      }
+    }
+  }
+
   async function checkInvalidations(now = new Date()) {
     if (!receipts.autoTrading()) return;
     for (const pending of receipts.listInvalidations()) {
@@ -1392,6 +1445,12 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
         receipts.removeInvalidation(pending.key);
         continue;
       }
+      const owned = managedPosition(broker.tracker.list(), pending.record.payload, broker.environment);
+      if (!owned.quantity || !sameTimeframe(owned.timeframe, pending.record.payload.timeframe)
+        || (pending.entryRequestId && pending.entryRequestId !== owned.entryRequestId)) {
+        receipts.removeInvalidation(pending.key);
+        continue;
+      }
       const record = structuredClone(pending.record);
       record.requestId = pending.guardRequestId;
       record.receivedAt = now.toISOString();
@@ -1414,9 +1473,13 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
       for (const broker of lifecycleBrokers) {
         const account = await accountContext(broker, record, maxOpenPositions);
         if (!account.hasExistingPosition) continue;
-        const entryPrice = account.averageEntryPrice || record.outcome?.state?.entrySignalPrice || record.payload.price;
+        const owned = managedPosition(broker.tracker.list(), record.payload, broker.environment);
+        if (!owned.quantity || !sameTimeframe(owned.timeframe, record.payload.timeframe)) continue;
+        const entryPrice = owned.averagePrice || record.outcome?.state?.entrySignalPrice || record.payload.price;
         if (!Number.isFinite(entryPrice) || entryPrice <= 0) continue;
-        receipts.putInvalidation(broker.id, record, entryPrice);
+        const invalidation = receipts.putInvalidation(broker.id, record, entryPrice);
+        invalidation.entryRequestId = owned.entryRequestId;
+        receipts.write();
         stored += 1;
       }
       await send(channels.system, { text: stored
@@ -1553,7 +1616,7 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
     }
     const brokerIds = Object.keys(previews);
     if (brokerIds.length) {
-      const key = `${record.payload.exchange}:${record.payload.ticker}`;
+      const key = `${record.payload.exchange}:${record.payload.ticker}:${normalizedTimeframe(record.payload.timeframe)}`;
       const previous = receipts.state.pending[key];
       const combined = previous?.record.requestId === record.requestId ? { ...previous.previews, ...previews } : previews;
       const pending = receipts.putPending(record, "", Math.max(1, Math.min(approvalTtlMs, item.expiresAt - Date.now())), Object.keys(combined));
@@ -1615,6 +1678,15 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
   }
 
   async function listen() {
+    const publishHealth = () => {
+      try {
+        writeAccountHealth(receipts.file, { discordReady: client.isReady(), initialized, workerAt,
+          uncertainOrders: brokers.some(broker => broker.tracker.list().some(order => order.status === "UNKNOWN"))
+            || Object.values(receipts.state.attempts).some((attempt: any) => ["SUBMITTING", "UNKNOWN"].includes(attempt.status)) });
+      } catch (error) { console.error("실행기 상태 기록 실패:", error.message); }
+    };
+    publishHealth();
+    setInterval(publishHealth, 15_000).unref();
     client.on("messageCreate", (message) => {
       if (!message.author.bot && message.author.id === ownerId && accountCommand(message.content, executorName) === "AUTO_OFF"
         && ([channels.system, channels.order].includes(message.channelId) || [channels.system, channels.order].includes(message.channel?.name))) {
@@ -1640,7 +1712,7 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
         client.user.tag,
         `${accountSummary()} · 신뢰 채널 ${sourceChannelIds.size}개 · ${readOnly ? "읽기 전용" : `자동매매 ${receipts.autoTrading() ? "ON" : "OFF"}`}`,
         readOnly ? "주문 잠금 · 주문 없는 종단간 테스트만 허용" : brokers.some((broker) => broker.environment === "live") ? "실계좌 활성 · 강한 BUY 자동, 축소 BUY 승인" : "실계좌 지원 · 현재 잠금",
-      ) });
+      ) }).catch(error => reportError("시작 알림 전송 실패", error));
       const reconciled = readOnly ? false : await reconcileOrders().catch(async (error) => {
         await reportError("미완료 주문 시작 조회 실패", error);
         return false;
@@ -1650,11 +1722,19 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
         queue = queue.then(() => syncPortfolio()).catch((error) => reportError("포트폴리오 일일 갱신 실패", error));
       }, portfolioSyncMinutes * 60_000).unref();
       for (const channelId of sourceChannelIds) {
-        const channel = await client.channels.fetch(channelId);
-        if (!channel?.isTextBased()) continue;
-        const recent = [...(await channel.messages.fetch({ limit: 50 })).values()].reverse();
-        for (const message of recent) queue = queue.then(() => processMessage(message));
+        try {
+          const channel = await client.channels.fetch(channelId);
+          if (!channel?.isTextBased()) continue;
+          const recent = [...(await channel.messages.fetch({ limit: 50 })).values()].reverse();
+          for (const message of recent) queue = queue.then(() => processMessage(message)).catch(error => reportError("시작 신호 복구 실패", error));
+        } catch (error) { await reportError("시작 신호 채널 조회 실패", error); }
       }
+      initialized = true;
+      workerAt = Date.now();
+      publishHealth();
+      setInterval(() => {
+        queue = queue.then(() => { workerAt = Date.now(); });
+      }, 15_000).unref();
       if (!readOnly) {
         setInterval(() => {
           queue = queue.then(() => retryInbox()).then(() => retryDeferred()).catch((error) => reportError("예약 주문 재시도 실패", error));
@@ -1663,13 +1743,14 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
           queue = queue
             .then(() => checkInvalidations())
             .then(() => reconcileOrders())
+            .then(() => checkManagedStops())
             .catch((error) => reportError("진입 무효 감시 또는 미완료 주문 체결 조회 실패", error));
         }, 30_000).unref();
       }
     });
     await client.login(process.env.ACCOUNT_DISCORD_TOKEN || process.env.KIS_DISCORD_TOKEN || process.env.DISCORD_TOKEN_DRUCKENMILLER);
   }
-  return { listen, execute, executeOrDefer, retryDeferred, retryInbox, processMessage, processApproval, processOwnerCommand, reconcileOrders };
+  return { listen, execute, executeOrDefer, retryDeferred, retryInbox, processMessage, processApproval, processOwnerCommand, reconcileOrders, checkManagedStops };
 }
 
 if (require.main === module) start().catch((error) => { console.error(error); process.exitCode = 1; });

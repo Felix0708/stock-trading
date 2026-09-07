@@ -110,6 +110,7 @@ const record = {
   assert.equal((await trackPaperTestOrder(accepted, { ...options, attempts: 1, delayMs: 0 })).status, "FILLED");
 
   const autoTracker = new OrderTracker(path.join(directory, "auto-orders.json"));
+  autoTracker.record({ orderNo: "entry-aapl", market: "NASDAQ", symbol: "AAPL", side: "BUY", entryType: "PAPER_ENTRY", timeframe: "D", environment: "mock", status: "FILLED", filledQuantity: 8, fillPrice: 230 });
   const autoRecord = {
     payload: { ticker: "AAPL", exchange: "NASDAQ", timeframe: "D", action: "BUY", price: 250 },
     risk: { verdict: "PAPER_ADD" },
@@ -117,6 +118,7 @@ const record = {
       quantity: 4, positionValue: 1000, projectedPositionRatio: 12.5,
       positionLimitRatio: 0.2, equity: 8000, totalAccountEquity: 80_000, autoCapital: 8_000, autoCapitalRatio: 0.1,
       currentPositionValue: 0, currency: "USD", stopPrice: 230, stopLossAmount: 80,
+      currentPositionQuantity: 8, currentHoldings: [{ code: "AAPL", quantity: 8, tradableQuantity: 8 }],
       pyramidStage: 1, pyramidRatio: 0.5, initialEntryQuantity: 8,
     },
   };
@@ -155,11 +157,12 @@ const record = {
   assert.equal(auto.limitPrice, 241.2);
   assert.equal(auto.referencePrice, 240);
   assert.equal(auto.timeframe, "D");
+  autoTracker.record({ orderNo: "entry-se", market: "NYSE", symbol: "SE", side: "BUY", entryType: "PAPER_ENTRY", timeframe: "240", status: "FILLED", filledQuantity: 63, fillPrice: 100 });
   const usExit = await submitPaperOrder({
     requestId: "sell-se",
-    payload: { ticker: "SE", exchange: "NYSE", action: "SELL", price: 113.41 },
+    payload: { ticker: "SE", exchange: "NYSE", timeframe: "240", action: "SELL", price: 113.41 },
     risk: { verdict: "PAPER_EXIT" },
-    positionPreview: { currentHoldings: [{ code: "SE", quantity: 63, tradableQuantity: 63 }], hasExistingPosition: true },
+    positionPreview: { currentPositionQuantity: 63, currentHoldings: [{ code: "SE", quantity: 63, tradableQuantity: 63 }], hasExistingPosition: true },
   }, {
     enabled: true,
     environment: "mock",
@@ -183,7 +186,7 @@ const record = {
   })).status, "FILLED");
   const regularSession = new Date("2026-08-24T00:00:00.000Z");
   const domesticAuto = await submitPaperOrder({
-    payload: { ticker: "005930", exchange: "KRX", action: "BUY", price: 100000 },
+    payload: { ticker: "005930", exchange: "KRX", timeframe: "240", action: "BUY", price: 100000 },
     risk: { verdict: "PAPER_ENTRY" },
     positionPreview: { quantity: 2 },
   }, {
@@ -193,8 +196,9 @@ const record = {
   assert.equal(domesticAuto.market, "KRX");
   assert.equal(domesticAuto.orderStyle, "PROTECTED");
   assert.equal(domesticOrders.at(-1).orderStyle, "PROTECTED");
+  autoTracker.record({ orderNo: "entry-kr", market: "KRX", symbol: "005930", side: "BUY", entryType: "PAPER_ENTRY", timeframe: "240", status: "FILLED", filledQuantity: 8, fillPrice: 90000 });
   const domesticPartial = await submitPaperOrder({
-    payload: { ticker: "005930", exchange: "KRX", action: "SELL", type: "🔪 1차 분할청산", price: 100000, koreanName: "삼성전자", englishName: "Samsung Electronics" },
+    payload: { ticker: "005930", exchange: "KRX", timeframe: "240", action: "SELL", type: "🔪 1차 분할청산", price: 100000, koreanName: "삼성전자", englishName: "Samsung Electronics" },
     outcome: { signal: { signalCode: "EXIT_PARTIAL_1" } },
     risk: { verdict: "PAPER_PARTIAL_EXIT" },
   }, {
@@ -202,7 +206,7 @@ const record = {
     environment: "mock",
     domesticClient: {
       ...options.client,
-      getDomesticBalance: async () => ({ holdings: [{ code: "A005930", tradableQuantity: 8 }] }),
+      getDomesticBalance: async () => ({ holdings: [{ code: "A005930", quantity: 8, tradableQuantity: 8 }] }),
     },
     tracker: autoTracker,
     partialExit1Ratio: 0.25,
@@ -224,13 +228,13 @@ const record = {
     environment: "mock",
     domesticClient: {
       ...options.client,
-      getDomesticBalance: async () => ({ holdings: [{ code: "A005930", tradableQuantity: 8 }] }),
+      getDomesticBalance: async () => ({ holdings: [{ code: "A005930", quantity: 8, tradableQuantity: 8 }] }),
     },
     tracker: autoTracker,
     now: regularSession,
   });
   assert.equal(domesticCrash.marketFallbackAllowed, true);
-  assert.equal((await submitPaperOrder(autoRecord, {
+  assert.equal((await submitPaperOrder({ ...autoRecord, risk: { verdict: "PAPER_ENTRY" } }, {
     enabled: true, environment: "live", domesticClient: options.client, overseasClient, tracker: autoTracker,
   })).status, "ACCEPTED");
   console.log("paper-order-executor test OK");

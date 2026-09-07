@@ -1,0 +1,54 @@
+"use strict";
+
+const assert = require("node:assert/strict");
+const { managedPosition, scopePositionPreview, restoreOrderSignalMetadata, normalizedSymbol, sameTimeframe } = require("../src/trading/position-ownership");
+const { calculateTradingPerformance } = require("../src/executor/account-portfolio");
+
+const entry = { requestId: "entry", orderNo: "1", side: "BUY", entryType: "PAPER_ENTRY", market: "NASDAQ", symbol: "TEST",
+  timeframe: "1D", environment: "mock", status: "FILLED", filledQuantity: 10, fillPrice: 100, stopPrice: 90, createdAt: "2026-09-01T00:00:00Z" };
+const sell = { receivedAt: "2026-09-02T00:00:00Z", payload: { ticker: "TEST", exchange: "NASDAQ", timeframe: "D", action: "SELL" }, risk: { verdict: "PAPER_EXIT" } };
+const preview = { currentPositionQuantity: 100, currentHoldings: [{ code: "TEST", quantity: 100, tradableQuantity: 100 }] };
+assert.equal(normalizedSymbol("AAPL"), "AAPL");
+assert.equal(normalizedSymbol("A005930"), "005930");
+assert.equal(sameTimeframe("D", "1D"), true);
+assert.equal(sameTimeframe("240", "4h"), true);
+assert.equal(sameTimeframe(undefined, undefined), false);
+const owned = scopePositionPreview(sell, preview, [entry], "mock");
+assert.equal(owned.quantity, 10);
+assert.equal(owned.currentHoldings[0].tradableQuantity, 10);
+assert.equal(scopePositionPreview(sell, preview, [], "mock").skipStatus, "SKIPPED_UNMANAGED_POSITION");
+assert.equal(scopePositionPreview(sell, preview, [entry], "live").skipStatus, "SKIPPED_UNMANAGED_POSITION");
+assert.equal(scopePositionPreview(sell, { ...preview, currentPositionQuantity: 9 }, [entry], "mock").blocked, true);
+assert.equal(scopePositionPreview(sell, { ...preview, currentPositionQuantity: NaN }, [entry], "mock").blocked, true);
+assert.equal(scopePositionPreview(sell, { ...preview, currentPositionQuantity: 10.5 }, [entry], "mock").blocked, true);
+const newEntry = { ...sell, payload: { ...sell.payload, action: "BUY" }, risk: { verdict: "PAPER_ENTRY" } };
+assert.match(scopePositionPreview(newEntry, { ...preview, currentPositionQuantity: 0 }, [entry], "mock").reason, /잔고 대조/);
+assert.equal(scopePositionPreview(newEntry, { ...preview, currentPositionQuantity: 0 }, [], "mock").blocked, undefined);
+const fourHour = { ...sell, payload: { ...sell.payload, timeframe: "240" } };
+assert.equal(scopePositionPreview(fourHour, preview, [entry], "mock").skipStatus, "SKIPPED_TIMEFRAME");
+assert.equal(scopePositionPreview({ ...fourHour, outcome: { signal: { signalCode: "EXIT_CRASH" } } }, preview, [entry], "mock").quantity, 10);
+assert.match(scopePositionPreview(sell, preview, [{ ...entry, timeframe: undefined }], "mock").reason, /원본 대조 필요/);
+assert.equal(scopePositionPreview({ ...sell, receivedAt: "2026-08-01T00:00:00Z" }, preview, [entry], "mock").skipStatus, "SKIPPED_OLD_POSITION_SIGNAL");
+const partial = { ...entry, side: "SELL", entryType: null, fullExit: true, filledQuantity: 5, fillPrice: 120, orderQuantity: 10,
+  remainingQuantity: 5, status: "CANCELLED", createdAt: "2026-09-02T00:00:00Z", updatedAt: "2026-09-02T00:00:00Z" };
+assert.equal(managedPosition([entry, partial], sell.payload).quantity, 5);
+const last = { ...partial, filledQuantity: 5, fillPrice: 90, remainingQuantity: 0, status: "FILLED", createdAt: "2026-09-03T00:00:00Z", updatedAt: "2026-09-03T00:00:00Z" };
+assert.equal(managedPosition([entry, partial, last], sell.payload).quantity, 0);
+assert.equal(calculateTradingPerformance([entry, partial, last]).all.currencies.USD.profitLoss, 50);
+assert.equal(calculateTradingPerformance([entry, partial, last]).all.wins, 1);
+assert.equal(calculateTradingPerformance([entry, partial]).all.count, 0);
+assert.equal(calculateTradingPerformance([entry, { ...partial, status: "FILLED", fullExit: true }]).all.count, 0);
+assert.equal(calculateTradingPerformance([{ ...entry, status: "CANCELLED" }, partial, last]).all.currencies.USD.profitLoss, 50);
+assert.equal(calculateTradingPerformance([entry, { ...partial, preTradeAverageEntryPrice: 1 }, last]).all.currencies.USD.profitLoss, 50);
+assert.equal(calculateTradingPerformance([{ ...entry, fillPrice: null }, partial, last]).excludedFullExits, 1);
+assert.equal(calculateTradingPerformance([entry, { ...partial, updatedAt: "2027-01-01T00:00:00Z" }, last]).all.currencies.USD.profitLoss, 50);
+const original = { requestId: "entry", receivedAt: entry.createdAt, validation: { ok: true }, payload: { ...sell.payload, action: "BUY" }, outcome: { decision: "ENTRY_CANDIDATE" } };
+const restored = restoreOrderSignalMetadata([{ ...entry, timeframe: undefined, createdAt: undefined }], [original]);
+assert.equal(restored[0].timeframe, "1D");
+assert.equal(restored[0].createdAt, entry.createdAt);
+assert.equal(restoreOrderSignalMetadata([{ ...entry, timeframe: undefined, updatedAt: "2026-09-01T00:01:00Z" }], [original])[0].resultAt, "2026-09-01T00:01:00Z");
+assert.equal(restoreOrderSignalMetadata([{ ...entry, timeframe: undefined, status: "PARTIALLY_FILLED", updatedAt: "2026-09-01T00:01:00Z" }], [original])[0].resultAt, undefined);
+assert.deepEqual(restoreOrderSignalMetadata([{ ...entry, requestId: "wrong", timeframe: undefined }], [original]), []);
+assert.deepEqual(restoreOrderSignalMetadata([{ ...entry, symbol: "OTHER", timeframe: undefined }], [original]), []);
+assert.deepEqual(restoreOrderSignalMetadata([{ ...entry, timeframe: undefined }], [{ ...original, validation: { ok: false } }]), []);
+console.log("position-ownership test OK: manual holdings, timeframe, partial fills, cost basis, legacy evidence");

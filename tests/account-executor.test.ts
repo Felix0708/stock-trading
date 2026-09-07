@@ -133,7 +133,7 @@ transitionState.nextAttemptAt = Number.MAX_SAFE_INTEGER;
 assert.equal(deferredOrderAttemptDue(transitionState, "2026-09-01:AFTER", 451_000), true);
 assert.equal(deferredOrderAttemptDue(transitionState, "2026-09-02:PRE", 451_000), true);
 store.removeDeferred(transition.key);
-const invalidationRecord = { payload: { exchange: "NYSE", ticker: "SE" } };
+const invalidationRecord = { payload: { exchange: "NYSE", ticker: "SE", timeframe: "240" } };
 const invalidation = store.putInvalidation("KIS", invalidationRecord, 100, 1_000);
 assert.equal(store.listInvalidations()[0].entryPrice, 100);
 assert.match(invalidation.guardRequestId, /^entry-invalidation-KIS-/);
@@ -143,7 +143,7 @@ assert.equal(invalidationExitReason(invalidation, 99, 2_000), "");
 assert.equal(store.clearInvalidations(invalidationRecord), 1);
 assert.equal(store.listInvalidations().length, 0);
 
-const strongBuy = { payload: { action: "BUY", conviction: "A", daily_trend: "BULL", daily_ema_aligned: true, daily_above_200ma: true } };
+const strongBuy = { payload: { action: "BUY", timeframe: "240", conviction: "A", daily_trend: "BULL", daily_ema_aligned: true, daily_above_200ma: true } };
 const mixedBuy = { payload: { ...strongBuy.payload, daily_trend: "MIXED", daily_ema_aligned: false } };
 assert.equal(liveAutoBuyEligible(strongBuy), true);
 assert.equal(liveAutoBuyEligible({ payload: { ...strongBuy.payload, conviction: "B" } }), false);

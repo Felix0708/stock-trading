@@ -52,6 +52,7 @@ class OrderTracker {
       ...(state.orders[storageKey] || {}),
       ...order,
       orderNo, storageKey,
+      createdAt: state.orders[storageKey]?.createdAt || order.createdAt || state.orders[storageKey]?.resultAt || state.orders[storageKey]?.updatedAt || new Date().toISOString(),
       revision: state.revision,
       updatedAt: new Date().toISOString(),
     };

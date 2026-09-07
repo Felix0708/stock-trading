@@ -13,7 +13,8 @@ async function run() {
   const processed = [];
   const logFile = path.join(__dirname, `.webhook-server-test-${process.pid}.jsonl`);
   const token = "local-test-token-1234567890";
-  const service = createWebhookService({ token, onProcessed: (record) => processed.push(record) });
+  let ready = true;
+  const service = createWebhookService({ token, healthCheck: () => ready, onProcessed: (record) => processed.push(record) });
   try {
     const address = await service.listen(0);
     const origin = `http://127.0.0.1:${address.port}`;
@@ -21,6 +22,11 @@ async function run() {
     const health = await fetch(`${origin}/health`);
     assert.equal(health.status, 200);
     assert.deepEqual(await health.json(), { ok: true, queue_size: 0, role: "signal_server" });
+    ready = false;
+    const degraded = await fetch(`${origin}/health`);
+    assert.equal(degraded.status, 503);
+    assert.equal((await degraded.json()).ok, false);
+    ready = true;
 
     const hidden = await fetch(`${origin}/webhook/wrong-token`, { method: "POST", body: "{}" });
     assert.equal(hidden.status, 404);

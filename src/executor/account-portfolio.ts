@@ -2,15 +2,11 @@
 
 const { enrichInstrumentNames } = require("../research/instrument-names");
 const { formatMyPortfolioMessage } = require("../research/investor-portfolio");
+const { orderTime, normalizedSymbol } = require("../trading/position-ownership");
 
 function positiveNumber(value) {
   const number = Number(value);
   return Number.isFinite(number) && number > 0 ? number : null;
-}
-
-function orderTime(order) {
-  const time = Date.parse(order.resultAt || order.updatedAt || "");
-  return Number.isFinite(time) ? time : Number(order.revision || 0);
 }
 
 function marketCurrency(order) {
@@ -18,7 +14,7 @@ function marketCurrency(order) {
 }
 
 function positionKey(order) {
-  return `${marketCurrency(order)}:${String(order.symbol || "").replace(/^A/, "").toUpperCase()}`;
+  return `${order.environment || "mock"}:${marketCurrency(order)}:${normalizedSymbol(order.symbol)}`;
 }
 
 function monthKey(value, timeZone = "Asia/Tokyo") {
@@ -49,20 +45,21 @@ function calculateTradingPerformance(orders, now = new Date()) {
   const completed = [];
   let excludedFullExits = 0;
   const filled = orders
-    .filter((order) => order.status === "FILLED" && positiveNumber(order.filledQuantity) && positiveNumber(order.fillPrice))
+    .filter((order) => positiveNumber(order.filledQuantity))
     .sort((a, b) => orderTime(a) - orderTime(b));
 
   for (const order of filled) {
     const key = positionKey(order);
     const quantity = positiveNumber(order.filledQuantity);
     const price = positiveNumber(order.fillPrice);
-    if (!quantity || !price) continue;
+    if (!quantity) continue;
     if (order.side === "BUY") {
-      if (order.entryType === "PAPER_ENTRY") positions.set(key, { quantity: 0, cost: 0, realizedBasis: 0, profitLoss: 0, reliable: true });
+      if (order.entryType === "PAPER_ENTRY" && !positions.has(key)) positions.set(key, { quantity: 0, cost: 0, realizedBasis: 0, profitLoss: 0, reliable: true });
       const position = positions.get(key);
       if (position && ["PAPER_ENTRY", "PAPER_ADD"].includes(order.entryType)) {
         position.quantity += quantity;
-        position.cost += quantity * price;
+        position.cost += quantity * (price || 0);
+        if (!price) position.reliable = false;
       }
       continue;
     }
@@ -71,7 +68,8 @@ function calculateTradingPerformance(orders, now = new Date()) {
     let position = positions.get(key);
     const brokerAverage = positiveNumber(order.preTradeAverageEntryPrice);
     if (!position && brokerAverage) {
-      position = { quantity: positiveNumber(order.preTradePositionQuantity) || quantity, cost: 0, realizedBasis: 0, profitLoss: 0, reliable: true };
+      const held = positiveNumber(order.preTradePositionQuantity) || positiveNumber(order.orderQuantity) || quantity;
+      position = { quantity: held, cost: held * brokerAverage, realizedBasis: 0, profitLoss: 0, reliable: true };
       positions.set(key, position);
     }
     if (!position) {
@@ -79,22 +77,23 @@ function calculateTradingPerformance(orders, now = new Date()) {
       continue;
     }
 
-    let average = brokerAverage;
-    if (!average && position.quantity >= quantity && position.cost > 0) average = position.cost / position.quantity;
-    if (!average) position.reliable = false;
+    // Reconstructed strategy cost takes precedence over an account average that may include manual holdings.
+    const average = position.quantity >= quantity && position.cost > 0 ? position.cost / position.quantity : brokerAverage;
+    if (!average || !price || quantity > position.quantity) position.reliable = false;
     else {
       const basis = average * quantity;
       position.realizedBasis += basis;
-      position.profitLoss += price * quantity - basis;
+      position.profitLoss += (price || 0) * quantity - basis;
     }
-    if (position.quantity > 0 && position.cost > 0) {
+    if (position.quantity > 0) {
       const trackedAverage = position.cost / position.quantity;
       const removed = Math.min(position.quantity, quantity);
       position.quantity -= removed;
       position.cost = Math.max(0, position.cost - trackedAverage * removed);
     }
 
-    if (order.fullExit) {
+    // A full-exit intent or FILLED order does not mean the entire position has closed.
+    if (position.quantity === 0) {
       if (position.reliable && position.realizedBasis > 0) completed.push({
         completedAt: order.resultAt || order.updatedAt,
         currency: marketCurrency(order),

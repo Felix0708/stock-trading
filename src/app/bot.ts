@@ -19,6 +19,7 @@ const {
   formatWebhookRecord,
 } = require("../discord/webhook-discord");
 const { createWebhookService, loadOrCreateWebhookToken } = require("../signals/webhook-server");
+const { readAccountHealth } = require("../executor/account-health");
 const { SignalReviewBatcher, buildSignalReviewTopic } = require("../ai/signal-review");
 const { TradeController } = require("../trading/trade-controller");
 const { OrderTracker } = require("../trading/order-tracker");
@@ -2196,6 +2197,7 @@ async function startWebhookReceiver() {
   const token = loadOrCreateWebhookToken(path.join(ROOT, ".webhook-token"));
   webhookService = createWebhookService({
     token,
+    healthCheck: () => [...clients.values()].every(client => client.isReady()) && readAccountHealth(path.join(ROOT, ".runtime")).healthy,
     logFile: path.resolve(ROOT, WEBHOOK_LOG_FILE),
     onProcessed: publishWebhookRecord,
   });

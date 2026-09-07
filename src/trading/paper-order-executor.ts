@@ -3,6 +3,7 @@
 const fs = require("node:fs");
 const { setTimeout: delay } = require("node:timers/promises");
 const { refreshPaperOrder, trackPaperOrder } = require("./order-tracking");
+const { scopePositionPreview, managedPosition, normalizedSymbol, normalizedTimeframe } = require("./position-ownership");
 
 type SignalRecord = { payload: any; risk?: any; positionPreview?: any; outcome?: any; source?: string; requestId?: string; [key: string]: any };
 type ExecutorOptions = { enabled: boolean; environment: string; domesticClient: any; overseasClient: any; tracker: any; brokerLabel?: string; partialExit1Ratio?: number; partialExit2Ratio?: number; now?: Date; symbol?: string; lockFile?: string; client?: any; attempts?: number; delayMs?: number; [key: string]: any };
@@ -171,7 +172,7 @@ function partialExitQuantity(tradableQuantity: number, ratio: number | null) {
 }
 
 function previewTradableQuantity(positionPreview: any, ticker: string) {
-  const holding = positionPreview?.currentHoldings?.find((item: any) => String(item.code || "").replace(/^A/, "").toUpperCase() === String(ticker || "").replace(/^A/, "").toUpperCase());
+  const holding = positionPreview?.currentHoldings?.find((item: any) => normalizedSymbol(item.code) === normalizedSymbol(ticker));
   const quantity = Number(holding?.tradableQuantity ?? holding?.quantity);
   return Number.isInteger(quantity) && quantity >= 0 ? quantity : null;
 }
@@ -188,17 +189,32 @@ function protectedUsBuyLimit(signalPrice: number, currentPrice: number) {
 async function submitPaperOrder(record: SignalRecord, options: ExecutorOptions) {
   if (record.payload?.paper_order_test === true) return null;
 
-  const { payload, risk, positionPreview } = record;
+  const { payload, risk } = record;
+  let positionPreview = record.positionPreview;
   const entry = ["PAPER_ENTRY", "PAPER_ADD"].includes(risk?.verdict) && payload.action === "BUY";
   const exit = risk?.verdict === "PAPER_EXIT";
   const partialExit = risk?.verdict === "PAPER_PARTIAL_EXIT";
   if (!entry && !exit && !partialExit) return null;
   if (entry && positionPreview?.blocked) return blocked(positionPreview.reason || "주문 조건 불충족");
+  if (entry && !normalizedTimeframe(payload.timeframe)) return blocked("진입 기준 시간봉(4시간/일봉) 확인 필요");
   if (!options.enabled) return blocked(`${options.brokerLabel || "키움"} 모의 자동주문 비활성`);
   if (!["mock", "live"].includes(options.environment)) return blocked("지원하지 않는 계좌 환경");
   const side = entry ? "BUY" : "SELL";
 
   const exchange = String(payload.exchange || "").toUpperCase();
+  if (exchange !== "KRX" && !US_EXCHANGE[exchange]) return blocked(`지원하지 않는 거래소: ${exchange || "없음"}`);
+  const trackedOrders = options.tracker.list?.() || [];
+  if (exit || partialExit || risk?.verdict === "PAPER_ADD" || managedPosition(trackedOrders, payload, options.environment).quantity > 0) {
+    if (!positionPreview?.currentHoldings) {
+      const balance = exchange === "KRX" ? await options.domesticClient.getDomesticBalance()
+        : await options.overseasClient.getUsBalance({ exchange: US_EXCHANGE[exchange] });
+      const holdings = balance.holdings.filter((item: any) => normalizedSymbol(item.code) === normalizedSymbol(payload.ticker));
+      positionPreview = { ...positionPreview, currentHoldings: holdings,
+        currentPositionQuantity: holdings.reduce((sum: number, item: any) => sum + Number(item.quantity || 0), 0) };
+    }
+    positionPreview = scopePositionPreview(record, positionPreview, trackedOrders, options.environment);
+    if (positionPreview?.blocked) return blocked(positionPreview.reason);
+  }
   let client;
   let quantity;
   let order;
@@ -213,8 +229,9 @@ async function submitPaperOrder(record: SignalRecord, options: ExecutorOptions) 
     if (entry) quantity = positionPreview?.quantity;
     else {
       const previewTradable = previewTradableQuantity(positionPreview, payload.ticker);
-      const tradable = previewTradable ?? (await client.getDomesticBalance()).holdings.find((item: any) => item.code.replace(/^A/, "") === payload.ticker)?.tradableQuantity;
-      quantity = partialExit ? partialExitQuantity(tradable, partialExitRatio(record, options)) : tradable;
+      const tradable = previewTradable ?? (await client.getDomesticBalance()).holdings.find((item: any) => normalizedSymbol(item.code) === normalizedSymbol(payload.ticker))?.tradableQuantity;
+      const ownedTradable = Math.min(Number(tradable), Number(positionPreview.managedQuantity));
+      quantity = partialExit ? partialExitQuantity(ownedTradable, partialExitRatio(record, options)) : ownedTradable;
     }
     if (!Number.isInteger(quantity) || quantity < 1) return blocked("주문 가능한 국내주식 수량 없음");
     const session = domesticSession(options.now || new Date());
@@ -236,8 +253,9 @@ async function submitPaperOrder(record: SignalRecord, options: ExecutorOptions) 
     if (entry) quantity = positionPreview?.quantity;
     else {
       const previewTradable = previewTradableQuantity(positionPreview, payload.ticker);
-      const tradable = previewTradable ?? (await client.getUsBalance({ exchange: kiwoomExchange })).holdings.find((item: any) => item.code === payload.ticker)?.tradableQuantity;
-      quantity = partialExit ? partialExitQuantity(tradable, partialExitRatio(record, options)) : tradable;
+      const tradable = previewTradable ?? (await client.getUsBalance({ exchange: kiwoomExchange })).holdings.find((item: any) => normalizedSymbol(item.code) === normalizedSymbol(payload.ticker))?.tradableQuantity;
+      const ownedTradable = Math.min(Number(tradable), Number(positionPreview.managedQuantity));
+      quantity = partialExit ? partialExitQuantity(ownedTradable, partialExitRatio(record, options)) : ownedTradable;
     }
     if (!Number.isInteger(quantity) || quantity < 1) return blocked("주문 가능한 미국주식 수량 없음");
     limitPrice = payload.price;
@@ -265,6 +283,9 @@ async function submitPaperOrder(record: SignalRecord, options: ExecutorOptions) 
     environment: options.environment,
     source: record.source || "TRADINGVIEW", market: exchange, name: payload.name,
     timeframe: payload.timeframe,
+    policyVersion: record.policyVersion || "legacy",
+    sizingContext: { sigmaZ: payload.sb_z_score, heatMultiplier: positionPreview?.heatMultiplier,
+      riskBudget: positionPreview?.riskBudget, entryTimeframe: positionPreview?.entryTimeframe },
     koreanName: payload.koreanName, englishName: payload.englishName,
     signalType: payload.type, signalPrice: record.originalSignalPrice ?? payload.price, executionPrice: payload.price, stopPrice: positionPreview?.stopPrice ?? payload.sl,
     conviction: payload.conviction, requestId: record.requestId,
@@ -284,6 +305,7 @@ async function submitPaperOrder(record: SignalRecord, options: ExecutorOptions) 
     autoCapitalRatio: positionPreview?.autoCapitalRatio,
     preTradePositionValue: positionPreview?.currentPositionValue,
     preTradePositionQuantity: positionPreview?.currentPositionQuantity,
+    preTradeManagedQuantity: positionPreview?.managedQuantity,
     preTradeAverageEntryPrice: positionPreview?.averageEntryPrice,
     currency: positionPreview?.currency || (exchange === "KRX" ? "KRW" : "USD"),
   };

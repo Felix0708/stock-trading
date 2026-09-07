@@ -14,12 +14,12 @@ global.Date = class extends RealDate {
 
 function record(id, action = "BUY") {
   return { requestId: id, receivedAt: new Date().toISOString(),
-    payload: { ticker: "TEST", name: "테스트", exchange: "NASDAQ", action, price: 100, sl: 90, conviction: "B", daily_trend: "BULL", daily_ema_aligned: true, daily_above_200ma: true },
+    payload: { ticker: "TEST", name: "테스트", exchange: "NASDAQ", timeframe: "240", action, price: 100, sl: 90, conviction: "B", daily_trend: "BULL", daily_ema_aligned: true, daily_above_200ma: true },
     outcome: { decision: action === "BUY" ? "ENTRY_CANDIDATE" : "EXIT_IF_FILLED", signal: { signalCode: action === "BUY" ? "ENTRY_STANDARD" : "EXIT_FINAL" } },
     risk: { verdict: action === "BUY" ? "PAPER_ENTRY" : "PAPER_EXIT" } };
 }
 
-function fixture(ids = ["KIS"]) {
+function fixture(ids = ["KIS"], environment = "mock") {
   const receipts = new SignalReceiptStore(null, true);
   const sent = [];
   let discordFails = false;
@@ -38,7 +38,7 @@ function fixture(ids = ["KIS"]) {
       placeUsLimitOrder: async (request) => { state.requests.push(request); if (state.unknown) throw Object.assign(new Error("lost response"), { orderStatusUnknown: true }); return { orderNo: String(state.requests.length), status: "ACCEPTED", symbol: request.symbol, side: request.side }; },
       cancelUsOrder: async () => { state.cancels++; return { status: "CANCEL_REQUESTED", cancellationOrderNo: "c1" }; },
     };
-    return { id, label: id, environment: "mock", tracker, domesticClient: api, overseasClient: api, state };
+    return { id, label: id, environment, tracker, domesticClient: api, overseasClient: api, state };
   });
   const guild = { channels: { fetch: async () => new Map([["order", channel], ["execution", channel], ["system", channel], ["journal", channel]]) } };
   const runtime = createAccountRuntime({ brokers, receipts, client: { guilds: { fetch: async () => guild } },
@@ -94,7 +94,7 @@ function message(r) { return { id: r.requestId, channelId: "signal", author: { i
 
   const exit = fixture(); const b = exit.brokers[0];
   b.state.holdings = [{ code: "TEST", quantity: 2, tradableQuantity: 2, evaluationAmount: 200, purchaseAmount: 180 }];
-  const pendingBuy = { orderNo: "99", market: "NASDAQ", symbol: "TEST", side: "BUY", orderQuantity: 5, filledQuantity: 2, remainingQuantity: 3, status: "PARTIALLY_FILLED" };
+  const pendingBuy = { orderNo: "99", market: "NASDAQ", symbol: "TEST", side: "BUY", entryType: "PAPER_ENTRY", timeframe: "240", fillPrice: 90, orderQuantity: 5, filledQuantity: 2, remainingQuantity: 3, status: "PARTIALLY_FILLED" };
   b.tracker.record(pendingBuy); b.state.executions = [{ ...pendingBuy }];
   await exit.runtime.executeOrDefer(b, record("exit", "SELL"));
   assert.equal(b.state.cancels, 1);
@@ -106,6 +106,48 @@ function message(r) { return { id: r.requestId, channelId: "signal", author: { i
   assert.equal(b.state.requests.length, 1);
   assert.equal(b.state.requests[0].side, "SELL");
   assert.equal(b.state.requests[0].quantity, 2);
+
+  for (const environment of ["mock", "live"]) {
+    for (const id of ["KIWOOM", "KIS"]) {
+      const scoped = fixture([id], environment), broker = scoped.brokers[0];
+      broker.state.holdings = [{ code: "TEST", quantity: 100, tradableQuantity: 100, evaluationAmount: 10000, purchaseAmount: 9000 }];
+      const entry = { orderNo: "owned-entry", requestId: "owned-entry", market: "NASDAQ", symbol: "TEST", side: "BUY", entryType: "PAPER_ENTRY",
+        status: "FILLED", filledQuantity: 10, fillPrice: 100, stopPrice: 90, timeframe: "1D", environment, createdAt: "2026-09-01T00:00:00Z", statusMessageId: "done" };
+      broker.tracker.record(entry);
+      const otherFrame = await scoped.runtime.executeOrDefer(broker, record("other-frame", "SELL"));
+      assert.equal(otherFrame.status, "SKIPPED_TIMEFRAME");
+      assert.equal(broker.state.requests.length, 0);
+      const dailyExit = record("owned-exit", "SELL"); dailyExit.payload.timeframe = "D";
+      await scoped.runtime.executeOrDefer(broker, dailyExit);
+      assert.equal(broker.state.requests[0].quantity, 10); // 90 manual shares are untouched
+      assert.equal(broker.state.orders.find(o => o.requestId === "owned-exit").policyVersion, "2026-09-07-owned-timeframe-v1");
+    }
+  }
+  const unmanaged = fixture();
+  unmanaged.brokers[0].state.holdings = [{ code: "TEST", quantity: 100, tradableQuantity: 100 }];
+  assert.equal((await unmanaged.runtime.executeOrDefer(unmanaged.brokers[0], record("manual-only", "SELL"))).status, "SKIPPED_UNMANAGED_POSITION");
+  assert.equal(unmanaged.brokers[0].state.requests.length, 0);
+  const stopAlert = fixture();
+  stopAlert.brokers[0].state.holdings = [{ code: "TEST", quantity: 10, tradableQuantity: 10 }];
+  stopAlert.brokers[0].tracker.record({ orderNo: "stop-entry", market: "NASDAQ", symbol: "TEST", side: "BUY", entryType: "PAPER_ENTRY", status: "FILLED", filledQuantity: 10, fillPrice: 100, stopPrice: 90, timeframe: "240" });
+  stopAlert.brokers[0].state.price = 80;
+  await stopAlert.runtime.checkManagedStops();
+  assert.equal(stopAlert.brokers[0].state.requests.length, 0);
+  assert.match(JSON.stringify(stopAlert.sent), /손절 기준 이탈/);
+  stopAlert.brokers[0].state.holdings = [];
+  await stopAlert.runtime.checkManagedStops();
+  assert.match(JSON.stringify(stopAlert.sent), /보유 기록 대조 필요/);
+  const unmatchedEntry = await stopAlert.runtime.executeOrDefer(stopAlert.brokers[0], record("unmatched-entry"));
+  assert.equal(unmatchedEntry.status, "BLOCKED");
+  assert.equal(stopAlert.brokers[0].state.requests.length, 0);
+  const frameReservations = fixture();
+  const dayBuy = record("day-reservation"); dayBuy.payload.timeframe = "D";
+  frameReservations.receipts.putDeferred("KIS", dayBuy, 600000);
+  frameReservations.receipts.rememberExit("KIS", record("four-hour-exit", "SELL"));
+  assert.equal(frameReservations.receipts.listDeferred().length, 1);
+  const crashExit = record("crash-exit", "SELL"); crashExit.outcome.signal.signalCode = "EXIT_CRASH";
+  frameReservations.receipts.rememberExit("KIS", crashExit);
+  assert.equal(frameReservations.receipts.listDeferred().length, 0);
 
   const crashed = fixture();
   crashed.receipts.attempt("KIS", record("crash"), "SUBMITTING");
