@@ -80,6 +80,9 @@ const emptyBroker = (id, label): any => ({
   const comparisonCard = formatStrategyComparisonMessage([comparisonBroker, comparisonBroker]);
   assert(JSON.stringify(comparisonCard).length < 6000);
   assert.match(JSON.stringify(comparisonCard), /비용 미확인을 0원으로 보지 않음/);
+  assert.match(comparisonCard.embeds[0].fields[0].value, /^4시간봉/);
+  assert.match(comparisonCard.embeds[0].fields[1].value, /^정석 진입/);
+  assert.match(comparisonCard.embeds[0].fields[0].value, /실현손익 낙폭 \$40/);
   const snapshot = tradingPerformanceSnapshot([{ ...emptyBroker("KIWOOM", "키움"), tracker: { list: () => [
     { environment: "mock", revision: 1, status: "FILLED", side: "SELL", fullExit: true, market: "KRX", symbol: "005930", filledQuantity: 1, fillPrice: 80_000, preTradeAverageEntryPrice: 70_000, updatedAt: "2026-08-04T00:00:00.000Z" },
   ] } }], "2026-08-10T00:00:00.000Z");

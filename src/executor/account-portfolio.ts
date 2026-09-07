@@ -3,6 +3,8 @@
 const { enrichInstrumentNames } = require("../research/instrument-names");
 const { formatMyPortfolioMessage } = require("../research/investor-portfolio");
 const { orderTime, normalizedSymbol, normalizedTimeframe } = require("../trading/position-ownership");
+const { timeframeLabel } = require("../discord/webhook-discord");
+const { SIGNAL_RULES } = require("../signals/signal-normalizer");
 
 function positiveNumber(value) {
   const number = Number(value);
@@ -189,7 +191,7 @@ function formatStrategyComparisonMessage(brokers, signals = {}) {
     const comparison = strategyComparison(broker, signals);
     const fields = Object.entries(dimensions).map(([dimension, label]) => ({ name: label, value: comparison.groups
       .filter(group => group.dimension === dimension).map(group =>
-        `${group.label} · ${group.currency} · ${group.count}건 · 승률 ${percentage(group.winRate)}\n손익 ${money(group.profitLoss, group.currency)} (${percentage(group.returnRate)}) · 실현손익 낙폭 ${group.realizedDrawdown === null ? "시각 미확인" : money(group.realizedDrawdown, group.currency)}\n비용 차감 ${group.netProfitLoss === null ? `미확인 ${group.unknownCosts}건` : `${money(group.netProfitLoss, group.currency)} (${percentage(group.netReturnRate)})`}`
+        `${dimension === "timeframe" ? timeframeLabel(group.label) : dimension === "signalCode" ? SIGNAL_RULES.find(([, code]) => code === group.label)?.[0] || group.label : group.label === "legacy" ? "과거 정책 미확인" : group.label} · ${group.currency} · ${group.count}건 · 승률 ${percentage(group.winRate)}\n손익 ${money(group.profitLoss, group.currency)} (${percentage(group.returnRate)}) · 실현손익 낙폭 ${group.realizedDrawdown === null ? "시각 미확인" : money(group.realizedDrawdown, group.currency).replace(/^\+/, "")}\n비용 차감 ${group.netProfitLoss === null ? `미확인 ${group.unknownCosts}건` : `${money(group.netProfitLoss, group.currency)} (${percentage(group.netReturnRate)})`}`
       ).join("\n") || "비교할 최종청산 표본 없음" }));
     fields.push({ name: "차단 신호 (가상 수익에 합산하지 않음)", value: comparison.blocked.map(row => `${row.label}: ${row.count}건`).join("\n") || "계좌별 차단 기록 없음" });
     return { title: "자동매매 전략 비교", description: `${broker.label} ${broker.environment === "live" ? "실계좌" : "모의계좌"} · 최초 진입 기준 분류 · 승률·수익률은 비용 전`,
