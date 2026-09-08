@@ -134,6 +134,37 @@ async function fakeFetch(url, options) {
   assert.equal((await transientQueryClient.getDomesticBalance()).holdings.length, 0);
   assert.equal(transientQueryCount, 2);
 
+  let gatewayRequests = 0, gatewayAuth = 0;
+  let persistentGateway = false;
+  let gatewayMessage = "Gateway 라우팅 오류가 발생하였습니다.";
+  const gatewayClient = new KisClient({ appKey: "a", appSecret: "b", accountNo: "12345678", requestIntervalMs: 0,
+    fetchImpl: async url => {
+      if (url.endsWith("tokenP")) { gatewayAuth++; return new Response(JSON.stringify({ access_token: "fake", expires_in: 86400 })); }
+      gatewayRequests++;
+      // Synthetic code: production routing errors must be recognized by the observed message, not this code.
+      return new Response(JSON.stringify(gatewayRequests === 1 || persistentGateway
+        ? { rt_cd: "1", msg_cd: "TEST_ROUTING", msg1: gatewayMessage }
+        : { rt_cd: "0", output1: [], output2: [] }), { status: 200 });
+    } });
+  assert.equal((await gatewayClient.getUsBalance()).holdings.length, 0);
+  assert.equal(gatewayRequests, 2);
+  assert.equal(gatewayAuth, 1); // A routing error is not an expired token.
+  persistentGateway = true; gatewayRequests = 0;
+  await assert.rejects(gatewayClient.getUsBalance(), e => !e.orderStatusUnknown && /TEST_ROUTING, HTTP 200/.test(e.message));
+  assert.equal(gatewayRequests, 2); // One bounded read retry, not an unbounded loop.
+  for (const submit of [
+    () => gatewayClient.placeUsLimitOrder({ side: "SELL", exchange: "ND", symbol: "TEST", quantity: 1, price: 100 }),
+    () => gatewayClient.cancelUsOrder({ orderNo: "123", exchange: "ND", symbol: "TEST", quantity: 1 }),
+  ]) {
+    gatewayRequests = 0;
+    await assert.rejects(submit(), e => e.orderStatusUnknown === true);
+    assert.equal(gatewayRequests, 1); // Never replay an order or cancellation after a gateway response.
+  }
+  gatewayMessage = "모의투자 장종료 입니다."; gatewayRequests = 0;
+  await assert.rejects(gatewayClient.getUsBalance(), /모의투자 장종료/);
+  assert.equal(gatewayRequests, 1); // Unrelated business errors are not transient.
+  assert.equal(gatewayAuth, 1);
+
   let uncertainOrderCount = 0;
   const uncertainOrderClient = new KisClient({
     appKey: "a", appSecret: "b", accountNo: "12345678", requestIntervalMs: 0,

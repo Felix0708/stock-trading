@@ -1574,7 +1574,8 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
       let incomplete = false;
       let ownedCount = 0;
       const outageKey = `stop-monitor:${broker.id}:${broker.environment}`;
-      const unresolved = stopMonitorOutages.get(outageKey) || new Set();
+      const incident = stopMonitorOutages.get(outageKey) || { unresolved: new Set(), startedAt: Date.now(), recoveredAt: null, notified: false };
+      const unresolved = incident.unresolved;
       const orders = broker.tracker.list();
       const symbols = new Map(orders.filter(order => order.entryType).map(order => [`${order.market}:${order.symbol}`, order]));
       for (const order of symbols.values() as Iterable<any>) {
@@ -1610,19 +1611,28 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
         } catch (error) { queryError ||= error; unresolved.add(symbolKey); }
       }
       if (queryError) {
-        stopMonitorOutages.set(outageKey, unresolved);
+        if (!stopMonitorOutages.has(outageKey)) console.warn(`${brokerAccountLabel(broker)} 손절 감시 조회 재확인:`, String(queryError.message || queryError).slice(0, 1000));
+        incident.recoveredAt = null;
+        stopMonitorOutages.set(outageKey, incident); // Health becomes unhealthy immediately, independently of Discord debounce.
         // One account outage, not a separate incident for every holding or changing error message.
-        if (errorReportDue(errorReports.get(outageKey))) {
+        if (Date.now() - incident.startedAt >= 60_000 && errorReportDue(errorReports.get(outageKey))) {
           try {
-            await send(channels.system, { text: `⚠️ **${brokerAccountLabel(broker)} 손절 감시 조회 장애**\n일부 또는 전체 보유종목의 잔고·현재가 확인이 중단됐습니다.\n**사유**: ${String(queryError.message || queryError).slice(0, 1000)}\n30초 주기 재확인${broker.id === "KIS" ? " · 인증 재발급 최소 61초 간격" : ""}.\n이 알림은 조회 장애이며 매도 주문 실패가 아닙니다. 복구 확인 후 다시 알립니다.` });
+            await send(channels.system, { text: `⚠️ **${brokerAccountLabel(broker)} 손절 감시 조회 장애**\n일부 또는 전체 보유종목의 잔고·현재가 조회가 1분 이상 안정적으로 복구되지 않았습니다.\n**사유**: ${String(queryError.message || queryError).slice(0, 1000)}\n30초 주기 재확인${broker.id === "KIS" ? " · 인증 재발급 최소 61초 간격" : ""}.\n이 알림은 조회 장애이며 매도 주문 실패가 아닙니다. 연속 정상 조회 확인 후 다시 알립니다.` });
+            incident.notified = true;
             errorReports.set(outageKey, Date.now());
           } catch (error) { console.error("손절 감시 장애 알림 실패:", error.message); }
         }
-      } else if ((checked > 0 || ownedCount === 0) && !incomplete && unresolved.size === 0 && stopMonitorOutages.has(outageKey)) {
+      } else if (stopMonitorOutages.has(outageKey)) {
+        if (checked < ownedCount || incomplete || unresolved.size > 0) { incident.recoveredAt = null; continue; }
+        if (ownedCount) {
+          incident.recoveredAt ??= Date.now();
+          if (Date.now() - incident.recoveredAt < 30_000) continue;
+        }
         try {
-          await send(channels.system, { text: `✅ **${brokerAccountLabel(broker)} 손절 감시 조회 ${ownedCount ? "복구" : "장애 해제"}**\n${ownedCount ? `이번 점검 대상 ${checked}종목의 필요한 잔고·현재가 조회를 확인했습니다.` : "현재 자동매매 관리 보유분이 없어 감시 대상이 해소됐습니다."} 매도 체결이나 증권사 보호주문 등록을 뜻하지 않습니다.` });
+          if (incident.notified) await send(channels.system, { text: `✅ **${brokerAccountLabel(broker)} 손절 감시 조회 ${ownedCount ? "복구" : "장애 해제"}**\n${ownedCount ? `감시 대상 ${checked}종목 전체의 잔고·현재가 조회를 30초 이상 간격의 연속 점검에서 확인했습니다.` : "현재 자동매매 관리 보유분이 없어 감시 대상이 해소됐습니다."} 매도 체결이나 증권사 보호주문 등록을 뜻하지 않습니다.` });
           errorReports.delete(outageKey);
           stopMonitorOutages.delete(outageKey);
+          console.info(`${brokerAccountLabel(broker)} 손절 감시 조회 상태 정상화`);
         } catch (error) { console.error("손절 감시 복구 알림 실패:", error.message); }
       }
     }

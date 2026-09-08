@@ -241,14 +241,17 @@ class KisClient {
           await new Promise((resolve) => setTimeout(resolve, this.rateLimitWaitMs));
           continue;
         }
-        if (retryTransient && !transientRetried && transientHttpStatus(response.status)) {
+        // Gateway failures can arrive as HTTP 200 with a normal KIS error body.
+        // Match the reported routing message, not every business rejection or an assumed msg_cd.
+        const gatewayFailure = result.rt_cd !== "0" && /Gateway\s*라우팅\s*오류/i.test(String(result.msg1 || ""));
+        if (retryTransient && !transientRetried && (transientHttpStatus(response.status) || gatewayFailure)) {
           transientRetried = true;
           await new Promise((resolve) => setTimeout(resolve, response.status === 429 ? this.rateLimitWaitMs : 500));
           continue;
         }
         if (!response.ok || result.rt_cd !== "0") {
-          const message = `한투 ${this.environment === "live" ? "실계좌" : "모의"} API 실패 [${trId}]: ${result.msg1 || `오류 상세 없음 (${result.msg_cd || result.rt_cd}, HTTP ${response.status})`}`;
-          throw !retryTransient && transientHttpStatus(response.status) ? uncertainOrderError(`${message}.`) : new Error(message);
+          const message = `한투 ${this.environment === "live" ? "실계좌" : "모의"} API 실패 [${trId}]: ${result.msg1 || "오류 상세 없음"} (${result.msg_cd || result.rt_cd}, HTTP ${response.status})`;
+          throw !retryTransient && (transientHttpStatus(response.status) || gatewayFailure) ? uncertainOrderError(`${message}.`) : new Error(message);
         }
         Object.defineProperty(result, "continuation", { value: ["M", "F"].includes(response.headers.get("tr_cont") || "") });
         return result;

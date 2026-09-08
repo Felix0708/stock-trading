@@ -263,9 +263,29 @@ function message(r) { return { id: r.requestId, channelId: "signal", author: { i
   const goodBalance = kisApi.getUsBalance;
   kisApi.getUsBalance = async () => { throw new Error(outage); };
   await monitor.runtime.checkManagedStops();
+  assert.equal(monitor.sent.length, 0); // Record immediately, but a single failed sweep is not a Discord incident.
+  kisApi.getUsBalance = goodBalance;
+  clock += 30_000;
+  await monitor.runtime.checkManagedStops();
+  clock += 30_000;
+  await monitor.runtime.checkManagedStops();
+  assert.equal(monitor.sent.length, 0); // Quiet recovery must not produce an orphan recovery notification.
+
+  kisApi.getUsBalance = async () => { throw new Error(outage); };
+  await monitor.runtime.checkManagedStops();
   outage = "1분당 1회";
+  clock += 59_999;
+  await monitor.runtime.checkManagedStops();
+  assert.equal(monitor.sent.length, 0);
+  clock++;
+  monitor.failDiscord(true);
+  await monitor.runtime.checkManagedStops();
+  monitor.failDiscord(false);
+  await monitor.runtime.checkManagedStops();
+  clock += 30_000;
   await monitor.runtime.checkManagedStops();
   assert.equal(monitor.sent.filter(x => /손절 감시 조회 장애/.test(x.content || "")).length, 1);
+  assert(monitor.sent.every(x => !(x.content || "").includes("KIWOOM"))); // Healthy broker stays independent.
   assert(!monitor.sent.some(x => /복구/.test(x.content || "") && (x.content || "").startsWith("✅")));
   const openClock = clock;
   clock = new Date("2026-09-12T14:00:00Z").getTime();
@@ -278,15 +298,42 @@ function message(r) { return { id: r.requestId, channelId: "signal", author: { i
   await monitor.runtime.checkManagedStops();
   assert.equal(monitor.sent.filter(x => (x.content || "").startsWith("✅")).length, 0); // Partial recovery is not recovery.
   kisApi.getUsQuote = goodQuote;
+  clock += 30_000;
+  await monitor.runtime.checkManagedStops();
+  clock += 29_999;
+  await monitor.runtime.checkManagedStops();
+  assert.equal(monitor.sent.filter(x => (x.content || "").startsWith("✅")).length, 0);
+  clock++;
   monitor.failDiscord(true);
   await monitor.runtime.checkManagedStops();
   monitor.failDiscord(false);
   await monitor.runtime.checkManagedStops();
   await monitor.runtime.checkManagedStops();
   assert.equal(monitor.sent.filter(x => /손절 감시 조회 복구/.test(x.content || "")).length, 1);
+
+  // Alternating failure/success must eventually alert, never announce unstable recovery.
   kisApi.getUsBalance = async () => { throw new Error(outage); };
   await monitor.runtime.checkManagedStops();
-  assert.equal(monitor.sent.filter(x => /손절 감시 조회 장애/.test(x.content || "")).length, 2); // A new incident is not suppressed for 30 minutes.
+  kisApi.getUsBalance = goodBalance;
+  clock += 30_000;
+  await monitor.runtime.checkManagedStops();
+  kisApi.getUsBalance = async () => { throw new Error(outage); };
+  clock += 30_000;
+  await monitor.runtime.checkManagedStops();
+  assert.equal(monitor.sent.filter(x => /손절 감시 조회 장애/.test(x.content || "")).length, 2);
+  assert.equal(monitor.sent.filter(x => /손절 감시 조회 복구/.test(x.content || "")).length, 1);
+  clock += 30 * 60_000;
+  await monitor.runtime.checkManagedStops();
+  assert.equal(monitor.sent.filter(x => /손절 감시 조회 장애/.test(x.content || "")).length, 3); // Persistent outages retain reminders.
+  kisApi.getUsBalance = goodBalance;
+  await monitor.runtime.checkManagedStops();
+  monitor.brokers[0].state.holdings = []; // An ownership mismatch cannot count as a second healthy sweep.
+  clock += 30_000;
+  await monitor.runtime.checkManagedStops();
+  assert.equal(monitor.sent.filter(x => /손절 감시 조회 복구/.test(x.content || "")).length, 1);
+  monitor.brokers[0].state.orders = []; // All managed positions gone: no remaining monitor target.
+  await monitor.runtime.checkManagedStops();
+  assert.equal(monitor.sent.filter(x => /손절 감시 조회 장애 해제/.test(x.content || "")).length, 1);
   assert(monitor.brokers.every(b => b.state.requests.length === 0));
   stopAlert.brokers[0].state.holdings = [];
   await stopAlert.runtime.checkManagedStops();
