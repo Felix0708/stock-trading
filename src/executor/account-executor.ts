@@ -964,6 +964,7 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
   const submitting = new Set();
   const brokerCompletedAt = new Map(brokers.map(broker => [broker.id, Date.now()]));
   const scheduled = new Map();
+  const stopMonitorOutages = new Map();
   function brokerWork(broker, task, key = "") {
     const jobKey = `${broker.id}:${key}`;
     if (key && scheduled.has(jobKey)) return scheduled.get(jobKey);
@@ -1568,6 +1569,12 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
 
   async function checkManagedStops(selected = brokers) {
     for (const broker of selected) {
+      let queryError = null;
+      let checked = 0;
+      let incomplete = false;
+      let ownedCount = 0;
+      const outageKey = `stop-monitor:${broker.id}:${broker.environment}`;
+      const unresolved = stopMonitorOutages.get(outageKey) || new Set();
       const orders = broker.tracker.list();
       const symbols = new Map(orders.filter(order => order.entryType).map(order => [`${order.market}:${order.symbol}`, order]));
       for (const order of symbols.values() as Iterable<any>) {
@@ -1581,20 +1588,42 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
         }
         const freshOrders = broker.tracker.list();
         const owned = managedPosition(freshOrders, payload, broker.environment);
-        if (!owned.quantity || shouldDelayOrder({ payload, risk: { verdict: "PAPER_EXIT" } })) continue;
+        const symbolKey = `${order.market}:${order.symbol}`;
+        if (!owned.quantity) { unresolved.delete(symbolKey); continue; }
+        ownedCount++;
+        if (shouldDelayOrder({ payload, risk: { verdict: "PAPER_EXIT" } })) continue;
         try {
           const account = await accountContext(broker, { payload }, maxOpenPositions, { positionOnly: true });
           if (!Number.isInteger(account.currentPositionQuantity) || account.currentPositionQuantity < owned.quantity) {
+            incomplete = true;
             await reportError(`${broker.label} 자동매매 보유 기록 대조 필요`,
               new Error("실제 잔고가 자동매매 기록보다 적습니다. 기록을 임의로 청산 처리하지 않으며 해당 종목 신규 주문을 차단합니다."), { payload });
             continue;
           }
-          if (!(owned.stopPrice > 0)) continue;
+          if (!(owned.stopPrice > 0)) { checked++; unresolved.delete(symbolKey); continue; }
           const price = await currentSignalPrice(broker, payload);
           if (!Number.isFinite(price) || price <= 0) throw new Error("유효한 현재가 없음");
+          checked++;
+          unresolved.delete(symbolKey);
           if (price <= owned.stopPrice) await reportError(`${broker.label} 손절 기준 이탈 · 보유 확인 필요`,
             new Error("저장된 손절 기준 이하입니다. 이 감시는 알림 전용이며 증권사 보호 주문이 아닙니다."), { payload });
-        } catch (error) { await reportError(`${broker.label} 손절 기준 감시 조회 실패`, error, { payload }); }
+        } catch (error) { queryError ||= error; unresolved.add(symbolKey); }
+      }
+      if (queryError) {
+        stopMonitorOutages.set(outageKey, unresolved);
+        // One account outage, not a separate incident for every holding or changing error message.
+        if (errorReportDue(errorReports.get(outageKey))) {
+          try {
+            await send(channels.system, { text: `⚠️ **${brokerAccountLabel(broker)} 손절 감시 조회 장애**\n일부 또는 전체 보유종목의 잔고·현재가 확인이 중단됐습니다.\n**사유**: ${String(queryError.message || queryError).slice(0, 1000)}\n30초 주기 재확인${broker.id === "KIS" ? " · 인증 재발급 최소 61초 간격" : ""}.\n이 알림은 조회 장애이며 매도 주문 실패가 아닙니다. 복구 확인 후 다시 알립니다.` });
+            errorReports.set(outageKey, Date.now());
+          } catch (error) { console.error("손절 감시 장애 알림 실패:", error.message); }
+        }
+      } else if ((checked > 0 || ownedCount === 0) && !incomplete && unresolved.size === 0 && stopMonitorOutages.has(outageKey)) {
+        try {
+          await send(channels.system, { text: `✅ **${brokerAccountLabel(broker)} 손절 감시 조회 ${ownedCount ? "복구" : "장애 해제"}**\n${ownedCount ? `이번 점검 대상 ${checked}종목의 필요한 잔고·현재가 조회를 확인했습니다.` : "현재 자동매매 관리 보유분이 없어 감시 대상이 해소됐습니다."} 매도 체결이나 증권사 보호주문 등록을 뜻하지 않습니다.` });
+          errorReports.delete(outageKey);
+          stopMonitorOutages.delete(outageKey);
+        } catch (error) { console.error("손절 감시 복구 알림 실패:", error.message); }
       }
     }
   }
@@ -1920,6 +1949,7 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
     const publishHealth = () => {
       try {
         writeAccountHealth(receipts.file, { discordReady: client.isReady(), initialized, workerAt,
+          brokerQueriesHealthy: stopMonitorOutages.size === 0,
           uncertainOrders: brokers.some(broker => broker.tracker.list().some(order => order.status === "UNKNOWN"))
             || Object.values(receipts.state.protection || {}).some((intent: any) => intent.status === "UNKNOWN" || (intent.status === "SUBMITTING" && Date.now() - Date.parse(intent.createdAt) > 60_000))
             || Object.entries(receipts.state.attempts).some(([key, attempt]: [string, any]) => attempt.status === "UNKNOWN" || (attempt.status === "SUBMITTING" && !submitting.has(key))) });

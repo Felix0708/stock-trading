@@ -22,6 +22,7 @@ function readAccountHealth(directory = ".runtime", now = Date.now()) {
       const state = JSON.parse(fs.readFileSync(path.join(directory, file), "utf8"));
       return Number.isFinite(state.updatedAt) && now >= state.updatedAt && now - state.updatedAt <= 45_000
         && state.discordReady === true && state.initialized === true && state.uncertainOrders === false
+        && state.brokerQueriesHealthy !== false
         && Number.isFinite(state.workerAt) && now >= state.workerAt && now - state.workerAt <= 180_000;
     } catch { return false; }
   });

@@ -10,7 +10,7 @@ try {
   writeAccountHealth("example-private-receipts.json", healthy, dir, now);
   assert.deepEqual(readAccountHealth(dir, now), { registered: 1, healthy: true });
   assert.equal(readAccountHealth(dir, now + 45_001).healthy, false);
-  for (const failure of [{ discordReady: false }, { initialized: false }, { workerAt: 1 }, { uncertainOrders: true }]) {
+  for (const failure of [{ discordReady: false }, { initialized: false }, { workerAt: 1 }, { uncertainOrders: true }, { brokerQueriesHealthy: false }]) {
     writeAccountHealth("example-private-receipts.json", { ...healthy, ...failure }, dir, now);
     assert.equal(readAccountHealth(dir, now).healthy, false);
   }

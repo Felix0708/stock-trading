@@ -252,6 +252,42 @@ function message(r) { return { id: r.requestId, channelId: "signal", author: { i
   await stopAlert.runtime.checkManagedStops();
   assert.equal(stopAlert.brokers[0].state.requests.length, 0);
   assert.match(JSON.stringify(stopAlert.sent), /손절 기준 이탈/);
+
+  const monitor = fixture(["KIS", "KIWOOM"]);
+  for (const broker of monitor.brokers) {
+    broker.state.holdings = ["TEST", "SECOND"].map(code => ({ code, quantity: 10, tradableQuantity: 10 }));
+    for (const symbol of ["TEST", "SECOND"]) broker.tracker.record({ ...stopAlert.brokers[0].tracker.list()[0], orderNo: symbol, symbol });
+  }
+  let outage = "유효하지 않은 AppKey입니다.";
+  const kisApi = monitor.brokers[0].overseasClient;
+  const goodBalance = kisApi.getUsBalance;
+  kisApi.getUsBalance = async () => { throw new Error(outage); };
+  await monitor.runtime.checkManagedStops();
+  outage = "1분당 1회";
+  await monitor.runtime.checkManagedStops();
+  assert.equal(monitor.sent.filter(x => /손절 감시 조회 장애/.test(x.content || "")).length, 1);
+  assert(!monitor.sent.some(x => /복구/.test(x.content || "") && (x.content || "").startsWith("✅")));
+  const openClock = clock;
+  clock = new Date("2026-09-12T14:00:00Z").getTime();
+  await monitor.runtime.checkManagedStops();
+  assert.equal(monitor.sent.filter(x => (x.content || "").startsWith("✅")).length, 0); // A skipped weekend cycle is not recovery.
+  clock = openClock;
+  kisApi.getUsBalance = goodBalance;
+  const goodQuote = kisApi.getUsQuote;
+  kisApi.getUsQuote = async ({ symbol }: any = {}) => { if (symbol === "SECOND") throw new Error("quote offline"); return { currentPrice: 120 }; };
+  await monitor.runtime.checkManagedStops();
+  assert.equal(monitor.sent.filter(x => (x.content || "").startsWith("✅")).length, 0); // Partial recovery is not recovery.
+  kisApi.getUsQuote = goodQuote;
+  monitor.failDiscord(true);
+  await monitor.runtime.checkManagedStops();
+  monitor.failDiscord(false);
+  await monitor.runtime.checkManagedStops();
+  await monitor.runtime.checkManagedStops();
+  assert.equal(monitor.sent.filter(x => /손절 감시 조회 복구/.test(x.content || "")).length, 1);
+  kisApi.getUsBalance = async () => { throw new Error(outage); };
+  await monitor.runtime.checkManagedStops();
+  assert.equal(monitor.sent.filter(x => /손절 감시 조회 장애/.test(x.content || "")).length, 2); // A new incident is not suppressed for 30 minutes.
+  assert(monitor.brokers.every(b => b.state.requests.length === 0));
   stopAlert.brokers[0].state.holdings = [];
   await stopAlert.runtime.checkManagedStops();
   assert.match(JSON.stringify(stopAlert.sent), /보유 기록 대조 필요/);

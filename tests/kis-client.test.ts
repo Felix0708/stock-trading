@@ -96,6 +96,7 @@ async function fakeFetch(url, options) {
         return new Response(JSON.stringify({ access_token: `token-${authCount}`, expires_in: 86400 }));
       }
       requestCount += 1;
+      if (requestCount === 1) refreshClient.tokenRetryAt = Date.now() - 1; // Issuance was more than 61 seconds ago.
       refreshedHeaders.push(options.headers.authorization);
       return new Response(JSON.stringify(requestCount === 1
         ? { rt_cd: "1", msg_cd: "EGW00123", msg1: "기간이 만료된 token 입니다." }
@@ -148,8 +149,59 @@ async function fakeFetch(url, options) {
   );
   assert.equal(uncertainOrderCount, 1);
 
+  for (const malformed of ["", "{}", "null", "<html>gateway</html>"]) {
+    let queries = 0;
+    const malformedClient = new KisClient({ appKey: "a", appSecret: "b", accountNo: "12345678", requestIntervalMs: 0,
+      fetchImpl: async url => {
+        if (url.endsWith("tokenP")) return new Response(JSON.stringify({ access_token: "fake", expires_in: 86400 }));
+        queries++;
+        return new Response(queries === 1 ? malformed : JSON.stringify({ rt_cd: "0", output1: [], output2: [] }));
+      } });
+    assert.equal((await malformedClient.getUsBalance()).holdings.length, 0);
+    assert.equal(queries, 2);
+    queries = 0;
+    await assert.rejects(malformedClient.placeUsLimitOrder({ side: "BUY", exchange: "ND", symbol: "TEST", quantity: 1, price: 100 }), e => e.orderStatusUnknown === true);
+    assert.equal(queries, 1); // A malformed acknowledgement must never trigger another order.
+  }
+  let emptyResponses = 0;
+  const emptyClient = new KisClient({ appKey: "a", appSecret: "b", accountNo: "12345678", requestIntervalMs: 0,
+    fetchImpl: async url => {
+      if (url.endsWith("tokenP")) return new Response(JSON.stringify({ access_token: "fake", expires_in: 86400 }));
+      emptyResponses++; return new Response("{}");
+    } });
+  await assert.rejects(emptyClient.getUsBalance(), /처리 결과\(rt_cd\)가 없습니다/);
+  assert.equal(emptyResponses, 2);
+
   const tokenDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "kis-token-cache-"));
   try {
+    const realNow = Date.now;
+    let now = realNow();
+    Date.now = () => now;
+    try {
+      let attempts = 0;
+      let fail = true;
+      const options = { appKey: "retry-app", appSecret: "retry-secret", accountNo: "12345678", requestIntervalMs: 0,
+        tokenCacheFile: path.join(tokenDirectory, "cooldown.json"), fetchImpl: async url => {
+          assert(url.endsWith("tokenP")); // All requests stop before the account/order endpoint while auth is unavailable.
+          attempts++;
+          return new Response(JSON.stringify(fail ? { error_description: "유효하지 않은 AppKey입니다." } : { access_token: "recovered", expires_in: 86400 }), { status: fail ? 403 : 200 });
+        } };
+      const limited = new KisClient(options);
+      const pending = await Promise.allSettled([limited.accessToken(), limited.accessToken(), limited.getUsBalance()]);
+      assert(pending.every(result => result.status === "rejected" && result.reason.accountVerificationFailed === true));
+      assert.equal(attempts, 1);
+      await assert.rejects(limited.placeUsLimitOrder({ side: "BUY", exchange: "ND", symbol: "TEST", quantity: 1, price: 100 }), e => e.accountVerificationFailed && !e.orderStatusUnknown);
+      const restarted = new KisClient(options);
+      now += 60_999;
+      await assert.rejects(restarted.accessToken(), e => e.retryAfterMs === 1);
+      assert.equal(attempts, 1);
+      now++; fail = false;
+      assert.deepEqual(await Promise.all([restarted.accessToken(), restarted.accessToken()]), ["recovered", "recovered"]);
+      assert.equal(attempts, 2);
+      assert.equal(await new KisClient(options).accessToken(), "recovered");
+      assert.equal(attempts, 2);
+      assert.equal(fs.statSync(options.tokenCacheFile).mode & 0o777, 0o600);
+    } finally { Date.now = realNow; }
     const tokenCacheFile = path.join(tokenDirectory, "token.json");
     let cachedAuthCount = 0;
     const cachedFetch = async () => {

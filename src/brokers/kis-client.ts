@@ -56,6 +56,9 @@ class KisClient {
   token: string | null;
   tokenExpiresAt: number;
   tokenCacheFile: string;
+  tokenRequest: Promise<string> | null = null;
+  tokenRetryAt = 0;
+  tokenError: Error | null = null;
 
   constructor(options: Record<string, any> = {}) {
     const environment = options.environment || "mock";
@@ -88,9 +91,11 @@ class KisClient {
   }
 
   async accessToken() {
-    if (!this.token && this.tokenCacheFile && fs.existsSync(this.tokenCacheFile)) {
+    if (this.tokenRequest) return this.tokenRequest;
+    if ((!this.token || Date.now() >= this.tokenExpiresAt) && this.tokenCacheFile && fs.existsSync(this.tokenCacheFile)) {
       try {
         const cached = JSON.parse(fs.readFileSync(this.tokenCacheFile, "utf8"));
+        if (Number.isFinite(cached.retryAt)) this.tokenRetryAt = Math.max(this.tokenRetryAt, cached.retryAt);
         if (typeof cached.token === "string" && Number(cached.expiresAt) > Date.now() + 60_000) {
           this.token = cached.token;
           this.tokenExpiresAt = Number(cached.expiresAt);
@@ -100,7 +105,33 @@ class KisClient {
       }
     }
     if (this.token && Date.now() < this.tokenExpiresAt) return this.token;
+    if (Date.now() < this.tokenRetryAt) {
+      throw Object.assign(new Error(this.tokenError?.message || "한투 인증 재발급 대기 · 1분당 1회 제한 보호"), {
+        accountVerificationFailed: true, retryAfterMs: this.tokenRetryAt - Date.now(),
+      });
+    }
+    this.tokenRetryAt = Date.now() + 61_000;
+    this.tokenRequest = this.issueAccessToken().catch(error => {
+      this.tokenRetryAt = Math.max(this.tokenRetryAt, Date.now() + 61_000);
+      this.tokenError = error instanceof Error ? error : new Error(String(error));
+      this.writeTokenCache();
+      throw Object.assign(this.tokenError, { accountVerificationFailed: true, retryAfterMs: this.tokenRetryAt - Date.now() });
+    }).finally(() => { this.tokenRequest = null; });
+    return this.tokenRequest;
+  }
+
+  writeTokenCache() {
+    if (!this.tokenCacheFile) return;
+    const temporary = `${this.tokenCacheFile}.tmp`;
+    fs.writeFileSync(temporary, `${JSON.stringify({ token: this.token, expiresAt: this.tokenExpiresAt, retryAt: this.tokenRetryAt })}\n`, { mode: 0o600 });
+    fs.renameSync(temporary, this.tokenCacheFile);
+  }
+
+  async issueAccessToken() {
+    // Preserve issuance cooldown across restarts; a failed authentication is not an order submission.
+    this.writeTokenCache();
     let response;
+    let text;
     try {
       response = await this.fetch(`${this.baseUrl}/oauth2/tokenP`, {
         method: "POST",
@@ -108,25 +139,25 @@ class KisClient {
         body: JSON.stringify({ grant_type: "client_credentials", appkey: this.appKey, appsecret: this.appSecret }),
         signal: AbortSignal.timeout(this.timeoutMs),
       });
+      text = await response.text();
     } catch (error) {
       throw new Error(`한투 ${this.environment === "live" ? "실계좌" : "모의"} 인증 통신 실패: ${error instanceof Error ? error.message : String(error)}`);
     }
-    const text = await response.text();
     let result;
     try {
       result = text ? JSON.parse(text) : {};
     } catch {
       throw new Error(`한투 ${this.environment === "live" ? "실계좌" : "모의"} 인증 응답이 JSON이 아닙니다. (HTTP ${response.status})`);
     }
-    if (!response.ok || !result.access_token) throw new Error(`한투 ${this.environment === "live" ? "실계좌" : "모의"} 인증 실패: ${result.error_description || result.msg1 || response.status}`);
-    this.token = result.access_token;
-    this.tokenExpiresAt = Date.now() + Math.max(60, number(result.expires_in) - 60) * 1_000;
-    if (this.tokenCacheFile) {
-      const temporary = `${this.tokenCacheFile}.tmp`;
-      fs.writeFileSync(temporary, `${JSON.stringify({ token: this.token, expiresAt: this.tokenExpiresAt })}\n`, { mode: 0o600 });
-      fs.renameSync(temporary, this.tokenCacheFile);
+    if (!response.ok || typeof result?.access_token !== "string" || !result.access_token || number(result.expires_in) <= 60) {
+      throw new Error(`한투 ${this.environment === "live" ? "실계좌" : "모의"} 인증 실패: ${result?.error_description || result?.msg1 || `유효한 토큰·유효기간 없음 (HTTP ${response.status})`}`);
     }
-    return this.token;
+    const token: string = result.access_token;
+    this.token = token;
+    this.tokenExpiresAt = Date.now() + Math.max(60, number(result.expires_in) - 60) * 1_000;
+    this.tokenError = null;
+    this.writeTokenCache();
+    return token;
   }
 
   async request(path: string, { method = "GET", trId, params, body, retryTransient = method === "GET", canSubmit, trCont = "" }: any = {}): Promise<any> {
@@ -170,13 +201,18 @@ class KisClient {
         }
         let text;
         try { text = await response.text(); } catch (error) {
+          if (retryTransient && !transientRetried) {
+            transientRetried = true;
+            await new Promise(resolve => setTimeout(resolve, 500));
+            continue;
+          }
           throw retryTransient ? error : uncertainOrderError("한투 주문 응답 본문 수신 중 통신이 끊겼습니다.");
         }
         let result;
         try {
           result = text ? JSON.parse(text) : {};
         } catch {
-          if (retryTransient && !transientRetried && transientHttpStatus(response.status)) {
+          if (retryTransient && !transientRetried) {
             transientRetried = true;
             await new Promise((resolve) => setTimeout(resolve, 500));
             continue;
@@ -184,11 +220,20 @@ class KisClient {
           const message = `한투 ${this.environment === "live" ? "실계좌" : "모의"} 응답이 JSON이 아닙니다 [${trId}] (HTTP ${response.status}).`;
           throw retryTransient ? new Error(message) : uncertainOrderError(message);
         }
+        if (!result || typeof result !== "object" || typeof result.rt_cd !== "string" || !result.rt_cd) {
+          if (retryTransient && !transientRetried) {
+            transientRetried = true;
+            await new Promise(resolve => setTimeout(resolve, 500));
+            continue;
+          }
+          const message = `한투 응답에 처리 결과(rt_cd)가 없습니다 [${trId}] (HTTP ${response.status}).`;
+          throw retryTransient ? new Error(message) : uncertainOrderError(message);
+        }
         if (!authorizationRetried && result.msg_cd === "EGW00123") {
           authorizationRetried = true;
           this.token = null;
           this.tokenExpiresAt = 0;
-          if (this.tokenCacheFile) fs.rmSync(this.tokenCacheFile, { force: true });
+          this.writeTokenCache();
           continue;
         }
         if (!rateLimitRetried && result.msg_cd === "EGW00201") {
@@ -202,7 +247,7 @@ class KisClient {
           continue;
         }
         if (!response.ok || result.rt_cd !== "0") {
-          const message = `한투 ${this.environment === "live" ? "실계좌" : "모의"} API 실패 [${trId}]: ${result.msg1 || response.status}`;
+          const message = `한투 ${this.environment === "live" ? "실계좌" : "모의"} API 실패 [${trId}]: ${result.msg1 || `오류 상세 없음 (${result.msg_cd || result.rt_cd}, HTTP ${response.status})`}`;
           throw !retryTransient && transientHttpStatus(response.status) ? uncertainOrderError(`${message}.`) : new Error(message);
         }
         Object.defineProperty(result, "continuation", { value: ["M", "F"].includes(response.headers.get("tr_cont") || "") });
