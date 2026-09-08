@@ -1091,9 +1091,9 @@ function formatInstrumentGroups(items) {
         const rows = countryItems
           .filter((item) => (item.category || inferWatchlistCategory(item)) === category)
           .sort((left, right) => left.ticker.localeCompare(right.ticker));
-        return rows.length ? [`**${category} (${rows.length})**`, ...rows.map((item) => `- ${formatInstrumentLabel(item)}`)] : [];
+        return rows.length ? [`**${category} (${rows.length})**\n\n${rows.map((item) => `- ${formatInstrumentLabel(item)}`).join("\n")}`] : [];
       }),
-    ].join("\n");
+    ].join("\n\n");
   }).join("\n\n");
 }
 
@@ -1135,8 +1135,10 @@ function formatEarningsCalendar(items, updatedAt = new Date()) {
   const clock = zonedClock(updatedAt, ALERTS_SYNC_TIMEZONE);
   return [
     `📅 **알람 종목 어닝 캘린더 (${items.length})**`,
+    "",
     ...scheduled.map(({ item, schedule }) => `- ${schedule.date} · ${dDay(schedule.days)} · ${formatInstrumentLabel(item)}`),
-    ...(unknown.length ? ["**일정 미확인**", ...unknown.map(({ item }) => `- ${formatInstrumentLabel(item)}`)] : []),
+    ...(unknown.length ? ["", "**일정 미확인**", "", ...unknown.map(({ item }) => `- ${formatInstrumentLabel(item)}`)] : []),
+    "",
     "※ TradingView 제공 다음 실적발표일이며 예상일은 변경될 수 있습니다. 자동 주문 조건에는 사용하지 않습니다.",
     `마지막 갱신: ${clock.date} ${clock.time} KST`,
   ].join("\n");
@@ -2808,10 +2810,12 @@ function selfTest() {
   ], new Date("2026-08-10T00:00:00Z"));
   if (!groupedWatchlist.includes("🇰🇷 **한국 (1)**") || !groupedWatchlist.includes("**하드웨어 (1)**")
       || !groupedWatchlist.includes("🇯🇵 **일본 (1)**") || !groupedWatchlist.includes("**ETF (1)**")) throw new Error("관심종목 국가·분류 목록 실패");
+  if (!groupedWatchlist.includes("**하드웨어 (1)**\n\n- 삼성전자 (005930)")) throw new Error("관심종목 분야·종목 줄 분리 실패");
   const alertItems = parseConfiguredAlerts("KRX:005930=삼성전자,NASDAQ:NVDA=NVIDIA");
   if (alertItems.length !== 2 || alertItems[0].ticker !== "005930") throw new Error("알람설정 파서 실패");
   const alertRegistry = formatAlertRegistry(alertItems, new Date("2026-08-10T00:00:00Z"));
   if (!alertRegistry.includes("삼성전자 (005930)") || !alertRegistry.includes("Any alert() function call") || !alertRegistry.includes("4시간봉·일봉")) throw new Error("알람설정 목록 실패");
+  if (!alertRegistry.includes("**기타 (1)**\n\n- 삼성전자 (005930)")) throw new Error("알람설정 분야·종목 줄 분리 실패");
   const overseasOnlyAlerts = formatAlertRegistry(parseConfiguredAlerts("NASDAQ:NVDA=NVIDIA"));
   if (overseasOnlyAlerts.includes("국내 (0)") || !overseasOnlyAlerts.includes("미국 (1)")) throw new Error("알람설정 빈 국내 목록 숨김 실패");
   const earningsCalendar = formatEarningsCalendar([
@@ -2822,6 +2826,8 @@ function selfTest() {
       || !earningsCalendar.includes("일정 미확인") || !earningsCalendar.includes("자동 주문 조건에는 사용하지 않습니다")) {
     throw new Error("어닝 캘린더 형식 실패");
   }
+  if (!earningsCalendar.includes("**알람 종목 어닝 캘린더 (2)**\n\n-")
+      || !earningsCalendar.includes("**일정 미확인**\n\n- 메타 플랫폼스 (META)")) throw new Error("어닝 캘린더 제목·종목 줄 분리 실패");
   if (!isAlertRegistryQuestion("지금 알람 설정된 종목 뭐야?") || isAlertRegistryQuestion("오늘 시장 어때?")) throw new Error("알람설정 질문 식별 실패");
   const tunnel = activeNgrokTunnel({ tunnels: [{ proto: "https", public_url: "https://example.ngrok.app", config: { addr: "http://localhost:8787" } }] });
   if (tunnel?.public_url !== "https://example.ngrok.app"
