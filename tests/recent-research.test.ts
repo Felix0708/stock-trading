@@ -48,6 +48,53 @@ try {
     "![symlink](<escape.jpg>)", "![directory](<directory.jpg>)", "![missing](<missing.jpg>)",
   ].join("\n") }] }));
   assert.deepEqual(loadRecentResearch({ directory: research }).images, [fs.realpathSync(inside)]);
+
+  // Exercise the real compiler/cache flow without requiring Swift or PDFKit in CI.
+  const checkout = path.join(root, "Stock-Trading");
+  const cache = path.join(checkout, ".research-cache");
+  const binary = path.join(cache, "pdf-ocr");
+  const pdfs = path.join(checkout, "pdfs");
+  fs.mkdirSync(path.join(checkout, "scripts"), { recursive: true });
+  fs.mkdirSync(path.join(cache, "swift-cache"), { recursive: true });
+  fs.mkdirSync(pdfs);
+  fs.writeFileSync(path.join(checkout, "scripts", "pdf-ocr.swift"), "fixture");
+  fs.writeFileSync(path.join(cache, "swift-cache", "old-path.pcm"), "stale lowercase checkout path");
+  fs.writeFileSync(path.join(pdfs, "report.pdf"), "fixture");
+  const moduleCaches = [];
+  let failCompile = false;
+  const isolated = { exports: {} as any };
+  require("node:vm").runInNewContext(fs.readFileSync(require.resolve("../src/research/recent-research"), "utf8"), {
+    __dirname: path.join(checkout, "src", "research"),
+    module: isolated,
+    process: { env: {} },
+    require: (name) => name === "node:child_process" ? { spawnSync: (command, args) => {
+      if (command === "/usr/bin/swiftc") {
+        const modules = args[args.indexOf("-module-cache-path") + 1];
+        moduleCaches.push(modules);
+        assert.equal(fs.existsSync(modules), false);
+        assert.equal(path.basename(modules), "modules");
+        assert.ok(path.basename(path.dirname(modules)).startsWith("swift-build-"));
+        if (failCompile) return { status: 1, stderr: "compiler unavailable" };
+        fs.writeFileSync(args[args.indexOf("-o") + 1], "compiled binary");
+        return { status: 0 };
+      }
+      assert.equal(command, binary);
+      return { status: 0, stdout: "--- page 1 ---\n확인된 PDF 본문" };
+    } } : require(name),
+  });
+  const readPdf = (maxPages) => isolated.exports.loadRecentResearch({ directory: pdfs, maxPages, maxImages: 0 });
+  assert.equal(readPdf(5).files[0].readable, true);
+  assert.equal(readPdf(5).files[0].readable, true);
+  assert.equal(moduleCaches.length, 1, "successful text cache should be reused");
+  fs.utimesSync(binary, new Date(0), new Date(0));
+  failCompile = true;
+  assert.equal(readPdf(6).files[0].readable, false);
+  assert.equal(fs.readFileSync(binary, "utf8"), "compiled binary", "failed compile must preserve the old binary");
+  failCompile = false;
+  assert.equal(readPdf(6).files[0].readable, true, "failed extraction must remain retryable");
+  assert.equal(new Set(moduleCaches).size, 3, "each compile needs a fresh module cache");
+  for (const modules of moduleCaches) assert.equal(fs.existsSync(path.dirname(modules)), false);
+  assert.equal(fs.existsSync(path.join(cache, "swift-cache", "old-path.pcm")), true, "legacy cache is left untouched");
   console.log("recent-research test OK");
 } finally {
   fs.rmSync(root, { recursive: true, force: true });

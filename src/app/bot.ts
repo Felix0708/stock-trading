@@ -506,7 +506,7 @@ function webhookAge(receivedAt, now = Date.now()) {
   return `${Math.floor(hours / 24)}일 전`;
 }
 
-function buildStoredWebhookContext(topic, jsonl, now = Date.now()) {
+function buildStoredWebhookContext(topic, jsonl, now = Date.now(), recentSignals = false) {
   const records = String(jsonl || "").split("\n").flatMap((line) => {
     try { return line.trim() ? [JSON.parse(line)] : []; }
     catch { return []; }
@@ -519,10 +519,10 @@ function buildStoredWebhookContext(topic, jsonl, now = Date.now()) {
   const normalizedTopic = normalizeName(topic);
   const isWatchlistQuestion = normalizedTopic.includes("워치리스트") || normalizedTopic.includes("관심종목");
   let selected = [];
-  if (isWatchlistQuestion) {
+  if (recentSignals || isWatchlistQuestion) {
     const seen = new Set();
     selected = records.filter((record) => {
-      const key = `${record.payload.exchange}:${record.payload.ticker}`;
+      const key = `${record.payload.exchange}:${record.payload.ticker}${recentSignals ? `:${record.payload.timeframe}` : ""}`;
       if (seen.has(key)) return false;
       seen.add(key);
       return true;
@@ -548,17 +548,27 @@ function buildStoredWebhookContext(topic, jsonl, now = Date.now()) {
     }).slice(0, 10);
   }
 
+  const coverage = records.length
+    ? `저장된 유효한 실제 웹훅: ${records.length}건. 전체 마지막 수신=${records[0].receivedAt} (${webhookAge(records[0].receivedAt, now)}).`
+    : "저장된 유효한 실제 웹훅: 0건. 테스트·검증 실패 기록은 제외했습니다.";
   if (!selected.length) return [
-    "TradingView 저장 지표 조회 결과: 질문과 일치하는 유효한 실제 웹훅 기록이 없습니다.",
+    coverage,
+    records.length
+      ? "질문에 나온 종목과 일치하는 기록만 없습니다. 이를 전체 웹훅 미수신이나 시스템 연결 장애로 표현하지 마세요."
+      : "현재 저장 로그에서 참고 가능한 실제 신호를 찾지 못했습니다. 이것만으로 연결 장애라고 단정하지 마세요.",
     "Lazy Alpha의 현재 상태를 추측하지 말고, 공개 웹 검색으로 확인 가능한 종목·시장 정보만 토론하세요.",
   ].join("\n");
 
-  const title = isWatchlistQuestion
+  const title = recentSignals
+    ? "시장 브리핑용 최근 실제 신호입니다. ETF 이름으로 제한하지 않고 종목·타임프레임별 마지막 기록을 최대 20건 제공합니다."
+    : isWatchlistQuestion
     ? "최근 웹훅을 받은 종목별 마지막 지표입니다. TradingView 워치리스트 전체 목록은 아닙니다."
     : "질문 종목의 마지막 TradingView 웹훅 지표입니다.";
   return [
     title,
+    coverage,
     "이 값은 실시간 조회가 아니라 마지막 수신 상태입니다. 수신 시각과 경과시간을 밝히고 현재 상태처럼 단정하지 마세요.",
+    "웹훅 신호는 계좌 보유·주문 접수·체결의 증거가 아닙니다. 오래된 신호를 현재 매매 지시로 해석하지 마세요.",
     ...selected.map((record) => {
       const payload = record.payload;
       const signal = record.outcome?.signal || {};
@@ -574,13 +584,13 @@ function buildStoredWebhookContext(topic, jsonl, now = Date.now()) {
   ].join("\n\n");
 }
 
-function loadStoredWebhookContext(topic) {
+function loadStoredWebhookContext(topic, recentSignals = false) {
   // ponytail: 현재 알림량에서는 전체 로그 읽기가 가장 단순하다. 느려질 때만 종목별 인덱스를 추가한다.
   try {
-    return buildStoredWebhookContext(topic, fs.readFileSync(path.resolve(ROOT, WEBHOOK_LOG_FILE), "utf8"));
+    return buildStoredWebhookContext(topic, fs.readFileSync(path.resolve(ROOT, WEBHOOK_LOG_FILE), "utf8"), Date.now(), recentSignals);
   } catch (error) {
     if (error.code !== "ENOENT") console.warn("저장된 TradingView 지표를 읽지 못했습니다:", error.message);
-    return buildStoredWebhookContext(topic, "");
+    return "TradingView 저장 로그 조회 실패: 수신 기록을 확인하지 못했습니다. 이를 기록 0건·미수신·미보유로 해석하지 말고 지표 상태는 확인 불가로 표시하세요.";
   }
 }
 
@@ -785,12 +795,12 @@ async function currentQuoteContext(text, instruments = findWatchlistInstruments(
   ].join("\n");
 }
 
-async function currentMarketContext(text) {
+async function currentMarketContext(text, recentSignals = false) {
   const instruments = findWatchlistInstruments(text);
-  if (!instruments.length) return "";
+  if (!instruments.length && !recentSignals) return "";
   return [
     await currentQuoteContext(text, instruments),
-    loadStoredWebhookContext(text),
+    loadStoredWebhookContext(text, recentSignals),
     "TradingView 기록의 SL은 마지막 지표가 제시한 무효화 참고선입니다. 정확한 별도 베이스 저점이 없더라도 사용자에게 같은 자료를 다시 요구하지 말고, 확인 가능한 현재가·당일 고저·마지막 신호·SL로 조건을 나눠 답하세요.",
   ].filter(Boolean).join("\n\n");
 }
@@ -799,11 +809,12 @@ async function runGroupDiscussion(message, topic, {
   includeResearch = false,
   includeResearchImages = true,
   dedupeResearch = false,
+  recentSignals = false,
   participants = PERSONAS,
 } = {}) {
   const version = conversationVersion(message.channel.id);
   groupDiscussionChannels.add(message.channel.id);
-  const marketContext = await currentMarketContext(topic);
+  const marketContext = await currentMarketContext(topic, recentSignals);
   let research = { files: [], context: "", images: [] };
   if (includeResearch && process.env.RESEARCH_ENABLED === "true") {
     const reviewedIds = dedupeResearch ? Object.keys(state.reviewedResearch) : [];
@@ -2232,6 +2243,7 @@ async function checkScheduledBriefing(now = new Date(), forceTime = "") {
         includeResearch: true,
         includeResearchImages: false,
         dedupeResearch: true,
+        recentSignals: true,
         participants: [PERSONAS[0]],
       },
     );
@@ -2935,8 +2947,17 @@ function selfTest() {
   if (!webhookContext.includes("AAPL") || !webhookContext.includes("2시간 전") || webhookContext.includes("005930")) throw new Error("저장 웹훅 토론 문맥 실패");
   const multiWebhookContext = buildStoredWebhookContext("AAPL과 NVDA 비교해줘", webhookSample, Date.parse("2026-08-10T02:00:00.000Z"));
   if (!multiWebhookContext.includes("AAPL") || !multiWebhookContext.includes("NVDA")) throw new Error("복수 종목 저장 웹훅 문맥 실패");
-  if (!buildStoredWebhookContext("삼성전자 어때?", webhookSample).includes("기록이 없습니다")) throw new Error("테스트 웹훅 제외 실패");
+  if (!buildStoredWebhookContext("삼성전자 어때?", webhookSample).includes("일치하는 기록만 없습니다")) throw new Error("테스트 웹훅 제외 실패");
   if (!buildStoredWebhookContext("워치리스트 점검", webhookSample).includes("AAPL")) throw new Error("워치리스트 최근 웹훅 문맥 실패");
+  const unmatchedWebhookContext = buildStoredWebhookContext("SPY QQQ IWM SOXX 미국장 브리핑", webhookSample);
+  if (!unmatchedWebhookContext.includes("실제 웹훅: 2건") || !unmatchedWebhookContext.includes("일치하는 기록만 없습니다")) throw new Error("종목 미일치와 전체 웹훅 미수신 구분 실패");
+  const briefingWebhooks = `${webhookSample}\n${JSON.stringify({ receivedAt: "2026-08-10T00:40:00.000Z", validation: { ok: true }, payload: { ticker: "AAPL", name: "Apple Inc", exchange: "NASDAQ", timeframe: "1D", action: "CHECK", type: "일봉 관찰" } })}`;
+  const recentWebhookContext = buildStoredWebhookContext("SPY QQQ IWM SOXX 미국장 브리핑", briefingWebhooks, Date.parse("2026-08-14T02:00:00.000Z"), true);
+  if (!recentWebhookContext.includes("실제 웹훅: 3건") || !recentWebhookContext.includes("NVDA")
+      || !recentWebhookContext.includes("타임프레임=240") || !recentWebhookContext.includes("타임프레임=1D")
+      || !recentWebhookContext.includes("4일 전") || recentWebhookContext.includes("005930")
+      || !recentWebhookContext.includes("체결의 증거가 아닙니다")) throw new Error("브리핑 최근 신호·타임프레임·시각 문맥 실패");
+  if (!buildStoredWebhookContext("시장 브리핑", "깨진 JSON", Date.now(), true).includes("실제 웹훅: 0건")) throw new Error("빈 웹훅 로그 표시 실패");
   const originalWatchlist = state.watchlist;
   const originalAlertRegistry = state.alertRegistry;
   state.watchlist = {

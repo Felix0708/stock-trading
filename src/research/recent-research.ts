@@ -42,12 +42,20 @@ function recentPdfFiles({ directory, now = Date.now(), lookbackDays = 7, maxFile
 function ensureOcrBinary() {
   fs.mkdirSync(CACHE_DIR, { recursive: true });
   if (fs.existsSync(OCR_BINARY) && fs.statSync(OCR_BINARY).mtimeMs >= fs.statSync(OCR_SOURCE).mtimeMs) return;
-  const result = spawnSync("/usr/bin/swiftc", [
-    "-module-cache-path", path.join(CACHE_DIR, "swift-cache"),
-    OCR_SOURCE,
-    "-o", OCR_BINARY,
-  ], { encoding: "utf8", timeout: 120_000, maxBuffer: 4 * 1024 * 1024 });
-  if (result.status !== 0) throw new Error(result.stderr.trim() || "PDF OCR 도구 컴파일 실패");
+  // Swift module caches contain absolute paths; never reuse them after a checkout move or case change.
+  const buildDir = fs.mkdtempSync(path.join(CACHE_DIR, "swift-build-"));
+  try {
+    const binary = path.join(buildDir, "pdf-ocr");
+    const result = spawnSync("/usr/bin/swiftc", [
+      "-module-cache-path", path.join(buildDir, "modules"),
+      OCR_SOURCE,
+      "-o", binary,
+    ], { encoding: "utf8", timeout: 120_000, maxBuffer: 4 * 1024 * 1024 });
+    if (result.status !== 0) throw new Error(result.stderr?.trim() || result.error?.message || "PDF OCR 도구 컴파일 실패");
+    fs.renameSync(binary, OCR_BINARY);
+  } finally {
+    fs.rmSync(buildDir, { recursive: true, force: true });
+  }
 }
 
 function extractPdfText(item, maxPages) {
