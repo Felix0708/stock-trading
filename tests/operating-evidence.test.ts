@@ -97,6 +97,7 @@ const { probe, monitor, marker } = require("../scripts/monitor-health.cjs");
   applyAlertSnapshot(alertEvidence, items, { capturedAt: now.toISOString(), source: "TradingView alert manager visible UI", rows: [{ ticker: "NVDA", timeframe: "1D", status: "Active" }] }, now);
   assert.equal(alertEvidenceSummary(items, alertEvidence, now).verified, 2);
   const hash = policyFingerprint({}); assert.equal(hash.length, 64); assert.throws(() => assertLivePolicy({ KIS: "live" }, false, hash, {}));
+  assert.notEqual(hash, policyFingerprint({ KIS_LIVE_AFTER_MARKET_EXTENDED: "true" }));
   assertLivePolicy({ KIS: "mock" }, false, hash, {}); assertLivePolicy({ KIS: "live" }, false, hash, { ACCOUNT_APPROVED_POLICY_HASH: hash });
   const studyFile = path.join(root, "forward.json"), at = new Date().toISOString();
   const signal = { requestId: "future-1", receivedAt: at, validation: { ok: true }, payload: { ticker: "NVDA", exchange: "NASDAQ", timeframe: "240", action: "BUY", price: 100, sb_z_score: 3 }, outcome: { decision: "ENTRY_CANDIDATE" }, risk: { verdict: "PAPER_ENTRY" } };

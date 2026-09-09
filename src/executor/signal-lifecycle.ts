@@ -27,10 +27,12 @@ function lifecycleBrokerState(entry, broker, receipts, now = Date.now()) {
     if (!receipts.autoTrading()) return { status: "DEFER_REQUIRED", reason: "자동매매 OFF · 자동 재시도 일시정지" };
     const due = deferred.nextAttemptAt < Number.MAX_SAFE_INTEGER ? Math.max(now, deferred.nextAttemptAt || now) : now;
     const afterSession = deferred.lastAttemptMarketDate && deferred.orderRetrySessionKey !== deferred.lastAttemptMarketDate ? deferred.lastAttemptMarketDate : "";
-    const next = deferred.kind === "VERIFY" ? due : nextOrderCheck(record, new Date(due), afterSession);
+    const next = deferred.kind === "VERIFY" ? due : nextOrderCheck(record, new Date(due), afterSession, broker);
     const clock = record.payload.exchange === "KRX" ? domesticSessionClock(new Date(now)) : usSessionClock(new Date(now));
     const day = tradingDay(record.payload.exchange, clock.date, clock.weekday);
-    return { status: "DEFER_REQUIRED", reason: deferred.kind === "VERIFY" ? "잔고·이전 주문 종료 재확인" : day.reason || "주문 가능 세션·증권사 접수 재확인",
+    const sessionReason = record.payload.exchange !== "KRX" && broker.environment !== "live"
+      ? "모의계좌 정규장 재확인 · 증권사 예약 접수 아님" : "계좌 지원 세션·증권사 접수 재확인";
+    return { status: "DEFER_REQUIRED", reason: deferred.kind === "VERIFY" ? "잔고·이전 주문 종료 재확인" : day.reason || sessionReason,
       next: next && next < deferred.expiresAt ? `<t:${Math.ceil(next / 1000)}:F> 이후 (15초 주기)` : "유효시간 내 확인 가능한 거래 일정 없음", expiresAt: deferred.expiresAt };
   }
   const pending: any = Object.values(receipts.state.pending).find((item: any) => item.record.requestId === record.requestId && item.brokerIds?.includes(broker.id));

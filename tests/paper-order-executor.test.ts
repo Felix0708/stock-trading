@@ -49,7 +49,7 @@ const record = {
   assert.equal(usSession(new Date("2026-11-27T22:00:00Z")), "CLOSED");
   assert.equal(new Date(nextOrderCheck(calendarBuy, new Date("2026-03-08T12:00:00Z"))).toISOString(), "2026-03-09T13:30:00.000Z");
   assert.equal(new Date(nextOrderCheck(calendarBuy, new Date("2026-11-01T12:00:00Z"))).toISOString(), "2026-11-02T14:30:00.000Z");
-  assert.equal(new Date(nextOrderCheck(calendarBuy, new Date("2026-11-27T16:00:00Z"), "2026-11-27:REGULAR")).toISOString(), "2026-11-27T18:00:00.000Z");
+  assert.equal(new Date(nextOrderCheck(calendarBuy, new Date("2026-11-27T16:00:00Z"), "2026-11-27:REGULAR", { id: "KIWOOM", environment: "live" })).toISOString(), "2026-11-27T18:00:00.000Z");
   assert.equal(domesticSession(new Date("2026-09-24T01:00:00Z")), "CLOSED");
   assert.equal(domesticSession(new Date("2026-06-03T01:00:00Z")), "CLOSED");
   assert.equal(domesticSession(new Date("2026-12-31T01:00:00Z")), "CLOSED");
@@ -80,13 +80,38 @@ const record = {
   assert.equal(isDomesticBuySession(new Date("2026-08-23T23:35:00.000Z")), false);
   assert.equal(shouldDelayUsEntry({ payload: { exchange: "NASDAQ", action: "BUY" }, risk: { verdict: "PAPER_ENTRY" } }, new Date("2026-08-24T12:00:00.000Z")), true);
   assert.equal(shouldDelayUsEntry({ payload: { exchange: "NASDAQ", action: "BUY", paper_order_test: true }, risk: { verdict: "PAPER_ENTRY" } }, new Date("2026-08-24T12:00:00.000Z")), false);
-  assert.equal(shouldDelayUsEntry({ payload: { exchange: "NASDAQ", action: "BUY" }, risk: { verdict: "PAPER_ENTRY" } }, new Date("2026-08-24T20:00:00.000Z")), false);
+  assert.equal(shouldDelayUsEntry({ payload: { exchange: "NASDAQ", action: "BUY" }, risk: { verdict: "PAPER_ENTRY" } }, new Date("2026-08-24T20:00:00.000Z")), true);
   assert.equal(shouldDelayEntry({ payload: { exchange: "KRX", action: "BUY" }, risk: { verdict: "PAPER_ENTRY" } }, new Date("2026-08-23T23:35:00.000Z")), true);
   assert.equal(shouldDelayEntry(record, new Date("2026-08-23T23:35:00.000Z")), false);
   assert.equal(shouldDelayEntry({ payload: { exchange: "KRX", action: "SELL" }, risk: { verdict: "PAPER_EXIT" } }, new Date("2026-08-23T23:35:00.000Z")), false);
   assert.equal(shouldDelayOrder({ payload: { exchange: "KRX", action: "SELL" }, risk: { verdict: "PAPER_EXIT" } }, new Date("2026-08-24T12:00:00.000Z")), true);
   assert.equal(shouldDelayOrder({ payload: { exchange: "NASDAQ", action: "SELL" }, risk: { verdict: "PAPER_EXIT" } }, new Date("2026-08-25T00:00:00.000Z")), true);
-  assert.equal(shouldDelayOrder({ payload: { exchange: "NASDAQ", action: "SELL" }, risk: { verdict: "PAPER_EXIT" } }, new Date("2026-08-24T12:00:00.000Z")), false);
+  assert.equal(shouldDelayOrder({ payload: { exchange: "NASDAQ", action: "SELL" }, risk: { verdict: "PAPER_EXIT" } }, new Date("2026-08-24T12:00:00.000Z")), true);
+  const calendarSell = { payload: { exchange: "NASDAQ", action: "SELL" }, risk: { verdict: "PAPER_PARTIAL_EXIT" } };
+  for (const id of ["KIWOOM", "KIS"]) {
+    const mock = { id, environment: "mock", afterMarketExtended: true };
+    const live = { id, environment: "live" };
+    for (const order of [calendarBuy, calendarSell]) {
+      for (const time of ["2026-09-08T08:00:00Z", "2026-09-08T20:00:00Z", "2026-09-08T22:00:00Z"]) {
+        assert.equal(shouldDelayOrder(order, new Date(time), mock), true);
+      }
+      assert.equal(shouldDelayOrder(order, new Date("2026-09-08T19:59:59Z"), mock), false);
+      assert.equal(shouldDelayOrder(order, new Date("2026-09-08T20:00:00Z"), live), false);
+      assert.equal(new Date(nextOrderCheck(order, new Date("2026-09-08T20:00:32Z"), "", mock)).toISOString(), "2026-09-09T13:30:00.000Z");
+      assert.equal(new Date(nextOrderCheck(order, new Date("2026-11-27T18:00:00Z"), "", mock)).toISOString(), "2026-11-30T14:30:00.000Z");
+      assert.equal(shouldDelayOrder(order, new Date("2026-11-27T22:00:00Z"), live), true);
+    }
+    assert.equal(shouldDelayOrder(calendarSell, new Date("2026-09-08T08:00:00Z"), live), false);
+    assert.equal(shouldDelayOrder(calendarBuy, new Date("2026-09-08T08:00:00Z"), live), true);
+    for (const date of ["2026-09-08", "2026-12-08"]) {
+      const cutoff = id === "KIWOOM" ? 23 : 22; // KST 08:00 / 07:00, both DST and standard time.
+      assert.equal(shouldDelayOrder(calendarSell, new Date(`${date}T${cutoff - 1}:59:59Z`), live), false);
+      assert.equal(shouldDelayOrder(calendarSell, new Date(`${date}T${cutoff}:00:00Z`), live), true);
+      assert.equal(shouldDelayOrder(calendarSell, new Date(`${date}T23:59:59Z`), { ...live, afterMarketExtended: true }), id !== "KIS");
+    }
+  }
+  assert.equal(shouldDelayOrder(calendarSell, new Date("2026-12-09T00:00:00Z"), { id: "KIS", environment: "live", afterMarketExtended: true }), true);
+  assert.equal(shouldDelayOrder(calendarSell, new Date("2026-09-08T20:00:00Z"), { environment: "live" }), true);
   assert.equal(shouldDeferUsEntry({
     payload: { exchange: "NASDAQ", action: "BUY" }, risk: { verdict: "PAPER_ENTRY" },
   }, new Error("[20000](RC4058:모의투자 장종료)")), true);
@@ -160,6 +185,7 @@ const record = {
   }), { status: "BLOCKED", reason: "Sigma 과열" });
   const auto = await submitPaperOrder(autoRecord, {
     enabled: true, environment: "mock", domesticClient: options.client, overseasClient, tracker: autoTracker,
+    now: new Date("2026-09-08T14:00:00Z"),
   });
   assert.equal(auto.orderQuantity, 4);
   assert.equal(auto.exchange, "ND");
@@ -185,6 +211,7 @@ const record = {
   }, {
     enabled: true,
     environment: "mock",
+    now: new Date("2026-09-08T14:00:00Z"),
     domesticClient: options.client,
     overseasClient: {
       getUsBalance: async () => { throw new Error("보유 확인 뒤 잔고를 중복 조회하면 안 됨"); },
@@ -255,7 +282,12 @@ const record = {
   assert.equal(domesticCrash.marketFallbackAllowed, true);
   assert.equal((await submitPaperOrder({ ...autoRecord, risk: { verdict: "PAPER_ENTRY" } }, {
     enabled: true, environment: "live", domesticClient: options.client, overseasClient, tracker: autoTracker,
+    now: new Date("2026-09-08T14:00:00Z"),
   })).status, "ACCEPTED");
+  await assert.rejects(submitPaperOrder(autoRecord, {
+    enabled: true, environment: "mock", tracker: autoTracker,
+    now: new Date("2026-09-08T20:00:00Z"),
+  }), /장종료.*송신 안 함/);
   console.log("paper-order-executor test OK");
 })().catch((error) => {
   console.error(error);

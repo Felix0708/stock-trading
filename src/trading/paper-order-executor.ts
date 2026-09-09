@@ -9,6 +9,7 @@ const { tradingDay } = require("./market-calendar");
 type SignalRecord = { payload: any; risk?: any; positionPreview?: any; outcome?: any; source?: string; requestId?: string; [key: string]: any };
 type ExecutorOptions = { enabled: boolean; environment: string; domesticClient: any; overseasClient: any; tracker: any; brokerLabel?: string; partialExit1Ratio?: number; partialExit2Ratio?: number; now?: Date; symbol?: string; lockFile?: string; client?: any; attempts?: number; delayMs?: number; [key: string]: any };
 type Session = "PRE" | "REGULAR" | "AFTER_CLOSE" | "AFTER_SINGLE" | "AFTER" | "CLOSED";
+type AccountSession = { environment?: string; id?: string; afterMarketExtended?: boolean };
 
 function blocked(reason: string) {
   return { status: "BLOCKED", reason };
@@ -110,8 +111,8 @@ function shouldDeferUsEntry(record: SignalRecord, error: unknown) {
   return isUsEntry(record) && isUsMarketClosedError(error);
 }
 
-function shouldDelayUsEntry(record: SignalRecord, value = new Date()) {
-  return isUsEntry(record) && !isUsBuySession(value);
+function shouldDelayUsEntry(record: SignalRecord, value = new Date(), account: AccountSession = {}) {
+  return isUsEntry(record) && shouldDelayOrder(record, value, account);
 }
 
 function isDomesticEntry(record: SignalRecord) {
@@ -132,11 +133,18 @@ function shouldDeferOrder(record: SignalRecord, error: unknown) {
   return isExecutableOrder(record) && isRetryablePreOrderError(error);
 }
 
-function shouldDelayOrder(record: SignalRecord, value = new Date()) {
+function shouldDelayOrder(record: SignalRecord, value = new Date(), account: AccountSession = {}) {
   if (!isExecutableOrder(record)) return false;
   const buy = record.payload.action === "BUY";
   if (Boolean(US_EXCHANGE[String(record.payload.exchange || "").toUpperCase()])) {
-    return buy ? !isUsBuySession(value) : !isUsOrderSession(value);
+    const session = usSession(value);
+    if (session === "REGULAR") return false;
+    // Exchange hours are not account eligibility. Unspecified accounts fail closed outside regular hours.
+    if (account.environment !== "live" || !["KIWOOM", "KIS"].includes(account.id || "")) return true;
+    if (session === "PRE") return buy; // Existing strategy: no premarket BUY.
+    if (session !== "AFTER") return true;
+    const cutoff = account.id === "KIWOOM" ? 8 : account.afterMarketExtended === true ? 9 : 7;
+    return domesticSessionClock(value).minutes >= cutoff * 60;
   }
   if (record.payload.exchange === "KRX") {
     return buy ? !isDomesticBuySession(value) : !isDomesticOrderSession(value);
@@ -144,11 +152,11 @@ function shouldDelayOrder(record: SignalRecord, value = new Date()) {
   return false;
 }
 
-function nextOrderCheck(record: SignalRecord, from = new Date(), afterSession = ""): number | null {
+function nextOrderCheck(record: SignalRecord, from = new Date(), afterSession = "", account: AccountSession = {}): number | null {
   if (!isExecutableOrder(record)) return null;
   const sessionKey = (value: Date) => record.payload.exchange === "KRX"
     ? `${domesticSessionClock(value).date}:${domesticSession(value)}` : `${usSessionClock(value).date}:${usSession(value)}`;
-  if (!shouldDelayOrder(record, from) && sessionKey(from) !== afterSession) return from.getTime();
+  if (!shouldDelayOrder(record, from, account) && sessionKey(from) !== afterSession) return from.getTime();
   // Offset at UTC noon is after the NY DST switch, before every possible next session.
   const clock = record.payload.exchange === "KRX" ? domesticSessionClock : usSessionClock;
   const boundaries = record.payload.exchange === "KRX" ? [510, 540, 940, 960] : [240, 570, 780, 960];
@@ -158,7 +166,7 @@ function nextOrderCheck(record: SignalRecord, from = new Date(), afterSession = 
     const midnight = seed - clock(new Date(seed)).minutes * 60_000;
     for (const minutes of boundaries) {
       const value = new Date(midnight + minutes * 60_000);
-      if (value.getTime() >= from.getTime() && !shouldDelayOrder(record, value) && sessionKey(value) !== afterSession) return value.getTime();
+      if (value.getTime() >= from.getTime() && !shouldDelayOrder(record, value, account) && sessionKey(value) !== afterSession) return value.getTime();
     }
   }
   return null;
@@ -168,8 +176,8 @@ function shouldDeferEntry(record: SignalRecord, error: unknown) {
   return (isUsEntry(record) || isDomesticEntry(record)) && isUsMarketClosedError(error);
 }
 
-function shouldDelayEntry(record: SignalRecord, value = new Date()) {
-  if (isUsEntry(record)) return !isUsBuySession(value);
+function shouldDelayEntry(record: SignalRecord, value = new Date(), account: AccountSession = {}) {
+  if (isUsEntry(record)) return shouldDelayOrder(record, value, account);
   if (isDomesticEntry(record)) return !isDomesticBuySession(value);
   return false;
 }
@@ -227,6 +235,14 @@ async function submitPaperOrder(record: SignalRecord, options: ExecutorOptions) 
 
   const exchange = String(payload.exchange || "").toUpperCase();
   if (exchange !== "KRX" && !US_EXCHANGE[exchange]) return blocked(`지원하지 않는 거래소: ${exchange || "없음"}`);
+  const canSubmit = () => {
+    if (exchange !== "KRX" && shouldDelayOrder(record, options.now || new Date(), options)) {
+      // Thrown before HTTP, including after the broker's rate-limit/token queue: safe to defer, never UNKNOWN.
+      throw new Error(`${options.environment === "mock" ? "모의계좌 정규장" : "실계좌 지원 세션"} 대기 · 장종료 · 주문 송신 안 함`);
+    }
+    return !options.canSubmit || options.canSubmit();
+  };
+  if (!canSubmit()) return blocked("자동매매 OFF · 주문 송신 중지");
   const trackedOrders = options.tracker.list?.() || [];
   if (exit || partialExit || risk?.verdict === "PAPER_ADD" || managedPosition(trackedOrders, payload, options.environment).quantity > 0) {
     if (!positionPreview?.currentHoldings) {
@@ -264,11 +280,11 @@ async function submitPaperOrder(record: SignalRecord, options: ExecutorOptions) 
     orderStrategy = session === "REGULAR"
       ? `최유리 IOC 최대 2회${marketFallbackAllowed ? " 후 급락 손절 잔량만 시장가" : " · 시장가 전환 없음"}`
       : ({ PRE: "장전 시간외 종가", AFTER_CLOSE: "장후 시간외 종가", AFTER_SINGLE: "시간외 단일가 지정가", CLOSED: "장 종료" } as Record<string, string>)[session];
-    if (options.canSubmit && !options.canSubmit()) return blocked("자동매매 OFF · 주문 송신 중지");
+    if (!canSubmit()) return blocked("자동매매 OFF · 주문 송신 중지");
     order = await client.placeDomesticMarketOrder({
       side, symbol: payload.ticker, quantity, price: payload.price,
       session, orderStyle,
-      ...(options.canSubmit ? { canSubmit: options.canSubmit } : {}),
+      canSubmit,
     });
   } else {
     client = options.overseasClient;
@@ -291,11 +307,11 @@ async function submitPaperOrder(record: SignalRecord, options: ExecutorOptions) 
     } else {
       orderStrategy = record.originalSignalPrice !== undefined ? "주문 직전 현재가 지정가" : "신호가 지정가";
     }
-    if (options.canSubmit && !options.canSubmit()) return blocked("자동매매 OFF · 주문 송신 중지");
+    if (!canSubmit()) return blocked("자동매매 OFF · 주문 송신 중지");
     order = await client.placeUsLimitOrder({
       side, exchange: kiwoomExchange, symbol: payload.ticker,
       quantity, price: limitPrice,
-      ...(options.canSubmit ? { canSubmit: options.canSubmit } : {}),
+      canSubmit,
     });
     order.exchange = kiwoomExchange;
   }

@@ -64,6 +64,67 @@ function fixture(ids = ["KIS"], environment = "mock") {
 function message(r) { return { id: r.requestId, channelId: "signal", author: { id: "source", bot: true }, embeds: [{ footer: { text: encodeSignalEnvelope(r) } }] }; }
 
 (async () => {
+  const initialClock = clock;
+  clock = new RealDate("2026-09-08T20:00:32Z").getTime(); // 05:00 KST: mock closed, live aftermarket open.
+  const sessions = fixture(["KIWOOM", "KIS"]);
+  const partial = record("session-partial", "SELL");
+  partial.risk.verdict = "PAPER_PARTIAL_EXIT";
+  partial.outcome.signal.signalCode = "EXIT_PARTIAL_1";
+  for (const broker of sessions.brokers) {
+    broker.state.holdings = [{ code: "TEST", quantity: 122, tradableQuantity: 122, evaluationAmount: 12200, purchaseAmount: 12200 }];
+    broker.tracker.record({ orderNo: "initial", market: "NASDAQ", symbol: "TEST", environment: "mock", side: "BUY",
+      entryType: "PAPER_ENTRY", timeframe: "240", status: "FILLED", filledQuantity: 122, fillPrice: 100,
+      createdAt: new Date(clock - 86400000).toISOString() });
+    await sessions.runtime.executeOrDefer(broker, structuredClone(partial));
+    // Existing legacy AFTER retries survive unchanged, but no longer bypass account hours.
+    sessions.receipts.markMarketTransitionFailure(`${broker.id}:${partial.requestId}`, "2026-09-08:AFTER", new Error("장종료"));
+  }
+  const { lifecycleBrokerState } = require("../src/executor/signal-lifecycle");
+  for (const time of ["2026-09-08T21:00:00Z", "2026-09-09T00:54:00Z", "2026-09-09T08:00:00Z", "2026-09-09T13:29:59Z"]) {
+    clock = new RealDate(time).getTime();
+    await sessions.runtime.retryDeferred();
+    assert.equal(sessions.receipts.listDeferred().length, 2);
+    for (const broker of sessions.brokers) {
+      assert.equal(broker.state.requests.length, 0);
+      const state = lifecycleBrokerState({ record: partial, progress: {} }, broker, sessions.receipts);
+      assert.match(state.reason, /모의계좌 정규장/);
+      assert.match(state.next, new RegExp(String(new RealDate("2026-09-09T13:30:00Z").getTime() / 1000)));
+    }
+  }
+  clock = new RealDate("2026-09-09T13:30:00Z").getTime();
+  await sessions.runtime.retryDeferred();
+  await sessions.runtime.retryDeferred();
+  assert.equal(sessions.receipts.listDeferred().length, 0);
+  for (const broker of sessions.brokers) {
+    assert.equal(broker.state.requests.length, 1);
+    assert.equal(broker.state.requests[0].quantity, 30);
+    assert.equal(broker.state.requests[0].side, "SELL");
+  }
+  clock = new RealDate("2026-09-08T20:00:32Z").getTime();
+  const liveSessions = fixture(["KIWOOM", "KIS"], "live");
+  for (const broker of liveSessions.brokers) {
+    broker.state.holdings = sessions.brokers[0].state.holdings;
+    broker.tracker.record({ ...sessions.brokers[0].state.orders.find(o => o.orderNo === "initial"), environment: "live" });
+    await liveSessions.runtime.executeOrDefer(broker, structuredClone(partial));
+    assert.equal(broker.state.requests.length, 1);
+    assert.equal(broker.state.requests[0].quantity, 30);
+  }
+  // A broker queue crosses the close after preview: final pre-HTTP guard retains the order, never UNKNOWN.
+  for (const id of ["KIWOOM", "KIS"]) {
+    clock = new RealDate("2026-09-08T19:59:59Z").getTime();
+    const crossing = fixture([id]), broker = crossing.brokers[0];
+    const place = broker.overseasClient.placeUsLimitOrder;
+    broker.overseasClient.placeUsLimitOrder = async request => {
+      clock = new RealDate("2026-09-08T20:00:00Z").getTime();
+      request.canSubmit();
+      return place(request);
+    };
+    await crossing.runtime.executeOrDefer(broker, record("cross-close"));
+    assert.equal(broker.state.requests.length, 0);
+    assert.equal(crossing.receipts.listDeferred().length, 1);
+    assert.equal(crossing.receipts.attempt(id, record("cross-close")).status, "RETRYABLE");
+  }
+  clock = initialClock;
   const off = fixture();
   off.receipts.putDeferred("KIS", record("off"), 600000);
   off.receipts.setAutoTrading(false);

@@ -54,9 +54,9 @@ function orderAttemptKey(record, now = new Date()) {
   return `${clock.date}:${domestic ? domesticSession(now) : usSession(now)}`;
 }
 
-function shouldRetryMarketTransition(record, error, now = new Date()) {
+function shouldRetryMarketTransition(record, error, now = new Date(), account = {}) {
   return record?.payload?.exchange !== "KRX"
-    && ["PRE", "REGULAR", "AFTER"].includes(usSession(now))
+    && !shouldDelayOrder(record, now, account)
     && shouldDeferOrder(record, error)
     && isUsMarketClosedError(error);
 }
@@ -927,7 +927,9 @@ async function start() {
       environment: environments.KIS,
       timeoutMs: Number(process.env.KIS_TIMEOUT_MS || 5_000),
     });
-    brokers.push({ id: "KIS", label: "한투", environment: environments.KIS, domesticClient: kis, overseasClient: kis, tracker: new OrderTracker(process.env.KIS_ORDER_STATE_FILE || "kis-orders.json") });
+    brokers.push({ id: "KIS", label: "한투", environment: environments.KIS,
+      afterMarketExtended: process.env.KIS_LIVE_AFTER_MARKET_EXTENDED === "true",
+      domesticClient: kis, overseasClient: kis, tracker: new OrderTracker(process.env.KIS_ORDER_STATE_FILE || "kis-orders.json") });
   }
   const runtime = createAccountRuntime({ brokers, receipts, client, readOnly, sourceChannelIds, trusted, targetGuildId, channels,
     maxAgeMs, maxOpenPositions, riskPolicy, ownerId, approvalTtlMs, deferredTtlMs, portfolioSyncMinutes,
@@ -1267,8 +1269,8 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
       await send(channels.order, { text: `✅ **${brokerAccountLabel(broker)} 자동매매 연동 테스트 통과**\n**종목**: ${formatInstrumentLabel(record.payload)}\n계좌 조회 정상 · 주문 생성 없음` });
       return null;
     }
-    if (shouldDelayOrder(record) && !requiresExistingPosition(record)) return { status: "DEFER_REQUIRED" };
-    if (!shouldDelayOrder(record)) {
+    if (shouldDelayOrder(record, new Date(), broker) && !requiresExistingPosition(record)) return { status: "DEFER_REQUIRED" };
+    if (!shouldDelayOrder(record, new Date(), broker)) {
       try {
         const quote = await currentSignalPrice(broker, record.payload);
         if (!Number.isFinite(quote) || quote <= 0) throw new Error("유효한 현재가 확인 실패");
@@ -1280,7 +1282,7 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
         throw error;
       }
     }
-    if ((record.payload.action === "SELL" || record.risk?.verdict === "PAPER_ADD") && !shouldDelayOrder(record)) {
+    if ((record.payload.action === "SELL" || record.risk?.verdict === "PAPER_ADD") && !shouldDelayOrder(record, new Date(), broker)) {
       const owned = managedPosition(broker.tracker.list(), record.payload, broker.environment);
       if (owned.quantity && (emergencyExit(record) || sameTimeframe(owned.timeframe, record.payload.timeframe))
         && (!Number.isFinite(Date.parse(record.receivedAt)) || Date.parse(record.receivedAt) >= owned.entryAt)) {
@@ -1308,7 +1310,7 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
       }));
       return { status: "BLOCKED", reason: record.positionPreview.reason || "주문 조건 불충족" };
     }
-    if (shouldDelayOrder(record)) return { status: "DEFER_REQUIRED" };
+    if (shouldDelayOrder(record, new Date(), broker)) return { status: "DEFER_REQUIRED" };
     const stage = partialExitStage(record);
     if (stage && receipts.partialExitBlocked(broker.id, record)) {
       await send(channels.execution, formatUncreatedOrder(brokerAccountLabel(broker), record, {
@@ -1329,7 +1331,7 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
     submitting.add(submissionKey);
     try {
       order = await submitPaperOrder(record, {
-        enabled: true, environment: broker.environment,
+        enabled: true, environment: broker.environment, id: broker.id, afterMarketExtended: broker.afterMarketExtended,
         domesticClient: broker.domesticClient, overseasClient: broker.overseasClient,
         tracker: broker.tracker, brokerLabel: brokerAccountLabel(broker),
         canSubmit: () => (manual || receipts.autoTrading()) && (!record.executionDeadline || Date.now() < record.executionDeadline) && !receipts.supersededEntry(broker.id, record),
@@ -1362,7 +1364,7 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
   }
 
   async function settlePendingBuys(broker, record, manual = false) {
-    if (record.payload.action !== "SELL" || shouldDelayOrder(record)) return;
+    if (record.payload.action !== "SELL" || shouldDelayOrder(record, new Date(), broker)) return;
     for (const previous of broker.tracker.list().filter((order) => order.side === "BUY" && pendingSymbolOrder([order], record))) {
       if (!emergencyExit(record) && !sameTimeframe(previous.timeframe, record.payload.timeframe)) continue;
       const current = await refreshPaperOrder(previous, broker);
@@ -1423,7 +1425,7 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
       progress(broker, record, { status: "NO_ACTION", reason: "이전 진입 예약이 이미 대기 중 · 중복 예약 안 함" });
       return null;
     }
-    if (!retry && !requiresExistingPosition(record) && shouldDelayOrder(record)) {
+    if (!retry && !requiresExistingPosition(record) && shouldDelayOrder(record, new Date(), broker)) {
       receipts.putDeferred(broker.id, record, deferredTtlMs);
       progress(broker, record, { status: "DEFER_REQUIRED" });
       return null;
@@ -1466,7 +1468,7 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
       if (shouldDeferOrder(record, error)) {
         if (!retry) {
           const now = new Date();
-          const transitionRetry = shouldRetryMarketTransition(record, error, now);
+          const transitionRetry = shouldRetryMarketTransition(record, error, now, broker);
           const deferred = receipts.putDeferred(broker.id, record, deferredTtlMs, { now: now.getTime() });
           if (transitionRetry) receipts.markMarketTransitionFailure(deferred.key, orderAttemptKey(record, now), error, now.getTime());
           else receipts.markDeferredFailure(deferred.key, error);
@@ -1501,18 +1503,15 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
       if (!receipts.autoTrading()) continue;
       const record = structuredClone(deferred.record);
       record.executionDeadline = deferred.expiresAt;
+      const broker = brokers.find((item) => item.id === deferred.brokerId);
+      if (!broker) continue;
       const verificationPending = deferred.kind === "VERIFY";
       if (verificationPending && deferred.nextAttemptAt > now.getTime()) continue;
-      if (!verificationPending && shouldDelayOrder(record, now)) continue;
+      if (!verificationPending && shouldDelayOrder(record, now, broker)) continue;
       const attemptKey = orderAttemptKey(record, now);
       if (!verificationPending) {
         if (!deferredOrderAttemptDue(deferred, attemptKey, now.getTime())) continue;
         receipts.markDeferredAttempt(deferred.key, attemptKey);
-      }
-      const broker = brokers.find((item) => item.id === deferred.brokerId);
-      if (!broker) {
-        receipts.removeDeferred(deferred.key);
-        continue;
       }
       try {
         const result = await execute(broker, record);
@@ -1538,7 +1537,7 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
           continue;
         }
         if (shouldDeferOrder(record, error)) {
-          if (shouldRetryMarketTransition(record, error, now)) {
+          if (shouldRetryMarketTransition(record, error, now, broker)) {
             const pending = receipts.markMarketTransitionFailure(deferred.key, attemptKey, error, now.getTime());
             if (pending) void refreshLifecycleCards();
           } else {
@@ -1580,7 +1579,7 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
       const symbols = new Map(orders.filter(order => order.entryType).map(order => [`${order.market}:${order.symbol}`, order]));
       for (const order of symbols.values() as Iterable<any>) {
         const payload = { ticker: order.symbol, exchange: order.market, action: "SELL", koreanName: order.koreanName, name: order.name };
-        if (broker.protectionEnabled && !shouldDelayOrder({ payload, risk: { verdict: "PAPER_EXIT" } })) {
+        if (broker.protectionEnabled && !shouldDelayOrder({ payload, risk: { verdict: "PAPER_EXIT" } }, new Date(), broker)) {
           try {
             const result = await ensureProtection(broker, receipts, payload, () => !readOnly && receipts.autoTrading());
             if (result.status === "UNPROTECTED") await reportError(`${broker.label} 증권사 보호 미적용`, new Error(result.reason));
@@ -1592,7 +1591,7 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
         const symbolKey = `${order.market}:${order.symbol}`;
         if (!owned.quantity) { unresolved.delete(symbolKey); continue; }
         ownedCount++;
-        if (shouldDelayOrder({ payload, risk: { verdict: "PAPER_EXIT" } })) continue;
+        if (shouldDelayOrder({ payload, risk: { verdict: "PAPER_EXIT" } }, new Date(), broker)) continue;
         try {
           const account = await accountContext(broker, { payload }, maxOpenPositions, { positionOnly: true });
           if (!Number.isInteger(account.currentPositionQuantity) || account.currentPositionQuantity < owned.quantity) {

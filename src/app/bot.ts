@@ -1474,6 +1474,7 @@ async function submitAndTrackOrder(record) {
       record.orderAttempt = await submitPaperOrder(record, {
         enabled: KIWOOM_ENABLED,
         environment: KIWOOM_ENV,
+        id: "KIWOOM",
         domesticClient: KIWOOM_ENABLED && exchange === "KRX" ? getDomesticKiwoomClient() : null,
         overseasClient: KIWOOM_ENABLED && exchange !== "KRX" ? getOverseasKiwoomClient() : null,
         tracker: orderTracker,

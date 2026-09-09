@@ -7,7 +7,7 @@ function policyFingerprint(env = process.env) {
   for (const file of ["position-sizer.ts", "position-ownership.ts", "trade-controller.ts", "paper-order-executor.ts", "../executor/account-executor.ts", "../executor/broker-protection.ts", "../signals/signal-state-machine.ts"]) {
     hash.update(file); hash.update(fs.readFileSync(path.join(__dirname, file)));
   }
-  for (const key of ["ACCOUNT_BROKER_PROTECTION", "ACCOUNT_AUTO_CAP_RATIO", "ACCOUNT_MAX_OPEN_RISK_RATIO", "MAX_OPEN_POSITIONS", "PARTIAL_EXIT_1_RATIO", "PARTIAL_EXIT_2_RATIO", "BUY_APPROVAL_TTL_MINUTES"]) hash.update(`${key}=${env[key] || "default"}\n`);
+  for (const key of ["ACCOUNT_BROKER_PROTECTION", "KIS_LIVE_AFTER_MARKET_EXTENDED", "ACCOUNT_AUTO_CAP_RATIO", "ACCOUNT_MAX_OPEN_RISK_RATIO", "MAX_OPEN_POSITIONS", "PARTIAL_EXIT_1_RATIO", "PARTIAL_EXIT_2_RATIO", "BUY_APPROVAL_TTL_MINUTES"]) hash.update(`${key}=${env[key] || "default"}\n`);
   return hash.digest("hex");
 }
 function assertLivePolicy(environments, readOnly, hash, env = process.env) {
