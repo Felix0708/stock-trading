@@ -1,57 +1,47 @@
-# TradingView Webhook 기준 문서
+# 신호 연동과 테스트 안내
 
-자동매매 신호의 기준 명세는 로컬 `tradingview-webhook-v6.2.md`입니다. 제공받은 원본 자료이므로 Git에는 포함하지 않습니다.
+이 저장소의 공개 입력 계약은 [검증기](../src/signals/webhook-schema.ts)와 [신호 매핑](../src/signals/signal-normalizer.ts)입니다. 특정 운영자의 비공개 지표 문서는 설치나 자동 테스트에 필요하지 않습니다.
 
 ## 문서 지도
 
 | 문서 | 역할 |
 |---|---|
-| [`../README.md`](../README.md) | 설치, 실행, 명령어를 설명하는 사용 설명서 |
-| `tradingview-webhook-v6.2.md` | 로컬에서만 보관하는 TradingView 원본 신호 명세 |
-| [`shared-trading-context.md`](./shared-trading-context.md) | 다섯 AI가 모든 대화에서 함께 사용하는 핵심 신호·위험·사용자 원칙 요약 |
-| [`development-history.md`](./development-history.md) | 구현 과정, 설계 이유, 현재 상태와 다음 작업 기록 |
-| [`execution-reliability.md`](./execution-reliability.md) | 수신 원본 복구, 증권사 큐, 신호별 진행 카드, 전략 성과와 비용 검증 한계 |
-| [`market-calendar.md`](./market-calendar.md) | 확인된 휴장·조기 폐장 범위, 공식 출처와 갱신 대상 |
-| [`tradingview-webhook-test.pine`](./tradingview-webhook-test.pine) | TradingView 서버의 실제 웹훅 경로를 확인하는 일회성 테스트 지표 |
-| [`tradingview-mock-order-test.pine`](./tradingview-mock-order-test.pine) | `005930` 실제 알람으로 키움 국내 모의주문 1주·1회를 확인하는 테스트 지표 |
+| [설치 안내](../README.md) | 설정·실행·선택 기능 |
+| [합성 JSON](webhook.example.json) | 현재 수신 필드의 테스트 예시. 실제 시세·매매 신호가 아님 |
+| [AI 대화 기준 예시](shared-trading-context.example.md) | 개인 설정 없이 사용하는 공통 사실 확인 원칙 |
+| [계좌 실행기](account-executor.md) | 계좌별 승인·실행·복구 |
+| [운영 검증](operating-evidence.md) | 일반 검증 절차와 외부 감시 |
+| [실행 신뢰성](execution-reliability.md) | 미완료 주문·체결 복구·성과의 한계 |
+| [계좌 자산](account-equity-sync.md) | 계좌별 자산 기록 계약 |
+| [거래 캘린더](market-calendar.md) | 시장 세션과 지원 범위 |
 
-- 문서 버전: v6.2
-- 문서 날짜: 2026-05-17
-- SHA-256: `0d113ada04cafd342c9c84c2b4252f74f627ad2a49cde3024e670d172468b625`
-- 원본: 사용자가 제공한 iCloud 문서의 변경 없는 사본
+## 다른 지표 연결
 
-원본 명세는 직접 수정하지 않습니다. 새 버전이 제공되면 별도 파일로 추가하고 검증기와 마이그레이션 기록을 함께 갱신합니다.
+JSON의 필드명·타입뿐 아니라 신호의 의미도 맞아야 합니다. 현재 구현은 특정 필드 집합과 알려진 신호 문구를 정규화하며, 모든 지표를 자동으로 해석하는 범용 변환기가 아닙니다. 새 출력 형식은 필요한 어댑터와 테스트를 추가하고 주문 없는 검증을 먼저 수행하세요. 확신 등급·손절·시장 상태가 없다고 임의의 값으로 채워 주문 게이트를 우회해서는 안 됩니다.
 
-## 확인된 명세 차이
+알림 조건·시간봉·확정 시점은 선택한 지표와 전략에 맞춥니다. `alert()` 기반 지표는 `Any alert() function call`을 사용할 수 있지만, 다른 알림 방식에는 해당하지 않을 수 있습니다. 지표·입력 변경 후 알림을 재생성하고 수신 증빙을 확인합니다.
 
-문서에는 총 38필드라고 적혀 있지만 첫 번째 전체 JSON 예시는 실제로 39필드입니다. 구현은 필드를 임의로 버리지 않고 39필드를 수신하되, 주문 실행 전 명세 버전과 필수 필드를 별도로 검증합니다.
+## 주문 없는 연결 시험
 
-`type`, `market`, `ai_summary`의 이모지는 표시용으로 보존합니다. 주문 판단에는 이후 정의할 안정적인 내부 `signal_code`를 사용합니다.
+`npm run self-test`는 공개 합성 데이터를 사용하며 증권사 주문을 만들지 않습니다. `npm run test:webhook-live`는 실행 중인 수신기·Discord·계좌 실행기까지 테스트 신호를 보내지만 `paper_order_test=true`를 붙여 주문을 차단합니다.
 
-## TradingView 실제 알람 경로 테스트
+TradingView 서버의 실제 전달 경로는 [일회성 Pine 테스트](tradingview-webhook-test.pine)로 따로 확인할 수 있습니다.
 
-이 테스트는 Lazy Alpha의 매매 조건을 흉내 내지 않습니다. TradingView 서버가 실제로 다음 경로를 통과하는지만 확인합니다.
+1. 본인 수신기·터널을 실행하고 전체 비밀 웹훅 URL을 확인합니다.
+2. 테스트 스크립트가 지원하는 차트에 지표를 올리고 해당 `alert()` 조건을 선택합니다.
+3. 웹훅 URL을 입력하고 실시간 알림이 발생할 때 수신 기록·Discord·TradingView 알림 로그를 대조합니다.
+4. 완료 후 테스트 알림을 삭제합니다. 이 결과는 선택한 매매 지표의 조건·수익성 검증이 아닙니다.
 
-```text
-TradingView → ngrok 고정 주소 → 로컬 수신기 → Discord
-```
+## 주문을 만드는 모의 시험
 
-1. 프로젝트에서 `npm run start:all`을 실행하고 전체 웹훅 URL이 복사될 때까지 기다립니다.
-2. TradingView에서 24시간 움직이는 `BINANCE:BTCUSDT`의 1분 차트를 엽니다.
-3. Pine 에디터에 [`tradingview-webhook-test.pine`](./tradingview-webhook-test.pine)의 전체 내용을 붙여넣고 차트에 추가합니다.
-4. 알림을 만들고 조건을 `Stock Trading Webhook One-shot Test` → `어떤 alert() 함수 호출`로 선택합니다.
-5. 웹훅 URL을 켜고 복사된 전체 URL을 붙여넣은 뒤 알림을 생성합니다.
-6. 다음 실시간 가격 업데이트에서 한 번만 발송됩니다.
-7. Discord의 해당 시장 `#*-전체신호`와 `#*-관찰신호`에서 `TVTEST`, `CHECK`, `INFO_ONLY`, `주문 생성 안 됨`을 확인합니다.
-8. TradingView 알림 로그의 `Webhook status`도 성공인지 확인한 뒤 테스트 알림과 지표를 삭제합니다.
+[국내 모의주문 Pine 테스트](tradingview-mock-order-test.pine)는 위 연결 시험과 다르게 **모의주문을 만들 수 있습니다.** 코드에 고정된 `005930` 차트에서만 동작하며 1주·1회 시험용 잠금이 있습니다. 이는 운영자의 보유 종목이나 권장 종목이 아닙니다.
 
-알림은 과거 봉이나 리플레이가 아니라 실시간 봉에서만 발생합니다. 응답이 없으면 `npm run start:all`이 계속 실행 중인지, 고정 ngrok URL이 저장됐는지, TradingView 2단계 인증과 알림 로그의 Webhook 상태를 확인합니다.
+시험 전 모의환경·종목·수량·가격·계좌·잠금 상태를 직접 확인하고 명시적으로 승인해야 합니다. 평소 `PAPER_ORDER_TEST_ENABLED=false`를 유지합니다. 활성화한 별도 시험이 끝나면 테스트 알림을 삭제하고 설정을 다시 비활성화합니다. 잠금 파일을 지워 무작정 반복하거나 실계좌에서 실행하지 마세요.
 
-주문까지 확인할 때는 별도 [`tradingview-mock-order-test.pine`](./tradingview-mock-order-test.pine)을 사용합니다. 이 지표는 일반 경로 테스트와 달리 모의주문을 만들 수 있으므로 루트 README의 1주·1회 절차와 활성화 확인을 먼저 따라야 합니다.
+## 개인 설정과 공개 문서
 
-## 문서 갱신 규칙
-
-- 실행법이나 명령어가 바뀌면 루트 `README.md` 갱신
-- TradingView 명세가 바뀌면 원본을 새 버전 파일로 추가하고 이 문서의 버전·해시 갱신
-- 기능, 안전장치, 결정 또는 다음 작업이 바뀌면 `development-history.md` 갱신
-- 비밀키, 토큰, 계좌번호와 실제 웹훅 비밀 경로는 어떤 문서에도 기록하지 않음
+- 개인 AI 원칙은 Git에서 제외된 `shared-trading-context.md`에 작성할 수 있습니다. 기존 로컬 파일이 있으면 공개 예시보다 우선합니다.
+- 개인 운영 사건·검증 원문은 `private/` 같은 Git 제외 경로에서 관리합니다.
+- 지표 제공자의 원본·유료 자료는 권한 없이 복제·공개하지 않습니다.
+- 공개 문서는 사용법·계약·제품 기본값만 설명하고, 개인 워치리스트·구독·시각표·계좌·성과를 기록하지 않습니다.
+- 개인 비밀 웹훅, 키·토큰·인증 세션과 실제 계좌 내역은 어떤 공개 문서에도 넣지 않습니다.

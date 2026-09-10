@@ -69,7 +69,9 @@ const {
 } = require("../ai/conversation-router");
 
 const ROOT = path.resolve(__dirname, "../..");
-const SHARED_TRADING_CONTEXT = fs.readFileSync(path.join(ROOT, "docs", "shared-trading-context.md"), "utf8").trim();
+const privateContext = path.join(ROOT, "docs", "shared-trading-context.md");
+const SHARED_TRADING_CONTEXT = fs.readFileSync(fs.existsSync(privateContext)
+  ? privateContext : path.join(ROOT, "docs", "shared-trading-context.example.md"), "utf8").trim();
 const STATE_FILE = path.join(ROOT, "state.json");
 const CHAT_DIR = path.join(ROOT, ".codex-chat");
 const KIWOOM_ORDER_STATE_FILE = path.join(ROOT, "kiwoom-orders.json");
@@ -562,7 +564,7 @@ function buildStoredWebhookContext(topic, jsonl, now = Date.now(), recentSignals
     records.length
       ? "질문에 나온 종목과 일치하는 기록만 없습니다. 이를 전체 웹훅 미수신이나 시스템 연결 장애로 표현하지 마세요."
       : "현재 저장 로그에서 참고 가능한 실제 신호를 찾지 못했습니다. 이것만으로 연결 장애라고 단정하지 마세요.",
-    "Lazy Alpha의 현재 상태를 추측하지 말고, 공개 웹 검색으로 확인 가능한 종목·시장 정보만 토론하세요.",
+    "지표의 현재 상태를 추측하지 말고, 공개 웹 검색으로 확인 가능한 종목·시장 정보만 토론하세요.",
   ].join("\n");
 
   const title = recentSignals
@@ -1123,8 +1125,8 @@ function formatAlertRegistry(items, updatedAt = new Date()) {
     `🔔 **TradingView 알람 설정 대상 (${items.length}종목)**`,
     `목표 ${items.length * 2}개 · 최근 7일 내 활성 확인 ${evidence.verified}개 · 수신 이력 ${evidence.received}개\n확인 필요 ${items.length * 2 - evidence.verified}개 (무신호가 곧 장애라는 뜻은 아닙니다.)`,
     "**공통 조건**",
-    "- 지표: Lazy Alpha Indicator / Custom Webhook (Bot)",
-    "- 조건: Any alert() function call",
+    "- 지표: 사용자가 선택한 웹훅 지표 (수신 형식·신호 매핑 검증 필요)",
+    "- 조건: alert() 기반 지표는 Any alert() function call · 지표별 설정 확인",
     "- 시간봉: 4시간봉·일봉 (종목별 2개를 목표로 함)",
     "- 전달: 고정 비밀 웹훅 → 국가별 관찰·매매신호 → 주문 게이트",
     formatInstrumentGroups(items),
@@ -2866,6 +2868,7 @@ function selfTest() {
   const alertItems = parseConfiguredAlerts("KRX:005930=삼성전자,NASDAQ:NVDA=NVIDIA");
   if (alertItems.length !== 2 || alertItems[0].ticker !== "005930") throw new Error("알람설정 파서 실패");
   const alertRegistry = formatAlertRegistry(alertItems, new Date("2026-08-10T00:00:00Z"));
+  if (!alertRegistry.includes("사용자가 선택한 웹훅 지표") || alertRegistry.includes("Lazy Alpha")) throw new Error("알람 지표 안내 일반화 실패");
   if (!alertRegistry.includes("삼성전자 (005930)") || !alertRegistry.includes("Any alert() function call") || !alertRegistry.includes("4시간봉·일봉")) throw new Error("알람설정 목록 실패");
   if (!alertRegistry.includes("**기타 (1)**\n\n- 삼성전자 (005930)")) throw new Error("알람설정 분야·종목 줄 분리 실패");
   const overseasOnlyAlerts = formatAlertRegistry(parseConfiguredAlerts("NASDAQ:NVDA=NVIDIA"));

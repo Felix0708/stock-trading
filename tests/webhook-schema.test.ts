@@ -5,11 +5,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { FIELD_TYPES, validateWebhookPayload } = require("../src/signals/webhook-schema");
 
-const specification = fs.readFileSync(path.join(__dirname, "..", "docs", "tradingview-webhook-v6.2.md"), "utf8");
-const firstJson = specification.match(/```json\s*([\s\S]*?)```/);
-assert(firstJson, "기준 문서에서 전체 JSON 예제를 찾지 못했습니다.");
-
-const sample = JSON.parse(firstJson[1]);
+const sample = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "docs", "webhook.example.json"), "utf8"));
 assert.equal(Object.keys(FIELD_TYPES).length, 39);
 assert.equal(Object.keys(sample).length, 39);
 assert.equal(validateWebhookPayload(sample).ok, true);

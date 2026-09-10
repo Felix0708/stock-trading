@@ -7,10 +7,8 @@ const { loadOrCreateWebhookToken } = require("../src/signals/webhook-server");
 const ROOT = path.resolve(__dirname, "..");
 
 async function main() {
-  const specification = fs.readFileSync(path.join(ROOT, "docs", "tradingview-webhook-v6.2.md"), "utf8");
-  const firstJson = specification.match(/```json\s*([\s\S]*?)```/);
   const payload = {
-    ...JSON.parse(firstJson[1]),
+    ...JSON.parse(fs.readFileSync(path.join(ROOT, "docs", "webhook.example.json"), "utf8")),
     name: "자동매매 종단간 테스트 (Apple)",
     desc: "계좌 실행기까지 도달하지만 주문은 만들지 않는 연동 테스트",
     paper_order_test: true,

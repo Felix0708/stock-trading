@@ -4,7 +4,10 @@ node_modules/
 .env.*
 !.env.signal.example
 !.env.account.example
-이동훈_작성용.env
+*.env
+docs/private/
+docs/development-history.md
+docs/shared-trading-context.md
 state.json*
 .codex-chat/
 .omo/
@@ -28,5 +31,5 @@ runtime.log
 *.statement.json
 forward-policy-study.json
 forward-policy-study.json.tmp
-docs/tradingview-webhook-v6.2.md
+docs/tradingview-webhook*.md
 npm-debug.log*

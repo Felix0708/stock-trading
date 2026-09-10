@@ -6,9 +6,7 @@ const path = require("node:path");
 const net = require("node:net");
 const { createWebhookService } = require("../src/signals/webhook-server");
 
-const specification = fs.readFileSync(path.join(__dirname, "..", "docs", "tradingview-webhook-v6.2.md"), "utf8");
-const firstJson = specification.match(/```json\s*([\s\S]*?)```/);
-const sample = JSON.parse(firstJson[1]);
+const sample = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "docs", "webhook.example.json"), "utf8"));
 
 async function run() {
   const processed = [];
