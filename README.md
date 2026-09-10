@@ -39,11 +39,14 @@ cp .env.account.example .env.account
 
 `.env.signal`에는 공통 Discord·TradingView 설정을, `.env.account`에는 사용자 이름과 키움·한투 모의계좌 설정을 입력합니다. 실제 설정 파일은 채팅이나 Git에 올리지 마세요.
 
-기본 Codex 설정은 `gpt-5.6-sol`과 `high` 추론 강도입니다.
+일반 대화·신호 해설은 `gpt-5.6-terra` / `medium`, 정기 시장 브리핑은 `gpt-5.6-sol` / `high`를 사용합니다. 기존 ChatGPT 로그인과 주문 정책은 바꾸지 않습니다.
 
 ```text
-CODEX_MODEL=gpt-5.6-sol
-CODEX_REASONING_EFFORT=high
+CODEX_MODEL=gpt-5.6-terra
+CODEX_REASONING_EFFORT=medium
+# 정기 시장 브리핑 전용 (생략하면 일반 대화 설정 사용)
+CODEX_BRIEFING_MODEL=gpt-5.6-sol
+CODEX_BRIEFING_REASONING_EFFORT=high
 CODEX_WEB_SEARCH=live
 ```
 

@@ -75,8 +75,13 @@ const CHAT_DIR = path.join(ROOT, ".codex-chat");
 const KIWOOM_ORDER_STATE_FILE = path.join(ROOT, "kiwoom-orders.json");
 const OWNER_ID = process.env.DISCORD_OWNER_ID;
 const CODEX_BIN = process.env.CODEX_BIN || "codex";
-const CODEX_MODEL = process.env.CODEX_MODEL || "";
-const CODEX_REASONING_EFFORT = process.env.CODEX_REASONING_EFFORT || "";
+const CODEX_MODEL = process.env.CODEX_MODEL || "gpt-5.6-terra";
+const CODEX_REASONING_EFFORT = process.env.CODEX_REASONING_EFFORT || "medium";
+const DEFAULT_CODEX_PROFILE = { model: CODEX_MODEL, effort: CODEX_REASONING_EFFORT };
+const BRIEFING_CODEX_PROFILE = {
+  model: process.env.CODEX_BRIEFING_MODEL || CODEX_MODEL,
+  effort: process.env.CODEX_BRIEFING_REASONING_EFFORT || CODEX_REASONING_EFFORT,
+};
 const CODEX_TIMEOUT_MS = Number(process.env.CODEX_TIMEOUT_MS || 180_000);
 const CODEX_WEB_SEARCH = process.env.CODEX_WEB_SEARCH || "disabled";
 const AUTO_BRIEFING_ENABLED = process.env.AUTO_BRIEFING_ENABLED === "true";
@@ -371,19 +376,19 @@ function stopConversation(channelId) {
   return stopped;
 }
 
-function runCodex(persona, prompt, imagePaths = [], channelId = "global", expectedVersion = conversationVersion(channelId)): Promise<string> {
+function runCodex(persona, prompt, imagePaths = [], channelId = "global", expectedVersion = conversationVersion(channelId), profile = DEFAULT_CODEX_PROFILE): Promise<string> {
   return enqueueCodex(async () => {
     if (expectedVersion !== conversationVersion(channelId)) throw stoppedConversationError();
     fs.mkdirSync(CHAT_DIR, { recursive: true });
     const key = sessionKey(persona.id, channelId);
     const sessionId = state.sessions[key];
     try {
-      return await invokeCodex(persona, sessionId, personaPrompt(persona, prompt), imagePaths, key, channelId, expectedVersion);
+      return await invokeCodex(persona, sessionId, personaPrompt(persona, prompt), imagePaths, key, channelId, expectedVersion, profile);
     } catch (error) {
       if (!shouldRetryCodex(error, sessionId)) throw error;
       delete state.sessions[key];
       saveState();
-      return invokeCodex(persona, null, personaPrompt(persona, `[이전 세션을 복구하지 못해 새 세션에서 계속합니다.]\n${prompt}`), imagePaths, key, channelId, expectedVersion);
+      return invokeCodex(persona, null, personaPrompt(persona, `[이전 세션을 복구하지 못해 새 세션에서 계속합니다.]\n${prompt}`), imagePaths, key, channelId, expectedVersion, profile);
     }
   });
 }
@@ -392,7 +397,11 @@ function shouldRetryCodex(error: any, sessionId) {
   return Boolean(sessionId) && !["CODEX_TIMEOUT", "CODEX_STOPPED"].includes(error.code);
 }
 
-function invokeCodex(persona, sessionId, prompt, imagePaths, key, channelId, expectedVersion): Promise<string> {
+function codexModelArgs(profile = DEFAULT_CODEX_PROFILE) {
+  return ["--model", profile.model, "--config", `model_reasoning_effort="${profile.effort}"`];
+}
+
+function invokeCodex(persona, sessionId, prompt, imagePaths, key, channelId, expectedVersion, profile): Promise<string> {
   return new Promise<string>((resolve, reject) => {
     if (expectedVersion !== conversationVersion(channelId)) {
       reject(stoppedConversationError());
@@ -408,14 +417,11 @@ function invokeCodex(persona, sessionId, prompt, imagePaths, key, channelId, exp
       "--config",
       `web_search="${CODEX_WEB_SEARCH}"`,
     ];
-    const model = CODEX_MODEL ? ["--model", CODEX_MODEL] : [];
-    const reasoning = CODEX_REASONING_EFFORT
-      ? ["--config", `model_reasoning_effort="${CODEX_REASONING_EFFORT}"`]
-      : [];
+    const modelArgs = codexModelArgs(profile);
     const images = imagePaths.flatMap((file) => ["--image", file]);
     const args = sessionId
-      ? ["exec", "resume", ...common, ...model, ...reasoning, ...images, sessionId, "-"]
-      : ["exec", ...common, ...model, ...reasoning, ...images, "--sandbox", "read-only", "-C", CHAT_DIR, "-"];
+      ? ["exec", "resume", ...common, ...modelArgs, ...images, sessionId, "-"]
+      : ["exec", ...common, ...modelArgs, ...images, "--sandbox", "read-only", "-C", CHAT_DIR, "-"];
 
     const child = spawn(CODEX_BIN, args, {
       cwd: CHAT_DIR,
@@ -811,6 +817,7 @@ async function runGroupDiscussion(message, topic, {
   dedupeResearch = false,
   recentSignals = false,
   participants = PERSONAS,
+  codexProfile = DEFAULT_CODEX_PROFILE,
 } = {}) {
   const version = conversationVersion(message.channel.id);
   groupDiscussionChannels.add(message.channel.id);
@@ -845,6 +852,7 @@ async function runGroupDiscussion(message, topic, {
           index === 0 ? researchImages : [],
           message.channel.id,
           version,
+          codexProfile,
         ),
       );
       const publishedAnswer = answer.trim();
@@ -2261,6 +2269,7 @@ async function checkScheduledBriefing(now = new Date(), forceTime = "") {
         dedupeResearch: true,
         recentSignals: true,
         participants: [PERSONAS[0]],
+        codexProfile: BRIEFING_CODEX_PROFILE,
       },
     );
     if (!responses && sourceContext.fallback) await channel.send(sourceContext.fallback);
@@ -2713,8 +2722,10 @@ function validateConfig() {
   if (!Number.isFinite(CODEX_TIMEOUT_MS) || CODEX_TIMEOUT_MS < 10_000) {
     throw new Error("CODEX_TIMEOUT_MS는 10000 이상의 숫자여야 합니다.");
   }
-  if (CODEX_REASONING_EFFORT && !["minimal", "low", "medium", "high", "xhigh"].includes(CODEX_REASONING_EFFORT)) {
-    throw new Error("CODEX_REASONING_EFFORT는 minimal, low, medium, high, xhigh 중 하나여야 합니다.");
+  for (const [name, profile] of [["CODEX", DEFAULT_CODEX_PROFILE], ["CODEX_BRIEFING", BRIEFING_CODEX_PROFILE]] as const) {
+    if (!["none", "minimal", "low", "medium", "high", "xhigh", "max"].includes(profile.effort)) {
+      throw new Error(`${name}_REASONING_EFFORT는 none, minimal, low, medium, high, xhigh, max 중 하나여야 합니다.`);
+    }
   }
   if (!["disabled", "cached", "indexed", "live"].includes(CODEX_WEB_SEARCH)) {
     throw new Error("CODEX_WEB_SEARCH는 disabled, cached, indexed, live 중 하나여야 합니다.");
@@ -2788,6 +2799,7 @@ function validateConfig() {
 
 async function main() {
   validateConfig();
+  console.log(`AI 모델: 일반 ${DEFAULT_CODEX_PROFILE.model} / ${DEFAULT_CODEX_PROFILE.effort}, 정기 브리핑 ${BRIEFING_CODEX_PROFILE.model} / ${BRIEFING_CODEX_PROFILE.effort}`);
   for (const persona of PERSONAS) {
     const client = new Client({
       intents: [
@@ -2825,6 +2837,8 @@ async function main() {
 }
 
 function selfTest() {
+  if (JSON.stringify(codexModelArgs()) !== JSON.stringify(["--model", CODEX_MODEL, "--config", `model_reasoning_effort="${CODEX_REASONING_EFFORT}"`])) throw Error("일반 대화 모델 설정 실패");
+  if (JSON.stringify(codexModelArgs({ model: "gpt-5.6-sol", effort: "high" })) !== JSON.stringify(["--model", "gpt-5.6-sol", "--config", 'model_reasoning_effort="high"'])) throw Error("브리핑 모델 설정 실패");
   const scheduleClock = { date: "2026-09-10", time: "18:30" }, times = ["08:30", "15:40", "22:00"];
   const nowMs = Date.parse("2026-09-10T09:30:00Z");
   if (dueBriefingTime(scheduleClock, times, {}, nowMs, 900000) !== "15:40") throw Error("브리핑 지연 통합 실패");
