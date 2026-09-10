@@ -82,6 +82,15 @@ const emptyBroker = (id, label): any => ({
   assert.match(JSON.stringify(comparisonCard), /비용 미확인을 0원으로 보지 않음/);
   assert.match(comparisonCard.embeds[0].fields[0].value, /^4시간봉/);
   assert.match(comparisonCard.embeds[0].fields[1].value, /^정석 진입/);
+  const incidentOrders = strategyOrders.map(order => ({ ...order, evaluationIssues: ["운영 장애 증빙 test-incident"] }));
+  const incidentBroker = { ...comparisonBroker, tracker: { list: () => incidentOrders } };
+  assert.equal(calculateTradingPerformance(incidentOrders).all.count, 1, "actual outcomes remain in total performance");
+  assert.equal(calculateTradingPerformance(incidentOrders).all.currencies.USD.profitLoss, calculateTradingPerformance(strategyOrders).all.currencies.USD.profitLoss);
+  const separated = strategyComparison(incidentBroker);
+  assert.equal(separated.groups.length, 0, "operationally affected trades are not clean strategy evidence");
+  assert.equal(separated.operational.length, 1);
+  assert.deepEqual(separated.operational[0].evaluationIssues, ["운영 장애 증빙 test-incident"]);
+  assert.match(JSON.stringify(formatStrategyComparisonMessage([incidentBroker])), /실제 손익·전체 승률에는 포함/);
   assert.match(comparisonCard.embeds[0].fields[0].value, /실현손익 낙폭 \$40/);
   const snapshot = tradingPerformanceSnapshot([{ ...emptyBroker("KIWOOM", "키움"), tracker: { list: () => [
     { environment: "mock", revision: 1, status: "FILLED", side: "SELL", fullExit: true, market: "KRX", symbol: "005930", filledQuantity: 1, fillPrice: 80_000, preTradeAverageEntryPrice: 70_000, updatedAt: "2026-08-04T00:00:00.000Z" },

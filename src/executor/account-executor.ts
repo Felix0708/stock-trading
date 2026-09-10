@@ -1254,6 +1254,13 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
 
   async function executeOrder(broker, record, { manual = false } = {}) {
     if (!readOnlySignalAllowed(record, readOnly)) return null;
+    if (record.source === "LOCAL_STOP_GUARD") {
+      if (broker.environment !== "mock") return { status: "BLOCKED", reason: "로컬 자동 손절은 모의계좌 전용" };
+      const owned = managedPosition(broker.tracker.list(), record.payload, broker.environment);
+      if (!owned.quantity || owned.entryRequestId !== record.positionEntryRequestId) {
+        return { status: "NO_ACTION", reason: "손절 대상 포지션 종료 또는 변경 · 주문 없음" };
+      }
+    }
     if (record.executionDeadline && Date.now() >= record.executionDeadline) return { status: "EXPIRED", reason: "주문 유효시간 종료" };
     if (!manual && !receipts.autoTrading() && record.payload?.paper_order_test !== true) return { status: "DEFER_REQUIRED" };
     if (receipts.supersededEntry(broker.id, record)) return { status: "BLOCKED", reason: "이후 청산 신호로 취소된 진입" };
@@ -1286,6 +1293,9 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
       try {
         const quote = await currentSignalPrice(broker, record.payload);
         if (!Number.isFinite(quote) || quote <= 0) throw new Error("유효한 현재가 확인 실패");
+        if (record.source === "LOCAL_STOP_GUARD" && (broker.environment !== "mock" || quote > record.payload.sl)) {
+          return { status: "NO_ACTION", reason: "모의 손절 재확인 조건 해소 · 주문 없음" };
+        }
         record.originalSignalPrice ??= record.payload.price;
         record.payload.price = record.payload.action === "BUY" && signalExchange(record.payload.exchange) !== "KRX"
           ? protectedUsBuyLimit(record.originalSignalPrice, quote) : quote;
@@ -1615,13 +1625,29 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
               new Error("실제 잔고가 자동매매 기록보다 적습니다. 기록을 임의로 청산 처리하지 않으며 해당 종목 신규 주문을 차단합니다."), { payload });
             continue;
           }
-          if (!(owned.stopPrice > 0)) { checked++; unresolved.delete(symbolKey); continue; }
+          if (!Number.isFinite(owned.stopPrice) || !(owned.stopPrice > 0)) { checked++; unresolved.delete(symbolKey); continue; }
           const price = await currentSignalPrice(broker, payload);
           if (!Number.isFinite(price) || price <= 0) throw new Error("유효한 현재가 없음");
           checked++;
           unresolved.delete(symbolKey);
-          if (!marketClosed && price <= owned.stopPrice) await reportError(`${broker.label} 손절 기준 이탈 · 보유 확인 필요`,
-            new Error("저장된 손절 기준 이하입니다. 이 감시는 알림 전용이며 증권사 보호 주문이 아닙니다."), { payload });
+          if (!marketClosed && price <= owned.stopPrice) {
+            if (broker.environment === "mock" && !readOnly && receipts.autoTrading() && owned.entryRequestId && owned.entryAt > 0) {
+              const entry = freshOrders.find(item => item.requestId === owned.entryRequestId);
+              const previous = freshOrders.filter(item => item.source === "LOCAL_STOP_GUARD"
+                && item.positionEntryRequestId === owned.entryRequestId);
+              // Terminal residuals get a new id; pending/uncertain submissions retain the same durable id across restarts.
+              const generation = previous.filter(item => ["CANCELLED", "REJECTED", "EXPIRED"].includes(item.status)).length;
+              const record = { requestId: `${owned.entryRequestId}:local-stop:${generation}`, receivedAt: new Date().toISOString(),
+                source: "LOCAL_STOP_GUARD", positionEntryRequestId: owned.entryRequestId,
+                evaluationIssues: [...new Set([...(entry?.evaluationIssues || []),
+                  ...(entry?.policyVersion !== POLICY_VERSION ? ["보유 중 손절 정책 변경 · 기존 전략과 직접 비교 제외"] : [])])],
+                payload: { ...payload, timeframe: owned.timeframe, type: "모의계좌 손절선 이탈", price, sl: owned.stopPrice },
+                outcome: { decision: "EXIT_IF_FILLED", signal: { signalCode: "EXIT_CRASH" } },
+                risk: { verdict: "PAPER_EXIT", reason: "모의 자동매매 보유분의 저장 손절선 이탈 · 주문 직전 재확인" } };
+              await executeOrDefer(broker, record);
+            } else await reportError(`${broker.label} 손절 기준 이탈 · 보유 확인 필요`,
+              new Error("저장된 손절 기준 이하입니다. 실계좌·자동매매 OFF·읽기전용·진입 증빙 미확인은 자동 청산하지 않습니다."), { payload });
+          }
         } catch (error) { queryError ||= error; unresolved.add(symbolKey); }
       }
       if (queryError) {
@@ -1974,7 +2000,7 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
       try {
         writeAccountHealth(receipts.file, { discordReady: client.isReady(), initialized, workerAt,
           brokerQueriesHealthy: stopMonitorOutages.size === 0,
-          uncertainOrders: brokers.some(broker => broker.tracker.list().some(order => order.status === "UNKNOWN"))
+          uncertainOrders: brokers.some(broker => broker.tracker.list().some(order => order.status === "UNKNOWN" || order.reconciliationRequired === true))
             || Object.values(receipts.state.protection || {}).some((intent: any) => intent.status === "UNKNOWN" || (intent.status === "SUBMITTING" && Date.now() - Date.parse(intent.createdAt) > 60_000))
             || Object.entries(receipts.state.attempts).some(([key, attempt]: [string, any]) => attempt.status === "UNKNOWN" || (attempt.status === "SUBMITTING" && !submitting.has(key))) });
       } catch (error) { console.error("실행기 상태 기록 실패:", error.message); }

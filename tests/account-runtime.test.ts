@@ -19,7 +19,7 @@ function record(id, action = "BUY") {
     risk: { verdict: action === "BUY" ? "PAPER_ENTRY" : "PAPER_EXIT" } };
 }
 
-function fixture(ids = ["KIS"], environment = "mock") {
+function fixture(ids = ["KIS"], environment = "mock", readOnly = false) {
   const receipts = new SignalReceiptStore(null, true);
   const sent = [];
   const messages = new Map();
@@ -38,7 +38,8 @@ function fixture(ids = ["KIS"], environment = "mock") {
   const brokers = ids.map((id) => {
     const state = { orders: [], requests: [], executions: [], holdings: [], price: 120, failBalance: false, unknown: false, cancels: 0 };
     const tracker = { list: () => state.orders, pending: () => state.orders.filter(o => ["ACCEPTED", "PARTIALLY_FILLED", "CANCEL_REQUESTED"].includes(o.status)),
-      record: (order) => { const previous = state.orders.find(o => o.orderNo === order.orderNo); const saved = { ...previous, ...order }; state.orders = [...state.orders.filter(o => o.orderNo !== order.orderNo), saved]; return saved; } };
+      record: (order) => { const previous = state.orders.find(o => o.orderNo === order.orderNo); const saved = { ...previous, ...order,
+        createdAt: previous?.createdAt || order.createdAt || new Date().toISOString() }; state.orders = [...state.orders.filter(o => o.orderNo !== order.orderNo), saved]; return saved; } };
     const api = {
       getDomesticBalance: async () => { if (state.failBalance) throw new Error("balance unavailable"); return { estimatedAssets: 100000, holdings: [] }; },
       getUsBalances: async () => [{ holdings: state.holdings }],
@@ -55,7 +56,7 @@ function fixture(ids = ["KIS"], environment = "mock") {
     .map(id => [id, id === "order" ? channel : { ...channel, id, name: id }])) } };
   const channels = { order: "order", execution: "execution", system: "system", journal: "journal" };
   const runtime = createAccountRuntime({ brokers, receipts, client: { guilds: { fetch: async () => guild } },
-    ownerId: "owner", targetGuildId: "guild", channels,
+    ownerId: "owner", targetGuildId: "guild", channels, readOnly,
     trusted: { sourceChannelIds: new Set(["signal"]), sourceBotIds: new Set(["source"]) },
     trackingOptions: { attempts: 0 }, enrichNames: async items => items });
   return { runtime, receipts, brokers, sent, messages, channels, channel, guild, failDiscord: value => { discordFails = value; } };
@@ -299,7 +300,7 @@ function message(r) { return { id: r.requestId, channelId: "signal", author: { i
       const dailyExit = record("owned-exit", "SELL"); dailyExit.payload.timeframe = "D";
       await scoped.runtime.executeOrDefer(broker, dailyExit);
       assert.equal(broker.state.requests[0].quantity, 10); // 90 manual shares are untouched
-      assert.equal(broker.state.orders.find(o => o.requestId === "owned-exit").policyVersion, "2026-09-07-owned-timeframe-v1");
+      assert.equal(broker.state.orders.find(o => o.requestId === "owned-exit").policyVersion, "2026-09-10-mock-stop-v1");
     }
   }
   const unmanaged = fixture();
@@ -313,6 +314,44 @@ function message(r) { return { id: r.requestId, channelId: "signal", author: { i
   await stopAlert.runtime.checkManagedStops();
   assert.equal(stopAlert.brokers[0].state.requests.length, 0);
   assert.match(JSON.stringify(stopAlert.sent), /손절 기준 이탈/);
+
+  for (const id of ["KIWOOM", "KIS"]) {
+    const guarded = fixture([id]), broker = guarded.brokers[0];
+    const entry = { ...stopAlert.brokers[0].tracker.list()[0], requestId: "guarded-entry",
+      environment: "mock", createdAt: new Date(clock - 10000).toISOString(), policyVersion: "legacy" };
+    broker.tracker.record(entry);
+    broker.state.holdings = [{ code: "TEST", quantity: 100, tradableQuantity: 100 }];
+    broker.state.price = 80;
+    await guarded.runtime.checkManagedStops();
+    await guarded.runtime.checkManagedStops();
+    assert.equal(broker.state.requests.length, 1, "a pending stop cannot be submitted twice");
+    assert.equal(broker.state.requests[0].quantity, 10, "manual holdings must remain untouched");
+    const exit = broker.tracker.list().find(o => o.source === "LOCAL_STOP_GUARD");
+    assert.equal(exit.positionEntryRequestId, "guarded-entry");
+    assert.equal(exit.signalCode, "EXIT_CRASH");
+    assert.match(exit.evaluationIssues.join(), /정책 변경/);
+    broker.tracker.record({ ...exit, status: "CANCELLED", remainingQuantity: 0, filledQuantity: 2, fillPrice: 80 });
+    broker.state.holdings[0].quantity = broker.state.holdings[0].tradableQuantity = 98;
+    await guarded.runtime.checkManagedStops();
+    assert.equal(broker.state.requests.length, 2);
+    assert.equal(broker.state.requests[1].quantity, 8, "only confirmed remaining managed shares are retried");
+
+    for (const mode of ["live", "readonly", "paused", "closed", "unknown", "rebound", "pending-exit"]) {
+      const locked = fixture([id], mode === "live" ? "live" : "mock", mode === "readonly"), b = locked.brokers[0];
+      b.tracker.record({ ...entry, environment: b.environment }); b.state.holdings = [{ code: "TEST", quantity: 10, tradableQuantity: 10 }]; b.state.price = 80;
+      if (mode === "paused") locked.receipts.setAutoTrading(false);
+      if (mode === "unknown") b.state.unknown = true;
+      if (mode === "pending-exit") b.tracker.record({ orderNo: "older-sell", symbol: "TEST", market: "NASDAQ", side: "SELL", status: "ACCEPTED", environment: "mock", filledQuantity: 0 });
+      if (mode === "rebound") { let reads = 0; b.overseasClient.getUsQuote = async () => ({ currentPrice: ++reads === 1 ? 80 : 95 }); }
+      const savedClock = clock;
+      if (mode === "closed") clock = new RealDate("2026-09-08T20:00:01Z").getTime();
+      await locked.runtime.checkManagedStops();
+      await locked.runtime.checkManagedStops();
+      await locked.runtime.retryDeferred();
+      clock = savedClock;
+      assert.equal(b.state.requests.length, mode === "unknown" ? 1 : 0, `${id}: ${mode} must not produce a duplicate/unauthorized sell`);
+    }
+  }
 
   const monitor = fixture(["KIS", "KIWOOM"]);
   for (const broker of monitor.brokers) {

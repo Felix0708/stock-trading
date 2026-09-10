@@ -59,14 +59,15 @@ function reconciliationPlan(orders, rows, environment) {
       conflicts.push({ symbol: order.symbol, reason: "수량·가격·정정주문 증빙 대조 필요" }); continue;
     }
     const changed = row.filledQuantity !== Number(order.filledQuantity || 0)
-      || (row.filledQuantity > 0 && Math.abs(row.fillPrice - Number(order.fillPrice || 0)) > 0.00001);
+      || (row.filledQuantity > 0 && Math.abs(row.fillPrice - Number(order.fillPrice || 0)) > 0.00001)
+      || (row.remainingQuantity === 0 && ["ACCEPTED", "PARTIALLY_FILLED", "CANCEL_REQUESTED", "UNKNOWN"].includes(order.status));
     const costChanged = row.executionCosts && JSON.stringify(row.executionCosts) !== JSON.stringify(order.executionCosts);
     if (!changed && !costChanged) continue;
     // Corrections require broker evidence, never a difference between two balance numbers.
     if (row.remainingQuantity > 0) { conflicts.push({ symbol: order.symbol, reason: "과거 주문 잔량 종료 여부 미확인" }); continue; }
     updates.push({ ...order, ...(costChanged ? { executionCosts: row.executionCosts } : {}), ...(changed ? { filledQuantity: row.filledQuantity, remainingQuantity: 0, fillPrice: row.fillPrice,
       status: row.filledQuantity === row.orderQuantity ? "FILLED" : "CANCELLED",
-      expirationReason: null, rawStatus: row.rawStatus || "증권사 과거 체결 증빙 확인", resultAt: row.filledAt || null,
+      reconciliationRequired: false, expirationReason: null, rawStatus: row.rawStatus || "증권사 과거 체결 증빙 확인", resultAt: row.filledAt || null,
       evidenceFilledAt: row.filledAt || null, historicalFillDate: row.filledAt ? koreanDate(row.filledAt) : String(row.source).startsWith("KIWOOM:") ? null : row.date,
       historicalQueryDate: row.date,
       reconciliationEvidence: { source: row.source, capturedAt: new Date().toISOString(),

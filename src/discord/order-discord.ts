@@ -63,6 +63,8 @@ function formatOrderStatus(order) {
       description: `**${identity}**`,
       fields: [
         { name: "수량", value: `주문 ${display(order.orderQuantity)}주 · 체결 ${display(order.filledQuantity)}주 · 잔량 ${display(order.remainingQuantity)}주` },
+        ...(order.source === "LOCAL_STOP_GUARD" ? [{ name: "처리 근거", value: "모의계좌 로컬 손절 감시 · 저장 손절선 이탈 및 현재가 재확인 (TradingView 신호 아님)" }]
+          : order.source === "OUTAGE_RECOVERY" ? [{ name: "처리 근거", value: "서버 장애로 전달 실패한 원신호의 운영자 복구 · 현재 보유·주문·시세 재검증 (새 신호 아님)" }] : []),
         ...(pyramidLine ? [{ name: "피라미딩", value: pyramidLine }] : []),
         ...(order.orderStrategy ? [{ name: "주문 방식", value: clip(order.orderStrategy, 1024) }] : []),
         ...(order.orderStyle === "BROKER_STOP" ? [{ name: "보호 조건", value: `발동가 ${money(order.stopPrice, currency)} · 발동 후 시장가, 체결가 보장 없음\n${order.protectionVerifiedAt ? "마지막 증권사 조회: " + order.protectionVerifiedAt : "접수 후 유형·수량·가격 확인 중"}\n장 종료 후 유지 여부는 별도 확인 대상` }] : []),

@@ -201,6 +201,8 @@ assert(order.text.includes("PARTIALLY_FILLED"));
 assert(order.text.includes("0282"));
 assert.equal(order.embed.title, "⏳ BUY · 부분 체결");
 assert(order.embed.description.includes("애플 (AAPL)"));
+assert.match(JSON.stringify(formatOrderStatus({ source: "LOCAL_STOP_GUARD", status: "ACCEPTED", side: "SELL" })), /TradingView 신호 아님/);
+assert.match(JSON.stringify(formatOrderStatus({ source: "OUTAGE_RECOVERY", status: "ACCEPTED", side: "SELL" })), /새 신호 아님/);
 const kisOrder = formatOrderStatus({
   orderNo: "5678", symbol: "AAPL", name: "Apple Inc.", side: "BUY", status: "ACCEPTED",
   orderQuantity: 1, filledQuantity: 0, remainingQuantity: 1, brokerLabel: "한투 모의계좌",

@@ -79,6 +79,7 @@ function calculateTradingPerformance(orders, now = new Date()) {
         costs: 0, costsKnown: true, signalPriceDifference: 0, signalPriceKnown: true,
         timeframe: normalizedTimeframe(order.timeframe) || "미확인", signalCode: order.signalCode || "미확인",
         sigmaBand: sigmaBand(order.sizingContext?.sigmaZ), policyVersion: order.policyVersion || "legacy", entryRequestId: order.requestId,
+        evaluationIssues: [],
       });
       const position = positions.get(key);
       if (position && ["PAPER_ENTRY", "PAPER_ADD"].includes(order.entryType)) {
@@ -86,6 +87,7 @@ function calculateTradingPerformance(orders, now = new Date()) {
         position.cost += quantity * (price || 0);
         if (!price) position.reliable = false;
         addExecutionCosts(position, order);
+        position.evaluationIssues.push(...(order.evaluationIssues || []));
         if (normalizedTimeframe(order.timeframe) !== position.timeframe) position.timeframe = "혼합·미확인";
         if ((order.policyVersion || "legacy") !== position.policyVersion) position.policyVersion = "혼합";
       }
@@ -99,7 +101,7 @@ function calculateTradingPerformance(orders, now = new Date()) {
       const held = positiveNumber(order.preTradePositionQuantity) || positiveNumber(order.orderQuantity) || quantity;
       position = { quantity: held, cost: held * brokerAverage, realizedBasis: 0, profitLoss: 0, reliable: true,
         costs: 0, costsKnown: false, signalPriceDifference: 0, signalPriceKnown: false,
-        timeframe: "미확인", signalCode: "미확인", sigmaBand: "미확인", policyVersion: "legacy" };
+        timeframe: "미확인", signalCode: "미확인", sigmaBand: "미확인", policyVersion: "legacy", evaluationIssues: [] };
       positions.set(key, position);
     }
     if (!position) {
@@ -107,6 +109,7 @@ function calculateTradingPerformance(orders, now = new Date()) {
       continue;
     }
     addExecutionCosts(position, order);
+    position.evaluationIssues.push(...(order.evaluationIssues || []));
 
     // Reconstructed strategy cost takes precedence over an account average that may include manual holdings.
     const average = position.quantity >= quantity && position.cost > 0 ? position.cost / position.quantity : brokerAverage;
@@ -135,6 +138,7 @@ function calculateTradingPerformance(orders, now = new Date()) {
         signalPriceDifference: position.signalPriceKnown ? position.signalPriceDifference : null,
         timeframe: position.timeframe, signalCode: position.signalCode, sigmaBand: position.sigmaBand,
         policyVersion: position.policyVersion, entryRequestId: position.entryRequestId,
+        symbol: normalizedSymbol(order.symbol), evaluationIssues: [...new Set(position.evaluationIssues)],
       });
       else excludedFullExits += 1;
       positions.delete(key);
@@ -152,12 +156,14 @@ function calculateTradingPerformance(orders, now = new Date()) {
 
 function strategyComparison(broker, signals = {}) {
   const performance = calculateTradingPerformance(brokerOrders(broker));
+  const operational = performance.completed.filter(trade => trade.evaluationIssues.length);
+  const eligible = performance.completed.filter(trade => !trade.evaluationIssues.length);
   const dimensions = ["timeframe", "signalCode", "sigmaBand", "policyVersion"];
   const groups = [];
   for (const dimension of dimensions) {
     for (const currency of ["USD", "KRW"]) {
-      for (const label of new Set(performance.completed.filter(trade => trade.currency === currency).map(trade => trade[dimension]))) {
-        const trades = performance.completed.filter(trade => trade.currency === currency && trade[dimension] === label)
+      for (const label of new Set(eligible.filter(trade => trade.currency === currency).map(trade => trade[dimension]))) {
+        const trades = eligible.filter(trade => trade.currency === currency && trade[dimension] === label)
           .sort((a, b) => Date.parse(a.completedAt || "") - Date.parse(b.completedAt || ""));
         const summary = summarizeCompletedTrades(trades);
         let balance = 0, peak = 0, realizedDrawdown = 0;
@@ -183,7 +189,7 @@ function strategyComparison(broker, signals = {}) {
       sigmaBand(entry.record.payload?.sb_z_score), entry.record.policyVersion || "legacy", progress.reason || "사유 미확인"].join(" · ");
     blocked.set(key, (blocked.get(key) || 0) + 1);
   }
-  return { groups, blocked: [...blocked].map(([label, count]) => ({ label, count })), excludedFullExits: performance.excludedFullExits };
+  return { groups, operational, blocked: [...blocked].map(([label, count]) => ({ label, count })), excludedFullExits: performance.excludedFullExits };
 }
 
 function formatStrategyComparisonMessage(brokers, signals = {}) {
@@ -195,6 +201,9 @@ function formatStrategyComparisonMessage(brokers, signals = {}) {
         `${dimension === "timeframe" ? timeframeLabel(group.label) : dimension === "signalCode" ? SIGNAL_RULES.find(([, code]) => code === group.label)?.[0] || group.label : group.label === "legacy" ? "과거 정책 미확인" : group.label} · ${group.currency} · ${group.count}건 · 승률 ${percentage(group.winRate)}\n손익 ${money(group.profitLoss, group.currency)} (${percentage(group.returnRate)}) · 실현손익 낙폭 ${group.realizedDrawdown === null ? "시각 미확인" : money(group.realizedDrawdown, group.currency).replace(/^\+/, "")}\n비용 차감 ${group.netProfitLoss === null ? `미확인 ${group.unknownCosts}건` : `${money(group.netProfitLoss, group.currency)} (${percentage(group.netReturnRate)})`}`
       ).join("\n") || "비교할 최종청산 표본 없음" }));
     fields.push({ name: "차단 신호 (가상 수익에 합산하지 않음)", value: comparison.blocked.map(row => `${row.label}: ${row.count}건`).join("\n") || "계좌별 차단 기록 없음" });
+    if (comparison.operational.length) fields.push({ name: "운영 장애·보유 중 정책 변경 (전략 비교만 제외)",
+      value: comparison.operational.map(trade => `${trade.symbol} · ${money(trade.profitLoss, trade.currency)} · ${trade.evaluationIssues.join(" / ")}`).join("\n")
+        + "\n실제 손익·전체 승률에는 포함. 장애가 없었을 때의 수익을 가정하지 않습니다." });
     return { title: "자동매매 전략 비교", description: `${broker.label} ${broker.environment === "live" ? "실계좌" : "모의계좌"} · 최초 진입 기준 분류 · 승률·수익률은 비용 전`,
       color: 0x5865f2, fields: fields.map(field => ({ ...field, value: field.value.length > 480 ? `${field.value.slice(0, 400)}\n…전체: !account performance` : field.value })),
       footer: { text: "실현손익 낙폭 ≠ 계좌 MDD · 비용 미확인을 0원으로 보지 않음 · 실제 체결가 사용" } };
