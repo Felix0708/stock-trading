@@ -5,7 +5,7 @@ const { createHash } = require("node:crypto");
 const { Client, GatewayIntentBits } = require("discord.js");
 const { syncAccountPortfolio, strategyComparison, formatStrategyComparisonMessage } = require("./account-portfolio");
 const { writeAccountHealth } = require("./account-health");
-const { evidenceFile, readEvidence, writeEvidence, collectBrokerEvidence, applyEvidence, validateStatement, reconciliationPlan } = require("./account-evidence");
+const { evidenceFile, readEvidence, writeEvidence, collectBrokerEvidence, applyEvidence, validateStatement, reconciliationPlan, koreanDate } = require("./account-evidence");
 const { equityPerformance, importCashFlows } = require("./equity-performance");
 const { brokerStop, protectionReadiness, currentProtection, ensureProtection, releaseProtection } = require("./broker-protection");
 const { formatLifecycleCard } = require("./signal-lifecycle");
@@ -811,7 +811,19 @@ async function reconcilePendingBrokerOrders(broker) {
   const changes = [];
   for (const previous of broker.tracker.pending()) {
     if (brokerStop(previous)) continue; // Native protection has stricter identity/trigger verification.
-    const current = await refreshPaperOrder(previous, broker);
+    let current;
+    const date = koreanDate(previous.createdAt, broker.id === "KIWOOM" ? "America/New_York" : "Asia/Seoul");
+    if (previous.status !== "UNKNOWN" && previous.market !== "KRX" && date
+      && date < koreanDate(new Date(), broker.id === "KIWOOM" ? "America/New_York" : "Asia/Seoul")
+      && broker.overseasClient.getUsHistoricalExecutions) {
+      if (Date.now() - Date.parse(previous.historyCheckedAt || "") < 300000) continue;
+      const rows = await broker.overseasClient.getUsHistoricalExecutions({ date, symbol: previous.symbol, exchange: previous.exchange });
+      const plan = reconciliationPlan([previous], rows, broker.environment);
+      current = broker.tracker.record(plan.updates.length === 1 ? { ...plan.updates[0], reconciliationRequired: !["FILLED", "CANCELLED", "REJECTED", "EXPIRED"].includes(plan.updates[0].status), historyCheckedAt: new Date().toISOString() }
+        : { ...previous, historyCheckedAt: new Date().toISOString(), reconciliationRequired: true });
+      // An empty current-day list or an old "accepted" row does not prove expiry.
+      // Keep the original order blocking a duplicate until final broker evidence arrives.
+    } else current = await refreshPaperOrder(previous, broker);
     if (["status", "filledQuantity", "remainingQuantity", "fillPrice"].some((key) => current[key] !== previous[key])) {
       changes.push({ previous, current });
     }
@@ -1591,7 +1603,10 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
         const symbolKey = `${order.market}:${order.symbol}`;
         if (!owned.quantity) { unresolved.delete(symbolKey); continue; }
         ownedCount++;
-        if (shouldDelayOrder({ payload, risk: { verdict: "PAPER_EXIT" } }, new Date(), broker)) continue;
+        const marketClosed = shouldDelayOrder({ payload, risk: { verdict: "PAPER_EXIT" } }, new Date(), broker);
+        // Finish a read-only recovery check even if the outage crossed market close.
+        // Outside trading hours, healthy accounts still make no stop-monitor requests.
+        if (marketClosed && !stopMonitorOutages.has(outageKey)) continue;
         try {
           const account = await accountContext(broker, { payload }, maxOpenPositions, { positionOnly: true });
           if (!Number.isInteger(account.currentPositionQuantity) || account.currentPositionQuantity < owned.quantity) {
@@ -1605,7 +1620,7 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
           if (!Number.isFinite(price) || price <= 0) throw new Error("유효한 현재가 없음");
           checked++;
           unresolved.delete(symbolKey);
-          if (price <= owned.stopPrice) await reportError(`${broker.label} 손절 기준 이탈 · 보유 확인 필요`,
+          if (!marketClosed && price <= owned.stopPrice) await reportError(`${broker.label} 손절 기준 이탈 · 보유 확인 필요`,
             new Error("저장된 손절 기준 이하입니다. 이 감시는 알림 전용이며 증권사 보호 주문이 아닙니다."), { payload });
         } catch (error) { queryError ||= error; unresolved.add(symbolKey); }
       }
@@ -2038,7 +2053,7 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
   return { listen, execute, executeOrDefer, retryDeferred, retryInbox, processMessage, processApproval, processOwnerCommand, reconcileOrders, checkManagedStops, refreshLifecycleCards };
 }
 
-if (require.main === module) start().catch((error) => { console.error(error); process.exitCode = 1; });
+if (require.main === module) start().catch(require("../../scripts/network-failure.cjs").fatal);
 
 
 module.exports = { createAccountRuntime, SignalReceiptStore, accountCommand, accountContext, accountPortfolioSyncMinutes, accountRiskPolicy, accountSymbol, applyPyramidSizing, approvalCard, approvalText, approvedEntryVerdict, availableApprovalBrokerIds, brokerEnvironments, buyApprovalRequiredForBroker, deferredOrderAttemptDue, discordMessagePayload, enabledBrokerIds, enforceOpenRiskLimit, enforceOwnAccountRules, errorReportDue, executionPreview, invalidationExitReason, liveAutoBuyEligible, marketTransitionRetryDelayMs, momentumExitRecommendation, orderAttemptKey, orderNeedsPortfolioSync, orderNeedsResultReport, orderStatusUnknown, pendingSymbolOrder, pyramidPlan, readOnlySignalAllowed, reconcilePendingBrokerOrders, requiresExistingPosition, shouldConsumeMessage, shouldRetryMarketTransition, signalExchange, skippedExistingEntry, skippedNoPosition, start, trackedPortfolio, verificationDelayMs };

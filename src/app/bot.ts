@@ -2213,14 +2213,28 @@ async function startWebhookReceiver() {
   console.log(`웹훅 수신기: http://${WEBHOOK_HOST}:${WEBHOOK_PORT}/webhook/<secret> (${!ACCOUNT_NEUTRAL_SIGNAL_SERVER && KIWOOM_ENABLED && KIWOOM_ENV === "mock" ? "모의주문 연결" : "계좌 중립 · 주문 분리"})`);
 }
 
+function dueBriefingTime(clock, times, runs, nowMs, runningTimeoutMs) {
+  const time = times.filter(time => time <= clock.time).sort().at(-1);
+  if (!time) return "";
+  const previous = runs[`${clock.date}|${time}`];
+  if (["COMPLETED", "SUPERSEDED"].includes(previous?.status)) return "";
+  const retryAt = previous?.status === "RUNNING" ? Date.parse(previous.startedAt) + runningTimeoutMs
+    : previous?.status === "FAILED" ? Date.parse(previous.failedAt) + 300000 : 0;
+  return retryAt > nowMs ? "" : time;
+}
+
 async function checkScheduledBriefing(now = new Date(), forceTime = "") {
   if (!AUTO_BRIEFING_ENABLED || briefingInProgress) return false;
   const clock = zonedClock(now);
-  if (forceTime) clock.time = forceTime;
   if (AUTO_BRIEFING_WEEKDAYS_ONLY && ["Sat", "Sun"].includes(clock.weekday)) return false;
-  if (!AUTO_BRIEFING_TIMES.includes(clock.time)) return false;
+  const actualTime = clock.time;
+  const time = forceTime || dueBriefingTime(clock, AUTO_BRIEFING_TIMES, state.scheduledRuns, now.getTime(), Math.max(CODEX_TIMEOUT_MS + 60000, 900000));
+  if (!time || !AUTO_BRIEFING_TIMES.includes(time)) return false;
+  clock.time = time;
   const runKey = forceTime ? `${clock.date}|${clock.time}|manual-${Date.now()}` : `${clock.date}|${clock.time}`;
-  if (state.scheduledRuns[runKey]) return false;
+  const missedTimes = forceTime ? [] : AUTO_BRIEFING_TIMES.filter(value => value <= time
+    && !["COMPLETED", "SUPERSEDED"].includes(state.scheduledRuns[`${clock.date}|${value}`]?.status));
+  const recovery = !forceTime && actualTime !== time;
   const channel = findBriefingChannel();
   if (!channel) {
     console.warn(`자동 브리핑 채널을 찾지 못했습니다: #${AUTO_BRIEFING_CHANNEL}`);
@@ -2233,13 +2247,14 @@ async function checkScheduledBriefing(now = new Date(), forceTime = "") {
   for (const oldKey of Object.keys(state.scheduledRuns).sort().slice(0, -30)) delete state.scheduledRuns[oldKey];
   saveState();
   try {
-    await channel.send(`⏰ **${clock.time} 자동 시장 브리핑을 시작합니다.**`);
+    const recoveryNote = recovery ? `예약 ${missedTimes.join("·")} 브리핑 지연 복구 · 실제 작성 ${actualTime} (${AUTO_BRIEFING_TIMEZONE}). 누락분을 최신 자료로 통합하며 과거 시점의 자료로 표현하지 않습니다.` : "";
+    await channel.send(recovery ? `⏰ **자동 시장 브리핑 지연 복구**\n${recoveryNote}` : `⏰ **${clock.time} 자동 시장 브리핑을 시작합니다.**`);
     const sourceContext = await briefingSourceContext(clock);
     delete state.sessions[sessionKey(PERSONAS[0].id, channel.id)];
     saveState();
     const responses = await runGroupDiscussion(
       { channel },
-      `${sourceContext.prompt}\n\n추가 확인사항:\n${scheduledTopic(clock.time)}\n\n반드시 최신 웹 검색과 제공된 스냅샷을 함께 사용해 브리핑을 완성하세요. 확인되지 않은 수치를 추정하지 마세요.`,
+      `${recoveryNote}\n${sourceContext.prompt}\n\n추가 확인사항:\n${scheduledTopic(clock.time)}\n\n반드시 최신 웹 검색과 제공된 스냅샷을 함께 사용해 브리핑을 완성하세요. 확인되지 않은 수치를 추정하지 마세요.`,
       {
         includeResearch: true,
         includeResearchImages: false,
@@ -2250,7 +2265,8 @@ async function checkScheduledBriefing(now = new Date(), forceTime = "") {
     );
     if (!responses && sourceContext.fallback) await channel.send(sourceContext.fallback);
     else if (!responses) throw new Error("완료된 자동 브리핑 응답이 없습니다.");
-    state.scheduledRuns[runKey] = { status: "COMPLETED", startedAt, completedAt: new Date().toISOString() };
+    state.scheduledRuns[runKey] = { status: "COMPLETED", startedAt, completedAt: new Date().toISOString(), ...(recovery ? { recoveredTimes: missedTimes, actualTime } : {}) };
+    for (const missed of missedTimes.filter(value => value !== time)) state.scheduledRuns[`${clock.date}|${missed}`] = { status: "SUPERSEDED", recoveredBy: runKey, completedAt: new Date().toISOString() };
     saveState();
     return true;
   } catch (error) {
@@ -2672,17 +2688,19 @@ async function handleMessage(persona, client, message, edited = false) {
 }
 
 function registerBot(persona, client) {
+  client.on(Events.Error, error => console.error(`${persona.name} Discord 연결 오류:`, error.message));
+  client.on(Events.ShardError, error => console.error(`${persona.name} Discord 소켓 오류:`, error.message));
   client.once(Events.ClientReady, (readyClient) => {
     console.log(`${persona.name} 접속: ${readyClient.user.tag}`);
   });
 
-  client.on(Events.MessageCreate, (message) => handleMessage(persona, client, message));
+  client.on(Events.MessageCreate, (message) => handleMessage(persona, client, message).catch(error => console.error("메시지 처리 실패:", error.message)));
   client.on(Events.MessageUpdate, async (oldMessage, newMessage) => {
     if (oldMessage.content === newMessage.content) return;
     if (newMessage.partial) {
       try { await newMessage.fetch(); } catch { return; }
     }
-    await handleMessage(persona, client, newMessage, true);
+    await handleMessage(persona, client, newMessage, true).catch(error => console.error("수정 메시지 처리 실패:", error.message));
   });
 }
 
@@ -2782,6 +2800,7 @@ async function main() {
     registerBot(persona, client);
   }
   await Promise.all(PERSONAS.map((persona) => clients.get(persona.id).login(process.env[persona.tokenEnv])));
+  await startWebhookReceiver();
   seedWatchlist();
   if (TRADINGVIEW_WATCHLIST_URL) {
     await checkWatchlistSync(new Date(), true).catch((error) => console.error("TradingView 관심종목 갱신 실패:", error.message));
@@ -2797,7 +2816,6 @@ async function main() {
   await startOrderStatusWatcher();
   startScheduledPaperExitScheduler();
   startSignalReviewBatcher();
-  await startWebhookReceiver();
   await notifySignalServerStartup();
   startTunnelStartupNotifier();
   startTelegramScheduler();
@@ -2807,6 +2825,13 @@ async function main() {
 }
 
 function selfTest() {
+  const scheduleClock = { date: "2026-09-10", time: "18:30" }, times = ["08:30", "15:40", "22:00"];
+  const nowMs = Date.parse("2026-09-10T09:30:00Z");
+  if (dueBriefingTime(scheduleClock, times, {}, nowMs, 900000) !== "15:40") throw Error("브리핑 지연 통합 실패");
+  if (dueBriefingTime({ ...scheduleClock, time: "07:00" }, times, {}, nowMs, 900000)) throw Error("미래 브리핑 실행 차단 실패");
+  if (dueBriefingTime(scheduleClock, times, { "2026-09-10|15:40": { status: "COMPLETED" } }, nowMs, 900000)) throw Error("완료 브리핑 중복 차단 실패");
+  if (dueBriefingTime(scheduleClock, times, { "2026-09-10|15:40": { status: "FAILED", failedAt: new Date(nowMs - 60000).toISOString() } }, nowMs, 900000)) throw Error("브리핑 실패 재시도 간격 실패");
+  if (dueBriefingTime(scheduleClock, times, { "2026-09-10|15:40": { status: "RUNNING", startedAt: new Date(nowMs - 1000000).toISOString() } }, nowMs, 900000) !== "15:40") throw Error("중단 브리핑 복구 실패");
   const sample = [
     JSON.stringify({ type: "thread.started", thread_id: "session-1" }),
     JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "답변" } }),
@@ -2987,7 +3012,4 @@ else if (process.argv.includes("--refresh-investor-portfolios")) {
       process.exitCode = 1;
     })
     .finally(() => client.destroy());
-} else main().catch((error) => {
-  console.error(error.message);
-  process.exitCode = 1;
-});
+} else main().catch(require("../../scripts/network-failure.cjs").fatal);

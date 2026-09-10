@@ -348,11 +348,6 @@ function message(r) { return { id: r.requestId, channelId: "signal", author: { i
   assert.equal(monitor.sent.filter(x => /손절 감시 조회 장애/.test(x.content || "")).length, 1);
   assert(monitor.sent.every(x => !(x.content || "").includes("KIWOOM"))); // Healthy broker stays independent.
   assert(!monitor.sent.some(x => /복구/.test(x.content || "") && (x.content || "").startsWith("✅")));
-  const openClock = clock;
-  clock = new Date("2026-09-12T14:00:00Z").getTime();
-  await monitor.runtime.checkManagedStops();
-  assert.equal(monitor.sent.filter(x => (x.content || "").startsWith("✅")).length, 0); // A skipped weekend cycle is not recovery.
-  clock = openClock;
   kisApi.getUsBalance = goodBalance;
   const goodQuote = kisApi.getUsQuote;
   kisApi.getUsQuote = async ({ symbol }: any = {}) => { if (symbol === "SECOND") throw new Error("quote offline"); return { currentPrice: 120 }; };
@@ -395,6 +390,26 @@ function message(r) { return { id: r.requestId, channelId: "signal", author: { i
   monitor.brokers[0].state.orders = []; // All managed positions gone: no remaining monitor target.
   await monitor.runtime.checkManagedStops();
   assert.equal(monitor.sent.filter(x => /손절 감시 조회 장애 해제/.test(x.content || "")).length, 1);
+
+  const savedClock = clock, closeRecovery = fixture(["KIS"]), closeBroker = closeRecovery.brokers[0];
+  closeBroker.state.holdings = [{ code: "TEST", quantity: 10, tradableQuantity: 10 }];
+  closeBroker.tracker.record({ ...stopAlert.brokers[0].tracker.list()[0], symbol: "TEST" });
+  const readBalance = closeBroker.overseasClient.getUsBalance;
+  clock = new RealDate("2026-09-10T19:58:00Z").getTime();
+  closeBroker.overseasClient.getUsBalance = async () => { throw Error("network down"); };
+  await closeRecovery.runtime.checkManagedStops(); clock += 60000;
+  await closeRecovery.runtime.checkManagedStops();
+  let recoveryReads = 0;
+  closeBroker.overseasClient.getUsBalance = async () => { recoveryReads++; return readBalance(); };
+  clock = new RealDate("2026-09-10T20:01:00Z").getTime();
+  await closeRecovery.runtime.checkManagedStops(); clock += 30000;
+  await closeRecovery.runtime.checkManagedStops();
+  assert.equal(closeRecovery.sent.filter(x => /조회 복구/.test(x.content || "")).length, 1);
+  const recoveredReads = recoveryReads;
+  await closeRecovery.runtime.checkManagedStops();
+  assert.equal(recoveryReads, recoveredReads, "healthy closed accounts must stop recovery probes");
+  assert.equal(closeBroker.state.requests.length, 0, "closed recovery must never submit orders");
+  clock = savedClock;
   assert(monitor.brokers.every(b => b.state.requests.length === 0));
   stopAlert.brokers[0].state.holdings = [];
   await stopAlert.runtime.checkManagedStops();

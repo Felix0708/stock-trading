@@ -19,7 +19,7 @@ chmod 600 "$env_file"
 signal_env=${SIGNAL_ENV_FILE:-.env.signal}
 if [ -f "$signal_env" ] && [ "$signal_env" != "$env_file" ]; then
   chmod 600 "$signal_env"
-  exec node --import tsx --env-file="$signal_env" --env-file="$env_file" src/executor/account-executor.ts
+  exec node scripts/run-service.cjs --import tsx --env-file="$signal_env" --env-file="$env_file" src/executor/account-executor.ts
 fi
 
-exec node --import tsx --env-file="$env_file" src/executor/account-executor.ts
+exec node scripts/run-service.cjs --import tsx --env-file="$env_file" src/executor/account-executor.ts

@@ -10,4 +10,4 @@ lock_file=${TMPDIR:-/tmp}/stock-trading-signal.lock
 
 . ./scripts/use-project-node.sh
 chmod 600 "$env_file"
-exec node --import tsx --env-file="$env_file" src/app/bot.ts
+exec node scripts/run-service.cjs --import tsx --env-file="$env_file" src/app/bot.ts

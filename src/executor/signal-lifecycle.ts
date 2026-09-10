@@ -17,7 +17,9 @@ function lifecycleBrokerState(entry, broker, receipts, now = Date.now()) {
   const record = entry.record;
   const progress = entry.progress[broker.id] || { status: receipts.state.inbox[record.requestId] ? "RECEIVED" : "NO_ACTION", reason: "" };
   const order = broker.tracker.list().find(order => order.requestId === record.requestId);
-  if (order) return { ...progress, ...order, status: order.status, next: ["ACCEPTED", "PARTIALLY_FILLED", "CANCEL_REQUESTED"].includes(order.status) ? "30초 주기로 체결 확인" : "", reason: "" };
+  if (order) return { ...progress, ...order, status: order.status,
+    next: order.reconciliationRequired ? "5분 주기로 원주문 과거 내역 대조 · 중복 재주문 차단" : ["ACCEPTED", "PARTIALLY_FILLED", "CANCEL_REQUESTED"].includes(order.status) ? "30초 주기로 체결 확인" : "",
+    reason: order.reconciliationRequired ? "이전 거래일 주문의 잔량 종료 증빙 미확인 · 접수 상태만으로 체결·만료를 추정하지 않습니다." : "" };
   const attempt = receipts.state.attempts[`${broker.id}:${record.requestId}`];
   if (attempt?.status === "SUBMITTING" && broker.submitting?.has(`${broker.id}:${record.requestId}`)) return { status: "SUBMITTING", reason: "증권사 응답 대기 · 아직 접수 확정 아님" };
   if (["SUBMITTING", "UNKNOWN"].includes(attempt?.status)) return { status: "UNKNOWN", reason: "증권사 접수 여부 대조 필요 · 자동 재주문 안 함" };
