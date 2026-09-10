@@ -5,7 +5,7 @@ const { createHash } = require("node:crypto");
 const { Client, GatewayIntentBits } = require("discord.js");
 const { syncAccountPortfolio, strategyComparison, formatStrategyComparisonMessage } = require("./account-portfolio");
 const { writeAccountHealth } = require("./account-health");
-const { evidenceFile, readEvidence, writeEvidence, collectBrokerEvidence, applyEvidence, validateStatement, reconciliationPlan, koreanDate } = require("./account-evidence");
+const { evidenceFile, readEvidence, writeEvidence, collectBrokerEvidence, applyEvidence, validateStatement, reconciliationPlan, koreanDate, refreshAccountEquity, equityAccountRef } = require("./account-evidence");
 const { equityPerformance, importCashFlows } = require("./equity-performance");
 const { brokerStop, protectionReadiness, currentProtection, ensureProtection, releaseProtection } = require("./broker-protection");
 const { formatLifecycleCard } = require("./signal-lifecycle");
@@ -15,7 +15,7 @@ const { decodeSignalEmbed } = require("../discord/discord-signal-envelope");
 const { KiwoomClient, kiwoomCredentials } = require("../brokers/kiwoom-client");
 const { KisClient, kisCredentials } = require("../brokers/kis-client");
 const { enrichInstrumentNames, formatInstrumentLabel } = require("../research/instrument-names");
-const { stockBriefingSyncReady, syncStockBriefingHoldings } = require("../integrations/stock-briefing");
+const { stockBriefingSyncReady, syncStockBriefingHoldings, syncStockBriefingEquity } = require("../integrations/stock-briefing");
 const { OrderTracker } = require("../trading/order-tracker");
 const { normalizedSymbol, normalizedTimeframe, sameTimeframe, emergencyExit, managedPosition, scopePositionPreview, restoreOrderSignalMetadata, orderTime } = require("../trading/position-ownership");
 
@@ -993,6 +993,20 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
     return settled;
   }
   let portfolioJob = null;
+  let equitySyncJob = null;
+  function requestEquitySync() {
+    if (readOnly || !receipts.file || !process.env.STOCK_BRIEFING_TOKEN) return;
+    if (!equitySyncJob) equitySyncJob = (async () => {
+      const file = evidenceFile(receipts.file);
+      await Promise.all(brokers.map(broker => brokerWork(broker, async () => {
+        try { await refreshAccountEquity(broker, file); }
+        catch (error) { await reportError(`${broker.label} 자산 그래프 조회 실패 · 주문과 별개`, error); }
+      }, "equity")));
+      const synced = await syncStockBriefingEquity(readEvidence(file));
+      console.log(`Stock-Briefing 계좌 자산 동기화: ${synced.series}계좌 범위 · ${synced.synced}일별 관측`);
+    })().catch(error => reportError("Stock-Briefing 계좌 자산 동기화 실패", error))
+      .finally(() => { equitySyncJob = null; });
+  }
   async function reconcileEvidence(broker) {
     if (readOnly || !receipts.file || !broker.overseasClient.getUsHistoricalExecutions) return null;
     const report = await collectBrokerEvidence(broker);
@@ -1145,6 +1159,7 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
   }
 
   async function syncPortfolio() {
+    requestEquitySync(); // Separate failure/retry path: never holds up a fill acknowledgement or holdings sync.
     receipts.state.calendarNotices ||= {};
     for (const notice of calendarNotices()) {
       if (Date.now() - (receipts.state.calendarNotices[notice] || 0) < 86400_000) continue;
@@ -1971,7 +1986,12 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
       const studyFile = "forward-policy-study.json";
       const report = { at: new Date().toISOString(), notes: "실제 체결·최종청산 기준. 비용 미확인은 null. 신호가 대비 체결 차이는 실제 손익에 이미 반영되어 재차 차감하지 않음. 실현손익 낙폭은 계좌 MDD가 아님.",
         accounts: brokers.map(broker => ({ broker: broker.id, environment: broker.environment, ...strategyComparison(broker, receipts.state.signals) })),
-        accountEquity: brokers.flatMap(broker => ["KRW", "USD"].map(currency => equityPerformance(evidence, broker.id, broker.environment, currency))),
+        accountEquity: brokers.flatMap(broker => {
+          const accountRef = equityAccountRef(evidence, broker);
+          const scopes = new Map(evidence.equity.filter(row => row.accountRef === accountRef).map(row => [`${row.currency}:${row.scope}`, row]));
+          return [...scopes.values() as Iterable<any>].map(row => ({ accountRef, scope: row.scope,
+            ...equityPerformance(evidence, broker.id, broker.environment, row.currency, { accountRef, scope: row.scope }) }));
+        }),
         evidenceStatus: Object.values(evidence.brokers || {}).map((row: any) => ({ brokerId: row.brokerId, environment: row.environment,
           capturedAt: row.capturedAt, discrepancies: row.remainingDiscrepancies, historyErrors: row.historyErrors,
           transactionError: row.transactionError, equityError: row.equityError })),
@@ -2030,6 +2050,7 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
       ) }).catch(error => reportError("시작 알림 전송 실패", error));
       if (!readOnly) for (const broker of brokers) void brokerWork(broker, () => reconcileOrders([broker]), "reconcile");
       void requestPortfolioSync();
+      setInterval(requestEquitySync, 60 * 60_000).unref();
       const refreshEvidence = () => {
         if (readOnly || !receipts.file) return;
         let saved;

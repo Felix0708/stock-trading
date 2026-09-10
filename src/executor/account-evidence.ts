@@ -2,7 +2,7 @@
 
 const fs = require("node:fs");
 const path = require("node:path");
-const { createHash } = require("node:crypto");
+const { createHash, randomUUID } = require("node:crypto");
 const { managedPosition, sameInstrument, normalizedSymbol } = require("../trading/position-ownership");
 
 function evidenceNumber(value) {
@@ -41,6 +41,52 @@ function writeEvidence(file, state) {
   fs.renameSync(`${file}.tmp`, file);
   const directory = fs.openSync(path.dirname(file), "r");
   try { fs.fsyncSync(directory); } finally { fs.closeSync(directory); }
+}
+
+function equityAccountRef(state, broker) {
+  const identity = broker.overseasClient?.accountIdentityKey?.();
+  if (!/^[a-f0-9]{64}$/.test(identity || "")) throw Error("자산 계좌 식별 미확인");
+  const key = `${broker.id}:${broker.environment}:${identity}`;
+  state.equityAccounts ||= {};
+  return state.equityAccounts[key] ||= randomUUID();
+}
+
+async function collectAccountEquity(broker) {
+  const client = broker.overseasClient;
+  const points = [await client.getAccountEquity()];
+  if (points.some(row => !row || !["KRW", "USD"].includes(row.currency) || !["overseas", "account-total-assets"].includes(row.scope)
+      || !Number.isFinite(row.equity) || row.equity < 0
+      || (row.stockValue != null && (!Number.isFinite(row.stockValue) || row.stockValue < 0))
+      || (row.cash != null && !Number.isFinite(row.cash)))) throw Error("계좌 자산 범위·금액 응답 미확인");
+  return points;
+}
+
+function recordAccountEquity(state, broker, points, at) {
+  if (!points.length) return;
+  if (!Number.isFinite(Date.parse(at))) throw Error("자산 수집 시각 오류");
+  const accountRef = equityAccountRef(state, broker);
+  for (const point of points) {
+    const snapshot = { ...point, at, accountRef, brokerId: broker.id, environment: broker.environment };
+    const index = state.equity.findIndex(row => row.brokerId === broker.id && row.environment === broker.environment
+      && row.accountRef === accountRef && row.currency === point.currency && row.scope === point.scope && koreanDate(row.at) === koreanDate(at));
+    if (index < 0) state.equity.push(snapshot);
+    else if (Date.parse(state.equity[index].at) < Date.parse(at)) state.equity[index] = snapshot;
+  }
+}
+
+async function refreshAccountEquity(broker, file, now = new Date()) {
+  const before = readEvidence(file), accountRef = equityAccountRef(before, broker);
+  const latest = before.equity.filter(row => row.accountRef === accountRef).reduce((at, row) => Math.max(at, Date.parse(row.at) || 0), 0);
+  before.equityAttemptedAt ||= {};
+  const attempted = Date.parse(before.equityAttemptedAt[accountRef] || "") || 0;
+  if (now.getTime() - Math.max(latest, attempted) < 60 * 60_000) return false;
+  before.equityAttemptedAt[accountRef] = now.toISOString();
+  writeEvidence(file, before); // Identity and attempt persist before the asynchronous broker request.
+  const points = await collectAccountEquity(broker);
+  const state = readEvidence(file); // Other account collection may have completed during the request.
+  recordAccountEquity(state, broker, points, new Date().toISOString());
+  writeEvidence(file, state);
+  return true;
 }
 
 function reconciliationPlan(orders, rows, environment) {
@@ -162,14 +208,9 @@ async function collectBrokerEvidence(broker, now = new Date()) {
   const costs = settlementCosts(broker.id, transactions, corrected);
   let equity = [], equityError = "";
   try {
-    if (broker.id === "KIS") equity = [await overseas.getAccountEquity()];
-    else equity = (await overseas.getUsEquityHistory({ date: koreanDate(now) })).map(row => {
-      const cash = evidenceNumber(row.fx_entr), holdings = evidenceNumber(row.evlt_amt);
-      if (cash === null || holdings === null || !row.crnc_code) throw Error("키움 자산 응답 미확인");
-      return { currency: row.crnc_code, equity: cash + holdings, source: "KIWOOM:ust21132:fx_entr+evlt_amt", scope: "overseas" };
-    });
+    equity = await collectAccountEquity(broker);
   } catch (error) { equity = []; equityError = error.message; }
-  return { capturedAt: now.toISOString(), brokerId: broker.id, environment: broker.environment,
+  return { capturedAt: now.toISOString(), equityCapturedAt: new Date().toISOString(), brokerId: broker.id, environment: broker.environment,
     discrepancies, remainingDiscrepancies: holdingDiscrepancies(corrected, holdings, broker.environment),
     executions, historyErrors, transactions, transactionError, reconciliation, costs, equity, equityError };
 }
@@ -189,11 +230,7 @@ function applyEvidence(broker, report, file) {
     broker.tracker.record({ ...current, ...proposal });
   }
   state.brokers[`${broker.id}:${broker.environment}`] = report;
-  for (const point of report.equity || []) {
-    const snapshot = { ...point, at: report.capturedAt, brokerId: broker.id, environment: broker.environment };
-    const index = state.equity.findIndex(row => row.brokerId === broker.id && row.environment === broker.environment && row.currency === point.currency && koreanDate(row.at) === koreanDate(snapshot.at));
-    if (index < 0) state.equity.push(snapshot); else state.equity[index] = snapshot;
-  }
+  recordAccountEquity(state, broker, report.equity || [], report.equityCapturedAt || report.capturedAt);
   writeEvidence(file, state);
   return updates.size;
 }
@@ -218,4 +255,4 @@ function validateStatement(input, broker) {
   });
 }
 
-module.exports = { evidenceNumber, koreanDate, executionDateMatches, evidenceFile, orderKey, readEvidence, writeEvidence, reconciliationPlan, holdingDiscrepancies, settlementCosts, collectBrokerEvidence, applyEvidence, validateStatement };
+module.exports = { evidenceNumber, koreanDate, executionDateMatches, evidenceFile, orderKey, readEvidence, writeEvidence, reconciliationPlan, holdingDiscrepancies, settlementCosts, collectBrokerEvidence, applyEvidence, validateStatement, equityAccountRef, collectAccountEquity, recordAccountEquity, refreshAccountEquity };

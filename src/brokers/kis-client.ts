@@ -41,6 +41,7 @@ function transientHttpStatus(status: number) {
 }
 
 class KisClient {
+  accountIdentityKey() { return crypto.createHash("sha256").update(`${this.environment}:${this.accountNo}:${this.productCode}`).digest("hex"); }
   appKey: string;
   appSecret: string;
   accountNo: string;
@@ -471,10 +472,19 @@ class KisClient {
     const result = await this.request("/uapi/overseas-stock/v1/trading/inquire-present-balance", { trId: this.trId("VTRP6504R", "CTRP6504R"),
       params: this.accountParams({ WCRC_FRCR_DVSN_CD: "02", NATN_CD: "000", TR_MKET_CD: "00", INQR_DVSN_CD: "00" }) });
     const summary = Array.isArray(result.output3) ? result.output3[0] : result.output3;
-    if (!summary || summary.tot_asst_amt === undefined || String(summary.tot_asst_amt).trim() === "") throw new Error("한투 총자산 응답 미확인");
+    if (result.continuation || (Array.isArray(result.output3) && result.output3.length !== 1)
+      || !summary || summary.tot_asst_amt == null || String(summary.tot_asst_amt).trim() === "") throw new Error("한투 총자산 응답 미확인");
     if (!Number.isFinite(Number(summary.tot_asst_amt)) || Number(summary.tot_asst_amt) < 0) throw new Error("한투 총자산 숫자 오류");
-    if (summary.tot_loan_amt === undefined || String(summary.tot_loan_amt).trim() === "" || Number(summary.tot_loan_amt) !== 0) throw new Error("대출 포함 자산은 순자산 명세서로 확인해야 합니다.");
-    return { currency: "KRW", equity: Number(summary.tot_asst_amt), source: "KIS:inquire-present-balance:tot_asst_amt", scope: "account-total-assets" };
+    if (summary.tot_loan_amt == null || String(summary.tot_loan_amt).trim() === "" || Number(summary.tot_loan_amt) !== 0) throw new Error("대출 포함 자산은 순자산 명세서로 확인해야 합니다.");
+    const optional = (key: string) => summary[key] == null || String(summary[key]).trim() === "" || !Number.isFinite(Number(summary[key])) ? null : Number(summary[key]);
+    const deposits = optional("tot_dncl_amt"), foreignCash = optional("frcr_evlu_tota"), stocks = optional("evlu_amt_smtl_amt");
+    const cash = deposits !== null && foreignCash !== null ? deposits + foreignCash : null;
+    const equity = Number(summary.tot_asst_amt);
+    // Only expose the decomposition when the broker's same-response totals reconcile (KRW rounding).
+    const decomposed = optional("cma_evlu_amt") === 0 && cash !== null && stocks !== null && stocks >= 0
+      && Math.abs(cash + stocks - equity) <= 2;
+    return { currency: "KRW", equity, cash: decomposed ? cash : null, stockValue: decomposed ? stocks : null,
+      source: "KIS:inquire-present-balance:tot_asst_amt", scope: "account-total-assets" };
   }
 
   async cancelUsOrder({ orderNo, exchange, symbol, quantity }: any) {

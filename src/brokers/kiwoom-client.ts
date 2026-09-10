@@ -52,6 +52,7 @@ function transientHttpStatus(status: number) {
 }
 
 class KiwoomClient {
+  accountIdentityKey() { return crypto.createHash("sha256").update(`${this.#baseUrl}:${this.#appKey}`).digest("hex"); }
   #appKey: string;
   #secretKey: string;
   #fetch: typeof fetch;
@@ -422,6 +423,21 @@ class KiwoomClient {
       krw: toNumber(data.won_entr, "해외계좌 원화 예수금"),
       usdExchangeRate: toNumber(data.usd_exch_rate, "USD 환율"),
     };
+  }
+
+  async getAccountEquity() {
+    // D0 cash precedes unsettled trades while the position ledger already includes fills.
+    // Use the broker's last settlement projection, not buying power or D0 cash.
+    const cashData = await this.post("/api/us/acnt", { apiId: "ust21160", authorization: true });
+    const stocksData = await this.post("/api/us/acnt", {
+      apiId: "ust21070", authorization: true, body: { stex_tp: "", stk_cd: "" },
+    });
+    const cash = toOptionalNumber(cashData.d4_usd_fx_entr, "D4 USD 결제예정 예수금");
+    const stockValue = toOptionalNumber(stocksData.tot_evlt_amt, "USD 증권 평가금액");
+    if (stocksData.crnc_code !== "USD" || stocksData.pagination?.more || cash === null || stockValue === null
+      || stockValue < 0 || cash + stockValue < 0) throw new Error("키움 결제예정 반영 USD 자산 미확인");
+    return { currency: "USD", equity: cash + stockValue, cash, stockValue,
+      source: "KIWOOM:ust21160:d4_usd_fx_entr+ust21070:tot_evlt_amt", scope: "overseas" };
   }
 
   async getUsdExchangeRate() {
