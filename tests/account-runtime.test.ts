@@ -87,6 +87,16 @@ function message(r) { return { id: r.requestId, channelId: "signal", author: { i
   failedAlert.failDiscord(false);
   await failedAlert.runtime.reportEquityStatus(failedAlert.brokers[0], new Error("down"));
   assert.equal(failedAlert.sent.length, 1);
+  await equityAlerts.runtime.reportDataStatus("briefing-equity-sync", "Stock-Briefing 계좌 자산 동기화", new Error("502"));
+  const syncRestart = fixture();
+  syncRestart.receipts.state.equityOutages = structuredClone(equityAlerts.receipts.state.equityOutages);
+  clock += 86400_000;
+  await syncRestart.runtime.reportDataStatus("briefing-equity-sync", "Stock-Briefing 계좌 자산 동기화", new Error("504"));
+  assert.equal(syncRestart.sent.length, 0);
+  await syncRestart.runtime.reportDataStatus("briefing-equity-sync", "Stock-Briefing 계좌 자산 동기화");
+  await syncRestart.runtime.reportDataStatus("briefing-equity-sync", "Stock-Briefing 계좌 자산 동기화");
+  assert.equal(syncRestart.sent.length, 1);
+  assert.ok(syncRestart.receipts.state.equityOutages["KIWOOM:mock"]); // Independent broker outage stays open.
   clock = initialClock;
   clock = new RealDate("2026-09-08T20:00:32Z").getTime(); // 05:00 KST: mock closed, live aftermarket open.
   const sessions = fixture(["KIWOOM", "KIS"]);

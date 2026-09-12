@@ -2,6 +2,7 @@
 
 const { formatInstrumentLabel } = require("../research/instrument-names");
 const { accountEquitySeries } = require("./account-equity");
+const { createHash } = require("node:crypto");
 
 const DEFAULT_API_URL = "https://web-mu-inky-93.vercel.app";
 const DEFAULT_PUBLIC_DATA_URL = "https://felix0708.github.io/stock-briefing/data";
@@ -117,27 +118,49 @@ async function syncStockBriefingHoldings(accounts, {
 
 async function syncStockBriefingEquity(state, {
   token = process.env.STOCK_BRIEFING_TOKEN, apiUrl = process.env.STOCK_BRIEFING_URL, fetchImpl = fetch,
+  checkpoint = {} as any, saveCheckpoint = () => {},
 } = {}) {
   if (!TOKEN_PATTERN.test(String(token || ""))) throw new Error("STOCK_BRIEFING_TOKEN 형식이 올바르지 않습니다.");
   const series = accountEquitySeries(state);
-  let synced = 0;
+  const url = `${baseUrl(apiUrl, DEFAULT_API_URL)}/api/sync/account-equity`;
+  const hash = value => createHash("sha256").update(value).digest("hex");
+  // Local-only destination identity: a new member token must never inherit acknowledgements.
+  const destination = hash(JSON.stringify([url, token]));
+  if (checkpoint.destination !== destination) { checkpoint.destination = destination; checkpoint.batches = {}; }
+  checkpoint.batches ||= {};
+  let synced = 0, sent = 0, skipped = 0;
   for (const item of series) for (let offset = 0; offset < item.points.length; offset += 500) {
     const body = JSON.stringify({ version: 1, series: [{ ...item, points: item.points.slice(offset, offset + 500) }] });
     if (Buffer.byteLength(body) > 1024 * 1024) throw new Error("자산 전송 용량 초과");
+    const key = [item.account_ref, item.broker, item.account_type, item.scope, item.currency, offset].join(":");
+    const fingerprint = hash(JSON.stringify(JSON.parse(body), (key, value) => key === "calculated_at" ? undefined : value));
+    if (checkpoint.batches[key] === fingerprint) { skipped++; continue; }
     let response;
+    const started = Date.now();
     try {
-      response = await fetchImpl(`${baseUrl(apiUrl, DEFAULT_API_URL)}/api/sync/account-equity`, {
+      response = await fetchImpl(url, {
         method: "PUT", headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
         body, redirect: "error", signal: AbortSignal.timeout(10_000),
       });
-    } catch { throw new Error("Stock-Briefing 계좌 자산 전송 실패 · 기존 기록 유지"); }
+    } catch (error) {
+      console.error(JSON.stringify({ operation: "account-equity-sync", duration_ms: Date.now() - started,
+        failure: ["TimeoutError", "AbortError"].includes(error?.name) ? "timeout" : "transport" }));
+      throw new Error("Stock-Briefing 계좌 자산 전송 실패 · 기존 기록 유지");
+    }
+    const requestId = response.headers.get("x-vercel-id") || "";
+    const diagnostic = { operation: "account-equity-sync", status: response.status, duration_ms: Date.now() - started,
+      request_id: /^[A-Za-z0-9:._-]{1,200}$/.test(requestId) ? requestId : undefined };
+    if (!response.ok) console.error(JSON.stringify(diagnostic));
     const payload = await responseJson(response, 20_000);
     if (!response.ok || payload.ok !== true || !Number.isInteger(payload.synced) || payload.synced < 0) {
       throw new Error(`Stock-Briefing 계좌 자산 전송 실패 (${response.status})`);
     }
     synced += payload.synced;
+    sent++;
+    checkpoint.batches[key] = fingerprint;
+    saveCheckpoint(); // Only a confirmed acknowledgement suppresses future sends, including after restart.
   }
-  return { synced, series: series.length };
+  return { synced, series: series.length, sent, skipped };
 }
 
 function plainText(value, maxLength = 600) {

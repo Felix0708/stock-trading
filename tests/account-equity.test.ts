@@ -245,6 +245,34 @@ const { collectKiwoomTotal, equityBreakdown } = require("../src/brokers/account-
   } });
   assert.equal(synced.synced, 501); assert.deepEqual(calls.map(c => c.series[0].points.length), [500, 1]);
   assert.equal(calls[0].series[0].points[0].collected_at, many.equity[0].at);
+  let savedCheckpoint = "", attempts = 0, failSecond = true;
+  const checkpoint = {};
+  const delivery = { token, checkpoint, saveCheckpoint: () => { savedCheckpoint = JSON.stringify(checkpoint); },
+    fetchImpl: async (_url, options) => {
+      attempts++;
+      const points = JSON.parse(options.body).series[0].points;
+      if (failSecond && points.length === 1) return new Response('{"ok":false}', { status: 502 });
+      return new Response(JSON.stringify({ ok: true, synced: points.length }));
+    } };
+  await assert.rejects(syncStockBriefingEquity(many, delivery), /502/);
+  assert.equal(Object.keys(JSON.parse(savedCheckpoint).batches).length, 1);
+  failSecond = false;
+  const restored = JSON.parse(savedCheckpoint);
+  const retry = await syncStockBriefingEquity(many, { ...delivery, checkpoint: restored });
+  assert.equal(retry.sent, 1); assert.equal(retry.skipped, 1); assert.equal(attempts, 3);
+  // New calculated_at alone is not new evidence. Persisted acknowledgements survive restart.
+  const unchangedDelivery = await syncStockBriefingEquity(many, { ...delivery, checkpoint: JSON.parse(JSON.stringify(restored)) });
+  assert.equal(unchangedDelivery.sent, 0); assert.equal(unchangedDelivery.skipped, 2); assert.equal(attempts, 3);
+  const corrected = structuredClone(many); corrected.equity[500].equity++;
+  assert.equal((await syncStockBriefingEquity(corrected, { ...delivery, checkpoint: restored })).sent, 1);
+  assert.equal((await syncStockBriefingEquity(corrected, { ...delivery, checkpoint: restored, token: `sb_sync_${"b".repeat(43)}` })).sent, 2);
+  assert.equal((await syncStockBriefingEquity(corrected, { ...delivery, checkpoint: restored, apiUrl: "http://localhost:3001" })).sent, 2);
+  assert.ok(!JSON.stringify(restored).includes(token));
+  // An invalid/failed acknowledgement must never suppress a retry.
+  const rejectedCheckpoint: any = {};
+  await assert.rejects(syncStockBriefingEquity(state, { token, checkpoint: rejectedCheckpoint,
+    fetchImpl: async () => new Response('{"ok":true,"synced":"3"}') }), /전송 실패/);
+  assert.equal(Object.keys(rejectedCheckpoint.batches).length, 0);
   await assert.rejects(syncStockBriefingEquity(state, { token, fetchImpl: async () => new Response(JSON.stringify({ ok: false }), { status: 409 }) }), /409/);
   await assert.rejects(syncStockBriefingEquity(state, { token: "bad", fetchImpl: async () => { throw Error("must not fetch"); } }), /TOKEN/);
   assert.equal((await syncStockBriefingEquity(legacy, { token, fetchImpl: async () => { throw Error("must not fetch"); } })).synced, 0);

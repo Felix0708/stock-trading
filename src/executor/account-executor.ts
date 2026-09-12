@@ -1004,9 +1004,13 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
         catch (error) { await reportEquityStatus(broker, error); return; }
         if (collected) await reportEquityStatus(broker);
       }, "equity")));
-      const synced = await syncStockBriefingEquity(readEvidence(file));
-      console.log(`Stock-Briefing 계좌 자산 동기화: ${synced.series}계좌 범위 · ${synced.synced}일별 관측`);
-    })().catch(error => reportError("Stock-Briefing 계좌 자산 동기화 실패", error))
+      const synced = await syncStockBriefingEquity(readEvidence(file), {
+        checkpoint: receipts.state.briefingEquitySync ||= {}, saveCheckpoint: () => receipts.write(),
+      });
+      if (synced.sent) console.log(`Stock-Briefing 계좌 자산 동기화: ${synced.series}계좌 범위 · ${synced.synced}일별 관측`);
+      if (synced.sent || synced.skipped) await reportDataStatus("briefing-equity-sync", "Stock-Briefing 계좌 자산 동기화");
+    })().catch(error => reportDataStatus("briefing-equity-sync", "Stock-Briefing 계좌 자산 동기화", error))
+      .catch(error => console.error("자산 동기화 상태 알림 저장/전송 실패:", error.message))
       .finally(() => { equitySyncJob = null; });
   }
   async function reconcileEvidence(broker) {
@@ -1137,19 +1141,22 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
   const accountSummary = () => brokers.map(brokerAccountLabel).join(" + ");
 
   async function reportEquityStatus(broker, error = null) {
+    return reportDataStatus(`${broker.id}:${broker.environment}`, `${brokerAccountLabel(broker)} 자산 그래프 조회`, error);
+  }
+
+  async function reportDataStatus(key, label, error = null) {
     // Persist the incident, not a cooldown: restarting must not replay an hourly alert.
-    const key = `${broker.id}:${broker.environment}`;
     const incidents = receipts.state.equityOutages ||= {};
     if (error) {
       const incident = incidents[key] ||= { since: new Date().toISOString(), notified: false };
       incident.reason = String(error.message || error).slice(0, 1000);
       receipts.write();
       if (incident.notified) return;
-      await send(channels.system, { text: `⚠️ **${brokerAccountLabel(broker)} 자산 그래프 조회 지연 · 주문과 별개**\n${incident.reason}\n기존 자산 기록은 유지합니다. 같은 장애는 반복 통보하지 않고, 실제 조회 복구 시 알립니다.` });
+      await send(channels.system, { text: `⚠️ **${label} 지연 · 주문과 별개**\n${incident.reason}\n기존 기록은 유지하며 다음 주기에 재확인합니다. 같은 장애는 반복 통보하지 않고, 해당 데이터 요청의 복구 확인 시 알립니다.` });
       incident.notified = true;
       receipts.write();
     } else if (incidents[key]) {
-      if (incidents[key].notified) await send(channels.system, { text: `✅ **${brokerAccountLabel(broker)} 자산 그래프 조회 복구**\n필요한 자산 조회가 다시 성공했습니다. 주문 체결이나 실시간 감시 복구를 뜻하지 않습니다.` });
+      if (incidents[key].notified) await send(channels.system, { text: `✅ **${label} 복구**\n해당 데이터 요청의 성공을 확인했습니다. 주문 체결이나 실시간 감시 복구를 뜻하지 않습니다.` });
       delete incidents[key];
       receipts.write();
     }
@@ -1197,8 +1204,9 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
       && message.embeds?.some(embed => embed.title === "자동매매 전략 비교"));
     const comparison = formatStrategyComparisonMessage(brokers, receipts.state.signals);
     if (existing) await existing.edit(comparison); else await channel.send(comparison);
-    for (const failure of result.failures) {
-      await reportError(`${failure.label} 포트폴리오 조회 실패`, failure.reason);
+    for (const broker of brokers) {
+      const failure = result.failures.find(item => item.id === broker.id);
+      await reportDataStatus(`portfolio:${broker.id}:${broker.environment}`, `${brokerAccountLabel(broker)} 포트폴리오 조회`, failure?.reason || null);
     }
     if (process.env.STOCK_BRIEFING_TOKEN && stockBriefingSyncReady(result, brokers.length)) {
       try {
@@ -2121,7 +2129,7 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
     });
     await client.login(process.env.ACCOUNT_DISCORD_TOKEN || process.env.KIS_DISCORD_TOKEN || process.env.DISCORD_TOKEN_DRUCKENMILLER);
   }
-  return { listen, execute, executeOrDefer, retryDeferred, retryInbox, processMessage, processApproval, processOwnerCommand, reconcileOrders, checkManagedStops, refreshLifecycleCards, reportEquityStatus };
+  return { listen, execute, executeOrDefer, retryDeferred, retryInbox, processMessage, processApproval, processOwnerCommand, reconcileOrders, checkManagedStops, refreshLifecycleCards, reportEquityStatus, reportDataStatus };
 }
 
 if (require.main === module) start().catch(require("../../scripts/network-failure.cjs").fatal);

@@ -98,6 +98,13 @@ Legacy observations without a verified identity are not assigned to the current 
 Collection runs hourly and reuses the executor's portfolio refresh, limited to once per hour per
 account, plus existing daily evidence collection. Failed collection preserves prior
 observations; failed equity sync does not block holdings sync or broker order processing.
+Confirmed sync batches are fingerprinted in the private receipt state. Unchanged content
+(ignoring only calculated_at) is not resent, including after restart. Changed observations,
+return calculations, destination URL or member token require a new acknowledgement.
+Partial failure preserves successful batch acknowledgements; pending batches retry on the
+next hourly sync. Sync incidents persist across restart, notify once and announce recovery
+only when the desired data is acknowledged. Logs contain status, duration and a validated
+request ID, never the token, request body or monetary values.
 Both hourly and daily-evidence equity reads pause outside the checked-in market calendar's
 sessions, retaining a one-hour post-session window for the final hourly sample. Mock US
 accounts use regular hours; live US valuation includes pre/after-market. Both KIWOOM and
