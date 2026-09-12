@@ -46,8 +46,9 @@ account, plus existing daily evidence collection. Failed collection preserves pr
 observations; failed equity sync does not block holdings sync or broker order processing.
 Both hourly and daily-evidence equity reads pause outside the checked-in market calendar's
 sessions, retaining a one-hour post-session window for the final hourly sample. Mock US
-accounts use regular hours; live US valuation includes pre/after-market. KIS whole-account
-valuation also follows Korean sessions. This is a valuation schedule, not order eligibility.
+accounts use regular hours; live US valuation includes pre/after-market. Both KIWOOM and
+KIS also follow Korean sessions. This is a valuation schedule, not order eligibility or
+a change to the reported asset scope: KIWOOM observations below still cover US assets only.
 New York time handles Korean Saturday mornings and DST; holidays and early closes use the
 existing exchange calendar. No zero/stale sample is created while paused. Fill reconciliation,
 unknown-order recovery, and holdings checks are not disabled by this equity-only gate.

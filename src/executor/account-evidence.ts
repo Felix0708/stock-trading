@@ -77,9 +77,9 @@ function recordAccountEquity(state, broker, points, at) {
 
 function equityCollectionOpen(broker, now = new Date()) {
   // Valuation only: retain one hourly collection after the last market session.
-  // KIS reports whole-account KRW assets; Kiwoom reports only US assets.
+  // Both brokers follow Korean and US sessions; observation scope stays explicit.
   return [now, new Date(now.getTime() - 60 * 60_000)].some(at => {
-    if (broker.id === "KIS" && domesticSession(at) !== "CLOSED") return true;
+    if (domesticSession(at) !== "CLOSED") return true;
     const session = usSession(at);
     return session === "REGULAR" || (broker.environment === "live" && session !== "CLOSED");
   });

@@ -25,7 +25,14 @@ const { syncStockBriefingEquity } = require("../src/integrations/stock-briefing"
     ["KIWOOM", "mock", "2026-12-12T07:00:00+09:00", false],
     ["KIWOOM", "mock", "2026-09-07T15:00:00Z", false], // US holiday.
     ["KIS", "mock", "2026-09-07T10:00:00+09:00", true], // Korea still open.
-    ["KIWOOM", "mock", "2026-09-07T10:00:00+09:00", false],
+    ["KIWOOM", "mock", "2026-09-07T10:00:00+09:00", true],
+    ["KIWOOM", "live", "2026-09-07T10:00:00+09:00", true],
+    ["KIS", "live", "2026-09-07T10:00:00+09:00", true],
+    ["KIWOOM", "mock", "2026-09-11T18:55:00+09:00", true], // Korean post-close sample.
+    ["KIWOOM", "mock", "2026-09-11T19:00:00+09:00", false],
+    ["KIS", "mock", "2026-09-11T18:55:00+09:00", true],
+    ["KIS", "mock", "2026-09-11T19:00:00+09:00", false],
+    ["KIWOOM", "mock", "2026-09-24T10:00:00+09:00", false],
     ["KIS", "mock", "2026-09-24T10:00:00+09:00", false], // Korean holiday, US also outside hours.
     ["KIWOOM", "mock", "2026-11-27T18:55:00Z", true], // Early close + grace.
     ["KIWOOM", "mock", "2026-11-27T19:00:00Z", false],
