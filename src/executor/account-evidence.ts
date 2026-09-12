@@ -4,6 +4,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { createHash, randomUUID } = require("node:crypto");
 const { managedPosition, sameInstrument, normalizedSymbol } = require("../trading/position-ownership");
+const { domesticSession, usSession } = require("../trading/paper-order-executor");
 
 function evidenceNumber(value) {
   if (value === null || value === undefined || String(value).trim() === "") return null;
@@ -74,7 +75,18 @@ function recordAccountEquity(state, broker, points, at) {
   }
 }
 
+function equityCollectionOpen(broker, now = new Date()) {
+  // Valuation only: retain one hourly collection after the last market session.
+  // KIS reports whole-account KRW assets; Kiwoom reports only US assets.
+  return [now, new Date(now.getTime() - 60 * 60_000)].some(at => {
+    if (broker.id === "KIS" && domesticSession(at) !== "CLOSED") return true;
+    const session = usSession(at);
+    return session === "REGULAR" || (broker.environment === "live" && session !== "CLOSED");
+  });
+}
+
 async function refreshAccountEquity(broker, file, now = new Date()) {
+  if (!equityCollectionOpen(broker, now)) return false;
   const before = readEvidence(file), accountRef = equityAccountRef(before, broker);
   const latest = before.equity.filter(row => row.accountRef === accountRef).reduce((at, row) => Math.max(at, Date.parse(row.at) || 0), 0);
   before.equityAttemptedAt ||= {};
@@ -208,7 +220,7 @@ async function collectBrokerEvidence(broker, now = new Date()) {
   const costs = settlementCosts(broker.id, transactions, corrected);
   let equity = [], equityError = "";
   try {
-    equity = await collectAccountEquity(broker);
+    if (equityCollectionOpen(broker, now)) equity = await collectAccountEquity(broker);
   } catch (error) { equity = []; equityError = error.message; }
   return { capturedAt: now.toISOString(), equityCapturedAt: new Date().toISOString(), brokerId: broker.id, environment: broker.environment,
     discrepancies, remainingDiscrepancies: holdingDiscrepancies(corrected, holdings, broker.environment),
@@ -255,4 +267,4 @@ function validateStatement(input, broker) {
   });
 }
 
-module.exports = { evidenceNumber, koreanDate, executionDateMatches, evidenceFile, orderKey, readEvidence, writeEvidence, reconciliationPlan, holdingDiscrepancies, settlementCosts, collectBrokerEvidence, applyEvidence, validateStatement, equityAccountRef, collectAccountEquity, recordAccountEquity, refreshAccountEquity };
+module.exports = { evidenceNumber, koreanDate, executionDateMatches, evidenceFile, orderKey, readEvidence, writeEvidence, reconciliationPlan, holdingDiscrepancies, settlementCosts, collectBrokerEvidence, applyEvidence, validateStatement, equityAccountRef, collectAccountEquity, recordAccountEquity, refreshAccountEquity, equityCollectionOpen };

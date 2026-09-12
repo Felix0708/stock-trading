@@ -2,7 +2,7 @@
 const assert = require("node:assert/strict"), fs = require("node:fs"), os = require("node:os"), path = require("node:path");
 const { KiwoomClient } = require("../src/brokers/kiwoom-client");
 const { KisClient } = require("../src/brokers/kis-client");
-const { readEvidence, writeEvidence, equityAccountRef, recordAccountEquity, collectAccountEquity, refreshAccountEquity } = require("../src/executor/account-evidence");
+const { readEvidence, writeEvidence, equityAccountRef, recordAccountEquity, collectAccountEquity, refreshAccountEquity, equityCollectionOpen, collectBrokerEvidence } = require("../src/executor/account-evidence");
 const { equityPerformance, importCashFlows } = require("../src/executor/equity-performance");
 const { accountEquitySeries } = require("../src/integrations/account-equity");
 const { syncStockBriefingEquity } = require("../src/integrations/stock-briefing");
@@ -11,6 +11,27 @@ const { syncStockBriefingEquity } = require("../src/integrations/stock-briefing"
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "account-equity-")), file = path.join(root, "evidence.json");
   const client = new KiwoomClient({ appKey: "private-key", secretKey: "private-secret" });
   const broker = { id: "KIWOOM", environment: "mock", overseasClient: client };
+  const collectionAt = new Date("2026-09-11T15:00:00Z");
+  for (const [id, environment, time, expected] of [
+    ["KIWOOM", "mock", "2026-09-12T04:59:00+09:00", true], // Friday US session, Saturday Korea.
+    ["KIWOOM", "mock", "2026-09-12T05:55:00+09:00", true], // Post-close hourly sample.
+    ["KIWOOM", "mock", "2026-09-12T06:00:00+09:00", false],
+    ["KIWOOM", "mock", "2026-09-12T15:55:00+09:00", false],
+    ["KIS", "mock", "2026-09-12T15:55:00+09:00", false],
+    ["KIS", "live", "2026-09-13T12:00:00+09:00", false],
+    ["KIWOOM", "live", "2026-09-12T08:55:00+09:00", true], // US extended-session valuation.
+    ["KIWOOM", "live", "2026-09-12T10:00:00+09:00", false],
+    ["KIWOOM", "mock", "2026-12-12T06:55:00+09:00", true], // Winter close + grace.
+    ["KIWOOM", "mock", "2026-12-12T07:00:00+09:00", false],
+    ["KIWOOM", "mock", "2026-09-07T15:00:00Z", false], // US holiday.
+    ["KIS", "mock", "2026-09-07T10:00:00+09:00", true], // Korea still open.
+    ["KIWOOM", "mock", "2026-09-07T10:00:00+09:00", false],
+    ["KIS", "mock", "2026-09-24T10:00:00+09:00", false], // Korean holiday, US also outside hours.
+    ["KIWOOM", "mock", "2026-11-27T18:55:00Z", true], // Early close + grace.
+    ["KIWOOM", "mock", "2026-11-27T19:00:00Z", false],
+    ["KIWOOM", "mock", "2026-09-14T13:30:00Z", true], // Next open resumes.
+    ["KIWOOM", "mock", "2029-09-11T15:00:00Z", false], // Unknown calendar.
+  ] as const) assert.equal(equityCollectionOpen({ id, environment }, new Date(time)), expected, `${id} ${environment} ${time}`);
   const state = readEvidence(file), ref = equityAccountRef(state, broker);
   writeEvidence(file, state);
   assert.equal(equityAccountRef(readEvidence(file), broker), ref);
@@ -65,15 +86,25 @@ const { syncStockBriefingEquity } = require("../src/integrations/stock-briefing"
   const noLeak = JSON.stringify(accountEquitySeries(state, day3));
   for (const secret of ["private-key", "private-secret", client.accountIdentityKey(), "12345678", "deposit", "complete account statement"]) assert.ok(!noLeak.includes(secret));
   assert.ok(!noLeak.includes("orderNo"));
-  const firstCollection = await refreshAccountEquity(broker, file);
+  const unchanged = fs.readFileSync(file, "utf8"), beforeClosed = queries;
+  assert.equal(await refreshAccountEquity(broker, file, new Date("2026-09-12T15:55:00+09:00")), false);
+  assert.equal(queries, beforeClosed); assert.equal(fs.readFileSync(file, "utf8"), unchanged);
+  let reconciliationQueries = 0;
+  const report = await collectBrokerEvidence({ ...broker, tracker: { list: () => [] },
+    domesticClient: { getDomesticBalance: async () => { reconciliationQueries++; return { holdings: [] }; } },
+    overseasClient: { getUsBalances: async () => { reconciliationQueries++; return [{ holdings: [] }]; },
+      getAccountEquity: async () => { throw Error("must not collect holiday equity"); } },
+  }, new Date("2026-09-12T15:55:00+09:00"));
+  assert.equal(reconciliationQueries, 2); assert.deepEqual(report.equity, []); assert.equal(report.equityError, "");
+  const firstCollection = await refreshAccountEquity(broker, file, collectionAt);
   assert.equal(firstCollection, true);
   const after = queries;
-  assert.equal(await refreshAccountEquity(broker, file), false); assert.equal(queries, after); // No high-frequency balance polling.
+  assert.equal(await refreshAccountEquity(broker, file, collectionAt), false); assert.equal(queries, after); // No high-frequency balance polling.
   const older = readEvidence(file); older.equity[0].at = day1; older.equityAttemptedAt[ref] = day1; writeEvidence(file, older);
   client.post = async () => { throw Error("broker offline"); };
-  await assert.rejects(refreshAccountEquity(broker, file), /offline/);
+  await assert.rejects(refreshAccountEquity(broker, file, collectionAt), /offline/);
   assert.deepEqual(readEvidence(file).equity, older.equity);
-  assert.equal(await refreshAccountEquity(broker, file), false); // Failure does not trigger a burst of collection attempts.
+  assert.equal(await refreshAccountEquity(broker, file, collectionAt), false); // Failure does not trigger a burst of collection attempts.
   client.post = async () => ({ crnc_code: "USD", d0_usd_fx_entr: "100", d4_usd_fx_entr: "", tot_evlt_amt: "0" });
   await assert.rejects(collectAccountEquity(broker), /미확인/);
   const kisClient = kis("12345678", "a");

@@ -44,6 +44,13 @@ Legacy observations without a verified identity are not assigned to the current 
 Collection runs hourly and reuses the executor's portfolio refresh, limited to once per hour per
 account, plus existing daily evidence collection. Failed collection preserves prior
 observations; failed equity sync does not block holdings sync or broker order processing.
+Both hourly and daily-evidence equity reads pause outside the checked-in market calendar's
+sessions, retaining a one-hour post-session window for the final hourly sample. Mock US
+accounts use regular hours; live US valuation includes pre/after-market. KIS whole-account
+valuation also follows Korean sessions. This is a valuation schedule, not order eligibility.
+New York time handles Korean Saturday mornings and DST; holidays and early closes use the
+existing exchange calendar. No zero/stale sample is created while paused. Fill reconciliation,
+unknown-order recovery, and holdings checks are not disabled by this equity-only gate.
 No automated reconstruction of historical cash-flow coverage is performed.
 
 ## Verified collection definitions
