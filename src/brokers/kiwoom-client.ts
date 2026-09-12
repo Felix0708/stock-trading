@@ -31,6 +31,11 @@ function toOptionalNumber(value: unknown, field: string, absolute = false) {
   return absolute ? Math.abs(number) : number;
 }
 
+function proofNumber(value: unknown) {
+  try { return toOptionalNumber(value, "합산 증빙"); }
+  catch { return null; } // Optional aggregation proof must not discard valid standalone assets.
+}
+
 function tokenExpiry(expiresDt: unknown) {
   const match = String(expiresDt || "").match(/^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})$/);
   return match ? Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]), Number(match[4]) - 9, Number(match[5]), Number(match[6])) : 0;
@@ -272,7 +277,7 @@ class KiwoomClient {
     };
   }
 
-  async getDomesticEquity() {
+  async getDomesticEquity({ includeProof = false } = {}) {
     const data = await this.post("/api/dostk/acnt", {
       apiId: "kt00018", authorization: true, body: { qry_tp: "1", dmst_stex_tp: "KRX" },
     });
@@ -290,7 +295,12 @@ class KiwoomClient {
     const cash = projectedCash !== null && stockValue !== null && Math.abs(projectedCash + stockValue - equity) <= 2
       ? projectedCash : null;
     return { currency: "KRW", equity, cash, stockValue, scope: "domestic",
-      source: "KIWOOM:kt00018:prsm_dpst_aset_amt+kt00001:d2_entra" };
+      source: "KIWOOM:kt00018:prsm_dpst_aset_amt+kt00001:d2_entra",
+      ...(includeProof ? { equityProof: { observedAt: new Date().toISOString(), d0Cash: proofNumber(cashData.entr),
+        clear: !cashData.pagination?.more && proofNumber(cashData.entr) !== null
+          && ["fc_stk_krw_repl_set_amt", "ch_uncla_tot", "etc_loan_tot", "loan_sum", "ls_sum"].every(key => proofNumber(cashData[key]) === 0)
+          && Array.isArray(cashData.stk_entr_prst) && cashData.stk_entr_prst.every((row: any) => row && proofNumber(row.fc_uncla) === 0
+            && (row.crnc_cd === "USD" || ["fx_entr", "d4_fx_entr"].every(key => proofNumber(row[key]) === 0))) } } : {}) };
   }
 
   async getDomesticQuote({ symbol }: any = {}) {
@@ -452,10 +462,11 @@ class KiwoomClient {
     };
   }
 
-  async getAccountEquity() {
+  async getAccountEquity({ includeProof = false } = {}) {
     // D0 cash precedes unsettled trades while the position ledger already includes fills.
     // Use the broker's last settlement projection, not buying power or D0 cash.
     const cashData = await this.post("/api/us/acnt", { apiId: "ust21160", authorization: true });
+    const fxObservedAt = new Date().toISOString();
     const stocksData = await this.post("/api/us/acnt", {
       apiId: "ust21070", authorization: true, body: { stex_tp: "", stk_cd: "" },
     });
@@ -464,7 +475,11 @@ class KiwoomClient {
     if (stocksData.crnc_code !== "USD" || stocksData.pagination?.more || cash === null || stockValue === null
       || stockValue < 0 || cash + stockValue < 0) throw new Error("키움 결제예정 반영 USD 자산 미확인");
     return { currency: "USD", equity: cash + stockValue, cash, stockValue,
-      source: "KIWOOM:ust21160:d4_usd_fx_entr+ust21070:tot_evlt_amt", scope: "overseas" };
+      source: "KIWOOM:ust21160:d4_usd_fx_entr+ust21070:tot_evlt_amt", scope: "overseas",
+      ...(includeProof ? { equityProof: { observedAt: fxObservedAt, rate: proofNumber(cashData.usd_exch_rate),
+        wonCash: proofNumber(cashData.won_entr),
+        clear: !cashData.pagination?.more && proofNumber(cashData.won_entr) !== null
+          && ["won_dfr_amt", "won_etc_loana", "krw_ord_set_amt"].every(key => proofNumber(cashData[key]) === 0) } } : {}) };
   }
 
   async getUsdExchangeRate() {

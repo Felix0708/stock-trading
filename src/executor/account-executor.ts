@@ -2009,7 +2009,8 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
       const studyFile = "forward-policy-study.json";
       const report = { at: new Date().toISOString(), notes: "실제 체결·최종청산 기준. 비용 미확인은 null. 신호가 대비 체결 차이는 실제 손익에 이미 반영되어 재차 차감하지 않음. 실현손익 낙폭은 계좌 MDD가 아님.",
         accounts: brokers.map(broker => ({ broker: broker.id, environment: broker.environment, ...strategyComparison(broker, receipts.state.signals) })),
-        accountEquity: brokers.flatMap(broker => equityScopes(broker).flatMap(scope => {
+        accountEquity: brokers.flatMap(broker => [...equityScopes(broker),
+          ...(broker.id === "KIWOOM" && broker.domesticClient ? ["account-total-assets"] : [])].flatMap(scope => {
           const accountRef = equityAccountRef(evidence, broker, scope);
           const scopes = new Map(evidence.equity.filter(row => row.accountRef === accountRef).map(row => [`${row.currency}:${row.scope}`, row]));
           return [...scopes.values() as Iterable<any>].map(row => ({ accountRef, scope: row.scope,

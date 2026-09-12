@@ -6,6 +6,7 @@ const { readEvidence, writeEvidence, equityAccountRef, recordAccountEquity, coll
 const { equityPerformance, importCashFlows } = require("../src/executor/equity-performance");
 const { accountEquitySeries } = require("../src/integrations/account-equity");
 const { syncStockBriefingEquity } = require("../src/integrations/stock-briefing");
+const { collectKiwoomTotal, equityBreakdown } = require("../src/brokers/account-equity");
 
 (async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "account-equity-")), file = path.join(root, "evidence.json");
@@ -53,6 +54,11 @@ const { syncStockBriefingEquity } = require("../src/integrations/stock-briefing"
     ? { d0_usd_fx_entr: "120", d4_usd_fx_entr: "90" } : { crnc_code: "USD", tot_evlt_amt: "10" }; };
   const point = (await collectAccountEquity(broker))[0];
   assert.equal(point.equity, 100); assert.equal(point.cash, 90); assert.equal(point.stockValue, 10);
+  const originalPost = client.post;
+  client.post = async (url, options) => ({ ...await originalPost(url, options), usd_exch_rate: "bad FX", won_entr: "bad cash" });
+  const unproven = await client.getAccountEquity({ includeProof: true });
+  assert.equal(unproven.equity, 100); assert.equal(unproven.equityProof.clear, false); assert.equal(unproven.equityProof.rate, null);
+  client.post = originalPost;
   const day1 = "2025-08-01T01:00:00.000Z", day2 = "2025-08-02T01:00:00.000Z", day3 = "2025-08-03T01:00:00.000Z";
   recordAccountEquity(state, broker, [point], day1);
   recordAccountEquity(state, broker, [{ ...point, equity: 110 }], "2025-08-01T02:00:00.000Z");
@@ -75,7 +81,7 @@ const { syncStockBriefingEquity } = require("../src/integrations/stock-briefing"
   const isolated = structuredClone(state);
   recordAccountEquity(isolated, rotated, [{ ...point, equity: 10000 }], day2);
   recordAccountEquity(isolated, broker, [{ ...point, currency: "KRW" }], day2);
-  recordAccountEquity(isolated, broker, [{ ...point, scope: "account-total-assets" }], day2);
+  recordAccountEquity(isolated, { ...broker, domesticClient: client }, [{ ...point, scope: "account-total-assets" }], day2);
   assert.equal(isolated.equity.length, 6);
   assert.equal(equityPerformance(isolated, "KIWOOM", "mock", "USD").status, "scope_unverified");
   assert.ok(Math.abs(equityPerformance(isolated, "KIWOOM", "mock", "USD", { scope: "overseas", accountRef: ref }).returnRate + 10) < 1e-8);
@@ -168,6 +174,68 @@ const { syncStockBriefingEquity } = require("../src/integrations/stock-briefing"
   summary = { ...summary, tot_loan_amt: "1" }; await assert.rejects(kisClient.getAccountEquity(), /대출/);
   summary = { ...summary, tot_loan_amt: null }; await assert.rejects(kisClient.getAccountEquity(), /대출/);
   summary = { ...summary, tot_asst_amt: null }; await assert.rejects(kisClient.getAccountEquity(), /미확인/);
+  // Same linked-account presentation, without guessing whether cash wallets are shared.
+  const fresh = new Date().toISOString();
+  const krPoint = { ...domesticPoint, equityProof: { d0Cash: 700, clear: true, observedAt: fresh } };
+  const usPoint = { ...point, equityProof: { wonCash: 700, rate: 1300, clear: true, observedAt: fresh } };
+  let otherAccount = false, foreignWallet = false;
+  const totalBroker = { ...both,
+    domesticClient: { accountIdentityKey: () => domesticClient.accountIdentityKey(), getDomesticEquity: async () => krPoint, post: async () => ({ acctNo: "1234567890" }) },
+    overseasClient: { accountIdentityKey: () => client.accountIdentityKey(), getAccountEquity: async () => usPoint, post: async (_url, options) => options.apiId === "ka00001"
+      ? { acctNo: otherAccount ? "9876543210" : "1234567890" }
+      : { result_list: [{ crnc_code: "USD" }, ...(foreignWallet ? [{ crnc_code: "JPY", fx_entr: "1", evlt_amt: "0" }] : [])] } },
+  };
+  const sameTotal = await collectKiwoomTotal(totalBroker, [krPoint, usPoint]);
+  assert.equal(sameTotal.equity, 131000); assert.equal(sameTotal.cash, 117600);
+  assert.equal(sameTotal.breakdown.cash_scope, "same-account");
+  otherAccount = true;
+  const separateTotal = await collectKiwoomTotal(totalBroker, [krPoint, usPoint]);
+  assert.equal(separateTotal.equity, 131700); assert.equal(separateTotal.cash, 118300);
+  assert.equal(separateTotal.breakdown.cash_scope, "separate-accounts");
+  await assert.rejects(collectKiwoomTotal({ ...totalBroker, environment: "live" }, [krPoint, usPoint]), /실계좌/);
+  foreignWallet = true; await assert.rejects(collectKiwoomTotal(totalBroker, [krPoint, usPoint]), /통화/); foreignWallet = false;
+  otherAccount = false;
+  await assert.rejects(collectKiwoomTotal(totalBroker, [krPoint, { ...usPoint, equityProof: { ...usPoint.equityProof, wonCash: 0 } }]), /대조/);
+  await assert.rejects(collectKiwoomTotal(totalBroker, [krPoint]), /동시 관측/);
+  await assert.rejects(collectKiwoomTotal(totalBroker, [krPoint, { ...usPoint, equityProof: { ...usPoint.equityProof, observedAt: day1 } }]), /시간/);
+  await assert.rejects(collectKiwoomTotal(totalBroker, [krPoint, { ...usPoint, equityProof: { ...usPoint.equityProof, clear: false } }]), /합산 보류/);
+  const linkedState = readEvidence(path.join(root, "linked.json"));
+  const totalFile = path.join(root, "total-refresh.json");
+  assert.equal(await refreshAccountEquity(totalBroker, totalFile, collectionAt), true);
+  assert.equal(readEvidence(totalFile).equity.filter(row => row.scope === "account-total-assets").length, 1);
+  const storedTotal = fs.readFileSync(totalFile, "utf8");
+  assert.equal(await refreshAccountEquity(totalBroker, totalFile, new Date("2026-09-12T15:55:00+09:00")), false);
+  assert.equal(fs.readFileSync(totalFile, "utf8"), storedTotal);
+  const recordedAt = new Date().toISOString();
+  recordAccountEquity(linkedState, totalBroker, [krPoint, usPoint, sameTotal], recordedAt);
+  assert.equal(linkedState.equity.length, 3); assert.ok(linkedState.equity.every(row => !row.equityProof));
+  const linkedSeries = accountEquitySeries(linkedState);
+  assert.equal(new Set(linkedSeries.map(s => s.account_group_ref)).size, 1);
+  const totalSeries = linkedSeries.find(s => s.scope === "account-total-assets");
+  assert.equal(totalSeries.points[0].source, "KIWOOM_ACCOUNT_EQUITY");
+  assert.equal(totalSeries.points[0].breakdown.usd_krw_rate, "1300");
+  assert.equal(totalSeries.points[0].return_index, null);
+  const privateFree = JSON.stringify(linkedSeries);
+  for (const secret of ["1234567890", "9876543210", client.accountIdentityKey(), "equityProof"]) assert.ok(!privateFree.includes(secret));
+  const badBreakdown = structuredClone(linkedState); badBreakdown.equity[2].breakdown.cash_krw++;
+  badBreakdown.equity[2].breakdown.cash_krw += 2;
+  assert.throws(() => accountEquitySeries(badBreakdown), /대조|정합/);
+  assert.throws(() => equityBreakdown({ equity: 100, domestic: 10, us: 1, cash: 90, rate: 1300 }), /대조/);
+  let incompleteDetail = false;
+  kisClient.request = async (url, options) => {
+    if (url.endsWith("inquire-present-balance")) return { output2: [{ crcy_cd: "USD", frst_bltn_exrt: "1300" }],
+      output3: { tot_asst_amt: "14100", tot_loan_amt: "0", tot_dncl_amt: "1000", frcr_evlu_tota: "0", evlu_amt_smtl_amt: "13100", cma_evlu_amt: "0" } };
+    if (url.includes("/domestic-stock/")) return { output1: [{ evlu_amt: "100" }], output2: [{ scts_evlu_amt: "100" }] };
+    return { continuation: incompleteDetail, output1: options.params.OVRS_EXCG_CD === "NASD"
+      ? [{ ovrs_pdno: "EXAMPLE", ovrs_stck_evlu_amt: "10", tr_crcy_cd: "USD" }] : [] };
+  };
+  const detailedKis = await kisClient.getAccountEquity({ includeBreakdown: true });
+  assert.equal(detailedKis.breakdown.domestic_stock_value_krw, 100);
+  assert.equal(detailedKis.breakdown.us_stock_value_krw, 13000);
+  assert.equal(detailedKis.breakdown.cash_krw, 1000);
+  incompleteDetail = true;
+  const safeKis = await kisClient.getAccountEquity({ includeBreakdown: true });
+  assert.equal(safeKis.equity, 14100); assert.equal(safeKis.breakdown, undefined);
   const calls = [], token = `sb_sync_${"a".repeat(43)}`;
   const many = structuredClone(state); many.cashFlowCoverage = []; many.equity = Array.from({ length: 501 }, (_, i) => ({ ...state.equity[0], at: new Date(Date.UTC(2024, 0, i + 1)).toISOString() }));
   const synced = await syncStockBriefingEquity(many, { token, apiUrl: "http://127.0.0.1:3000", fetchImpl: async (url, options) => {

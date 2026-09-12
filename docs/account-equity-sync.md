@@ -9,6 +9,9 @@ Request: `{version: 1, series: [...]}`. Response: `{ok: true, synced: number}`.
 Each series contains:
 
 - `account_ref`: locally persisted random UUID, never an account number or credential hash.
+- Optional `account_group_ref`: random UUID for the explicitly configured linked-account
+  group. It does not assert that domestic and overseas credentials identify one physical
+  account. Broker/environment and both configured Kiwoom identities isolate the group.
 - `broker`: `KIWOOM` or `KIS`; `account_type`: `paper` or `live`.
 - `currency`: `KRW` or `USD`; `scope`: `domestic`, `overseas` or `account-total-assets`.
 - `date_timezone`: `Asia/Seoul` (last observation per local calendar day, not exchange close).
@@ -28,8 +31,56 @@ return_status: `verified`, `insufficient_samples`, `cash_flows_unverified`,
 `scope_unverified`, `invalid_data`. Only verified has a nonnull return_index (1 at the
 base observation) and requires return_method/base. A single sample is not a 0% return.
 Only these source/scope/currency combinations are sent: KIWOOM domestic KRW
-(`KIWOOM_KR_EQUITY`), KIWOOM overseas USD (`KIWOOM_US_EQUITY`), KIS whole-account KRW
-(`KIS_ACCOUNT_EQUITY`). They are never summed or spliced into one curve.
+(`KIWOOM_KR_EQUITY`), KIWOOM overseas USD (`KIWOOM_US_EQUITY`), KIWOOM verified linked
+account total KRW (`KIWOOM_ACCOUNT_EQUITY`), KIS whole-account KRW (`KIS_ACCOUNT_EQUITY`).
+Existing market histories are never spliced into the new linked-account total curve.
+
+## Common presentation and optional breakdown
+
+Both brokers use **total assets including cash**, then **domestic stock valuation,
+US stock valuation, and common cash**. Cash is not arbitrarily assigned to a market.
+Market valuation curves are not investment-return curves. Old standalone market asset
+histories (including cash) retain their original definitions and are separate records.
+
+An independently reconciled total point can include `breakdown`:
+`status: verified`, `domestic_stock_value_krw`, `us_stock_value_usd`,
+`us_stock_value_krw`, `cash_krw`, `usd_krw_rate`, `fx_source`, `observed_at`,
+`source`, `cash_scope`. Monetary/rate fields are decimal strings; cash may be negative.
+Domestic stocks + converted US stocks + cash must match total within KRW 2;
+USD stocks times the rate must match converted US stocks within KRW 2. Nonnull point
+cash/stock components must also reconcile. The rate observation is at most 120 seconds
+before collected_at. This is an observed broker FX rate, not an asserted quote timestamp.
+
+- KIWOOM: `KIWOOM_LINKED_V1`, `KIWOOM_USD_SELL`,
+  `cash_scope: same-account | separate-accounts`. Collect domestic/US observations in
+  the same run. Compare the two official `ka00001` account identifiers in memory;
+  never store or transmit account numbers. For the same account compare D0 KRW cash
+  and count domestic D2 KRW cash once. Distinct mock-market accounts add the overseas
+  account's separately held KRW cash. Distinct live accounts are not aggregated until
+  their complete asset coverage can be proven. Other currencies, unavailable FX,
+  loans/receivables/KRW substitution, incomplete pages or unreconciled domestic assets
+  block the aggregate. `ust21120` is only a currency-coverage check, never a D0 asset
+  fallback. Preserve partial market histories and record the diagnostic locally in
+  `equityTotalFailures`; do not emit repeated market-closure alerts.
+- KIS: `KIS_RECONCILED_V1`, `KIS_USD_FIRST`, `cash_scope: account`.
+  Keep the existing reported KRW total. Independently check complete domestic stock
+  rows against `scts_evlu_amt`, deduplicate the complete USD US-exchange position
+  responses, convert with the reported USD rate, and reconcile with the total and
+  common cash. Any other-market assets or inconsistent observations prevent the
+  breakdown; they are never silently relabeled as US assets.
+
+Missing breakdown is **unconfirmed**, not zero. Missing total is **not collected**;
+never synthesize it in the receiving website. New totals start a new UUID/history;
+old identity-less observations are not retrospectively assigned to a linked group.
+The v1 extension is additive; old clients and observations remain supported.
+
+Verification: synthetic tests cover shared/separate cash, identity isolation, stale
+inputs, other-currency rejection and preservation of valid totals when details fail.
+A read-only KIS mock check on 2026-09-12 confirmed a reported total but inconsistent
+US position valuation versus the total's stock component; breakdown was correctly
+omitted. Its present-balance detail rows also returned zero quantities/values despite
+the separate position ledger containing holdings. No inferred FX or residual cash
+was used. Kiwoom's new total remains pending a successful complete broker observation.
 
 The server upserts only supplied observations; omitted/empty history never deletes.
 Identity is member + account_ref + broker + environment + currency + scope + date.

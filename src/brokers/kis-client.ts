@@ -468,7 +468,7 @@ class KisClient {
       ERLM_STRT_DT: startDate, ERLM_END_DT: endDate, OVRS_EXCG_CD: "NASD", PDNO: "", SLL_BUY_DVSN_CD: "00", LOAN_DVSN_CD: "", CTX_AREA_FK100: "", CTX_AREA_NK100: "" }, 100);
   }
 
-  async getAccountEquity() {
+  async getAccountEquity({ includeBreakdown = false } = {}) {
     const result = await this.request("/uapi/overseas-stock/v1/trading/inquire-present-balance", { trId: this.trId("VTRP6504R", "CTRP6504R"),
       params: this.accountParams({ WCRC_FRCR_DVSN_CD: "02", NATN_CD: "000", TR_MKET_CD: "00", INQR_DVSN_CD: "00" }) });
     const summary = Array.isArray(result.output3) ? result.output3[0] : result.output3;
@@ -483,8 +483,54 @@ class KisClient {
     // Only expose the decomposition when the broker's same-response totals reconcile (KRW rounding).
     const decomposed = optional("cma_evlu_amt") === 0 && cash !== null && stocks !== null && stocks >= 0
       && Math.abs(cash + stocks - equity) <= 2;
-    return { currency: "KRW", equity, cash: decomposed ? cash : null, stockValue: decomposed ? stocks : null,
+    const point: any = { currency: "KRW", equity, cash: decomposed ? cash : null, stockValue: decomposed ? stocks : null,
       source: "KIS:inquire-present-balance:tot_asst_amt", scope: "account-total-assets" };
+    if (includeBreakdown && decomposed) {
+      try { point.breakdown = await this.getAccountEquityBreakdown(result, point); }
+      catch (error) { point.breakdownError = error instanceof Error ? error.message : "자산 상세 확인 실패"; } // Private diagnostic; the valid reported total survives.
+    }
+    return point;
+  }
+
+  async getAccountEquityBreakdown(present: any, point: any) {
+    const { equityNumber: n, equityBreakdown } = require("./account-equity");
+    const observedAt = new Date().toISOString();
+    const usdRows = Array.isArray(present.output2) ? present.output2.filter((row: any) => row.crcy_cd === "USD") : [];
+    if (usdRows.length !== 1) throw Error("USD 환율 미확인");
+    const rate = n(usdRows[0].frst_bltn_exrt);
+    const domestic = await this.request("/uapi/domestic-stock/v1/trading/inquire-balance", {
+      trId: this.trId("VTTC8434R", "TTTC8434R"),
+      params: this.accountParams({ AFHR_FLPR_YN: "N", OFL_YN: "", INQR_DVSN: "02", UNPR_DVSN: "01",
+        FUND_STTL_ICLD_YN: "N", FNCG_AMT_AUTO_RDPT_YN: "N", PRCS_DVSN: "01", CTX_AREA_FK100: "", CTX_AREA_NK100: "" }),
+    });
+    const summary = Array.isArray(domestic.output2) && domestic.output2.length === 1 ? domestic.output2[0] : null;
+    if (domestic.continuation || !summary || !Array.isArray(domestic.output1)) throw Error("국내 자산 상세 완전성 미확인");
+    const domesticValue = n(summary.scts_evlu_amt);
+    const domesticRowsValue = domestic.output1.reduce((sum: number, row: any) => {
+      const value = n(row.evlu_amt);
+      if (value < 0) throw Error("국내 평가액 숫자 오류");
+      return sum + value;
+    }, 0);
+    if (Math.abs(domesticRowsValue - domesticValue) > 2) throw Error("국내 평가액 대조 실패");
+    const positions = new Map<string, number>();
+    for (const exchange of ["NASD", "NYSE", "AMEX"]) {
+      const result = await this.request("/uapi/overseas-stock/v1/trading/inquire-balance", {
+        trId: this.trId("VTTS3012R", "TTTS3012R"),
+        params: this.accountParams({ OVRS_EXCG_CD: exchange, TR_CRCY_CD: "USD", CTX_AREA_FK200: "", CTX_AREA_NK200: "" }),
+      });
+      if (result.continuation || !Array.isArray(result.output1)) throw Error("미국 평가액 완전성 미확인");
+      for (const row of result.output1) {
+        const symbol = String(row.ovrs_pdno || ""), value = n(row.ovrs_stck_evlu_amt);
+        if (!symbol || value < 0 || (row.tr_crcy_cd && row.tr_crcy_cd !== "USD")
+          || (positions.has(symbol) && positions.get(symbol) !== value)) throw Error("미국 평가액 통화·중복 대조 실패");
+        positions.set(symbol, value);
+      }
+    }
+    if (Date.now() - Date.parse(observedAt) > 120_000) throw Error("자산 상세 관측 시간 초과");
+    const us = [...positions.values()].reduce((sum, value) => sum + value, 0);
+    // Other-market holdings or changing quotes fail reconciliation; never label them US.
+    return equityBreakdown({ equity: point.equity, domestic: domesticValue, us, cash: point.cash, rate,
+      fxSource: "KIS_USD_FIRST", source: "KIS_RECONCILED_V1", cashScope: "account", observedAt });
   }
 
   async cancelUsOrder({ orderNo, exchange, symbol, quantity }: any) {
