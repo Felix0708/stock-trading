@@ -44,18 +44,22 @@ function writeEvidence(file, state) {
   try { fs.fsyncSync(directory); } finally { fs.closeSync(directory); }
 }
 
-function equityAccountRef(state, broker) {
-  const identity = broker.overseasClient?.accountIdentityKey?.();
+function equityAccountRef(state, broker, scope = "overseas") {
+  const identity = (scope === "domestic" ? broker.domesticClient : broker.overseasClient)?.accountIdentityKey?.();
   if (!/^[a-f0-9]{64}$/.test(identity || "")) throw Error("자산 계좌 식별 미확인");
-  const key = `${broker.id}:${broker.environment}:${identity}`;
+  const key = `${broker.id}:${broker.environment}:${scope === "domestic" ? "domestic:" : ""}${identity}`;
   state.equityAccounts ||= {};
   return state.equityAccounts[key] ||= randomUUID();
 }
 
-async function collectAccountEquity(broker) {
-  const client = broker.overseasClient;
-  const points = [await client.getAccountEquity()];
-  if (points.some(row => !row || !["KRW", "USD"].includes(row.currency) || !["overseas", "account-total-assets"].includes(row.scope)
+function equityScopes(broker) {
+  return broker.id === "KIWOOM" ? [...(broker.domesticClient ? ["domestic"] : []), "overseas"] : ["account-total-assets"];
+}
+
+async function collectAccountEquity(broker, scope = broker.id === "KIWOOM" ? "overseas" : "account-total-assets") {
+  const points = [await (scope === "domestic" ? broker.domesticClient.getDomesticEquity() : broker.overseasClient.getAccountEquity())];
+  if (points.some(row => !row || row.scope !== scope || row.currency !== (scope === "overseas" ? "USD" : "KRW")
+      || (scope === "domestic" && broker.id !== "KIWOOM")
       || !Number.isFinite(row.equity) || row.equity < 0
       || (row.stockValue != null && (!Number.isFinite(row.stockValue) || row.stockValue < 0))
       || (row.cash != null && !Number.isFinite(row.cash)))) throw Error("계좌 자산 범위·금액 응답 미확인");
@@ -65,13 +69,14 @@ async function collectAccountEquity(broker) {
 function recordAccountEquity(state, broker, points, at) {
   if (!points.length) return;
   if (!Number.isFinite(Date.parse(at))) throw Error("자산 수집 시각 오류");
-  const accountRef = equityAccountRef(state, broker);
   for (const point of points) {
+    const accountRef = equityAccountRef(state, broker, point.scope);
     const snapshot = { ...point, at, accountRef, brokerId: broker.id, environment: broker.environment };
     const index = state.equity.findIndex(row => row.brokerId === broker.id && row.environment === broker.environment
       && row.accountRef === accountRef && row.currency === point.currency && row.scope === point.scope && koreanDate(row.at) === koreanDate(at));
     if (index < 0) state.equity.push(snapshot);
     else if (Date.parse(state.equity[index].at) < Date.parse(at)) state.equity[index] = snapshot;
+    if (state.equityFailures) delete state.equityFailures[accountRef];
   }
 }
 
@@ -87,18 +92,37 @@ function equityCollectionOpen(broker, now = new Date()) {
 
 async function refreshAccountEquity(broker, file, now = new Date()) {
   if (!equityCollectionOpen(broker, now)) return false;
-  const before = readEvidence(file), accountRef = equityAccountRef(before, broker);
-  const latest = before.equity.filter(row => row.accountRef === accountRef).reduce((at, row) => Math.max(at, Date.parse(row.at) || 0), 0);
-  before.equityAttemptedAt ||= {};
-  const attempted = Date.parse(before.equityAttemptedAt[accountRef] || "") || 0;
-  if (now.getTime() - Math.max(latest, attempted) < 60 * 60_000) return false;
-  before.equityAttemptedAt[accountRef] = now.toISOString();
-  writeEvidence(file, before); // Identity and attempt persist before the asynchronous broker request.
-  const points = await collectAccountEquity(broker);
-  const state = readEvidence(file); // Other account collection may have completed during the request.
-  recordAccountEquity(state, broker, points, new Date().toISOString());
-  writeEvidence(file, state);
-  return true;
+  let collected = false, attemptedCollection = false;
+  const failures = [];
+  for (const scope of equityScopes(broker)) {
+    const before = readEvidence(file), accountRef = equityAccountRef(before, broker, scope);
+    const latest = before.equity.filter(row => row.accountRef === accountRef).reduce((at, row) => Math.max(at, Date.parse(row.at) || 0), 0);
+    before.equityAttemptedAt ||= {};
+    const attempted = Date.parse(before.equityAttemptedAt[accountRef] || "") || 0;
+    if (now.getTime() - Math.max(latest, attempted) < 60 * 60_000) {
+      if (before.equityFailures?.[accountRef]) failures.push(before.equityFailures[accountRef]);
+      continue;
+    }
+    before.equityAttemptedAt[accountRef] = now.toISOString();
+    writeEvidence(file, before); // Identity and attempt persist before the asynchronous broker request.
+    attemptedCollection = true;
+    try {
+      const points = await collectAccountEquity(broker, scope);
+      const state = readEvidence(file); // Other account collection may have completed during the request.
+      recordAccountEquity(state, broker, points, new Date().toISOString());
+      writeEvidence(file, state);
+      collected = true;
+    } catch (error) {
+      const state = readEvidence(file);
+      const message = `${scope === "domestic" ? "국내" : scope === "overseas" ? "미국" : "계좌 전체"}: ${error.message}`;
+      state.equityFailures ||= {};
+      state.equityFailures[accountRef] = message;
+      writeEvidence(file, state);
+      failures.push(message);
+    }
+  }
+  if (attemptedCollection && failures.length) throw new Error(failures.join(" / "));
+  return collected;
 }
 
 function reconciliationPlan(orders, rows, environment) {
@@ -219,9 +243,10 @@ async function collectBrokerEvidence(broker, now = new Date()) {
   catch (error) { transactions = []; transactionError = error.message; }
   const costs = settlementCosts(broker.id, transactions, corrected);
   let equity = [], equityError = "";
-  try {
-    if (equityCollectionOpen(broker, now)) equity = await collectAccountEquity(broker);
-  } catch (error) { equity = []; equityError = error.message; }
+  if (equityCollectionOpen(broker, now)) for (const scope of equityScopes(broker)) {
+    try { equity.push(...await collectAccountEquity(broker, scope)); }
+    catch (error) { equityError += `${scope}: ${error.message}; `; }
+  }
   return { capturedAt: now.toISOString(), equityCapturedAt: new Date().toISOString(), brokerId: broker.id, environment: broker.environment,
     discrepancies, remainingDiscrepancies: holdingDiscrepancies(corrected, holdings, broker.environment),
     executions, historyErrors, transactions, transactionError, reconciliation, costs, equity, equityError };
@@ -267,4 +292,4 @@ function validateStatement(input, broker) {
   });
 }
 
-module.exports = { evidenceNumber, koreanDate, executionDateMatches, evidenceFile, orderKey, readEvidence, writeEvidence, reconciliationPlan, holdingDiscrepancies, settlementCosts, collectBrokerEvidence, applyEvidence, validateStatement, equityAccountRef, collectAccountEquity, recordAccountEquity, refreshAccountEquity, equityCollectionOpen };
+module.exports = { evidenceNumber, koreanDate, executionDateMatches, evidenceFile, orderKey, readEvidence, writeEvidence, reconciliationPlan, holdingDiscrepancies, settlementCosts, collectBrokerEvidence, applyEvidence, validateStatement, equityAccountRef, collectAccountEquity, recordAccountEquity, refreshAccountEquity, equityCollectionOpen, equityScopes };

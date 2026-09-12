@@ -66,6 +66,28 @@ function message(r) { return { id: r.requestId, channelId: "signal", author: { i
 
 (async () => {
   const initialClock = clock;
+  const equityAlerts = fixture(["KIWOOM", "KIS"]);
+  await equityAlerts.runtime.reportEquityStatus(equityAlerts.brokers[0], new Error("점검 중"));
+  clock += 3600_000;
+  await equityAlerts.runtime.reportEquityStatus(equityAlerts.brokers[0], new Error("다른 응답 오류"));
+  assert.equal(equityAlerts.sent.length, 1);
+  assert.equal(equityAlerts.receipts.state.equityOutages['KIWOOM:mock'].notified, true);
+  // Restoring the persisted incident must not replay the same notification.
+  const restoredEquity = fixture(["KIWOOM"]);
+  restoredEquity.receipts.state.equityOutages = JSON.parse(JSON.stringify(equityAlerts.receipts.state.equityOutages));
+  await restoredEquity.runtime.reportEquityStatus(restoredEquity.brokers[0], new Error("still down"));
+  assert.equal(restoredEquity.sent.length, 0);
+  await restoredEquity.runtime.reportEquityStatus(restoredEquity.brokers[0]);
+  await restoredEquity.runtime.reportEquityStatus(restoredEquity.brokers[0]);
+  assert.equal(restoredEquity.sent.length, 1); assert.equal(Object.keys(restoredEquity.receipts.state.equityOutages).length, 0);
+  await equityAlerts.runtime.reportEquityStatus(equityAlerts.brokers[1], new Error("independent failure"));
+  assert.equal(equityAlerts.sent.length, 2);
+  const failedAlert = fixture(); failedAlert.failDiscord(true);
+  await assert.rejects(failedAlert.runtime.reportEquityStatus(failedAlert.brokers[0], new Error("down")), /Discord/);
+  failedAlert.failDiscord(false);
+  await failedAlert.runtime.reportEquityStatus(failedAlert.brokers[0], new Error("down"));
+  assert.equal(failedAlert.sent.length, 1);
+  clock = initialClock;
   clock = new RealDate("2026-09-08T20:00:32Z").getTime(); // 05:00 KST: mock closed, live aftermarket open.
   const sessions = fixture(["KIWOOM", "KIS"]);
   const partial = record("session-partial", "SELL");

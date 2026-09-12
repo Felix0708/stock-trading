@@ -16,7 +16,7 @@ function accountEquitySeries(state, calculatedAt = new Date().toISOString()) {
     if (!row.accountRef) continue; // Legacy history cannot prove the physical account identity.
     if (!/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(row.accountRef)
       || !["KIWOOM", "KIS"].includes(row.brokerId) || !["mock", "live"].includes(row.environment)
-      || !["KRW", "USD"].includes(row.currency) || !["overseas", "account-total-assets"].includes(row.scope)
+      || !["KIWOOM:domestic:KRW", "KIWOOM:overseas:USD", "KIS:account-total-assets:KRW"].includes(`${row.brokerId}:${row.scope}:${row.currency}`)
       || !Number.isFinite(Date.parse(row.at)) || Date.parse(row.at) > Date.parse(calculatedAt)) throw Error("자산 전송 계좌·범위·시각 오류");
     const key = [row.accountRef, row.brokerId, row.environment, row.currency, row.scope].join(":");
     if (!groups.has(key)) groups.set(key, []);
@@ -44,7 +44,7 @@ function accountEquitySeries(state, calculatedAt = new Date().toISOString()) {
         equity: decimal(row.equity), cash: decimal(row.cash, true), stock_value: decimal(row.stockValue),
         return_index: curve.has(row.at) ? decimal(curve.get(row.at)) : null,
         return_status: curve.has(row.at) ? "verified" : performance.status,
-        source: row.brokerId === "KIWOOM" ? "KIWOOM_US_EQUITY" : "KIS_ACCOUNT_EQUITY",
+        source: row.scope === "domestic" ? "KIWOOM_KR_EQUITY" : row.brokerId === "KIWOOM" ? "KIWOOM_US_EQUITY" : "KIS_ACCOUNT_EQUITY",
       })),
     };
   });

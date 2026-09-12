@@ -343,6 +343,15 @@ async function fakeFetch(url, options) {
   });
   assert.equal(await transientQueryClient.getDomesticAccountNumber(), "1234567890");
   assert.equal(transientQueryCount, 2);
+  let maintenanceCalls = 0;
+  const maintenance = new KiwoomClient({ appKey: "test", secretKey: "test", fetchImpl: async () => {
+    maintenanceCalls++;
+    return new Response('<html><h1>시스템 작업 알림</h1>전체 서비스 중단 <script>private data</script></html>', { status: 200 });
+  } });
+  await assert.rejects(maintenance.post("/api/dostk/acnt", { apiId: "kt00018" }), error => error.brokerMaintenance === true && /시스템 점검/.test(error.message) && !error.message.includes("private"));
+  assert.equal(maintenanceCalls, 1);
+  await assert.rejects(maintenance.post("/api/dostk/ordr", { apiId: "kt10000", retryTransient: false }), error => error.orderStatusUnknown === true);
+  assert.equal(maintenanceCalls, 2); // Maintenance HTML never licenses an order resend.
 
   let uncertainOrderCount = 0;
   const uncertainOrderClient = new KiwoomClient({

@@ -16,7 +16,8 @@ const { syncStockBriefingEquity } = require("../src/integrations/stock-briefing"
     const environment = environments[id];
     const overseasClient = id === "KIWOOM" ? new KiwoomClient({ ...kiwoomCredentials(environment, "overseas"), environment, timeoutMs: 15000 })
       : new KisClient({ ...kisCredentials(environment), environment, timeoutMs: 15000 });
-    try { await refreshAccountEquity({ id, environment, overseasClient }, file); }
+    const domesticClient = id === "KIWOOM" ? new KiwoomClient({ ...kiwoomCredentials(environment, "domestic"), environment, timeoutMs: 15000 }) : overseasClient;
+    try { await refreshAccountEquity({ id, environment, overseasClient, domesticClient }, file); }
     catch (error) { console.error(`${id} 자산 조회 실패: ${error.message}`); process.exitCode = 1; }
   }
   const state = readEvidence(file);

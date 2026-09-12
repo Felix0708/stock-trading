@@ -26,7 +26,7 @@ function toNumber(value: unknown, field: string) {
 }
 
 function toOptionalNumber(value: unknown, field: string, absolute = false) {
-  if (value === undefined || value === null || value === "") return null;
+  if (value === undefined || value === null || String(value).trim() === "") return null;
   const number = toNumber(value, field);
   return absolute ? Math.abs(number) : number;
 }
@@ -159,6 +159,12 @@ class KiwoomClient {
     try {
       data = text ? JSON.parse(text) : {};
     } catch {
+      if (/시스템\s*작업|시스템\s*점검|서비스\s*점검/.test(text.slice(0, 100_000))
+        && /중단|이용.*불가|점검\s*중/.test(text.slice(0, 100_000))) {
+        const message = `키움 ${this.#environmentLabel} 시스템 점검으로 조회가 중단됐습니다. 공식 점검 안내를 확인하세요.`;
+        // An HTML page is not proof that an order was rejected: never resend it.
+        throw retryTransient ? Object.assign(new Error(message), { brokerMaintenance: true }) : uncertainOrderError(message);
+      }
       if (retryTransient && transientAttempt < 1 && transientHttpStatus(response.status)) {
         await new Promise((resolve) => setTimeout(resolve, 500));
         return this.post(path, { continuation, canSubmit, apiId, body, authorization, retryAuthorization, retryRateLimit, retryTransient, transientAttempt: transientAttempt + 1 });
@@ -264,6 +270,27 @@ class KiwoomClient {
       deposit: toNumber(data.entr, "국내주식 예수금"),
       orderableAmount: toNumber(data.ord_alow_amt, "국내주식 주문가능금액"),
     };
+  }
+
+  async getDomesticEquity() {
+    const data = await this.post("/api/dostk/acnt", {
+      apiId: "kt00018", authorization: true, body: { qry_tp: "1", dmst_stex_tp: "KRX" },
+    });
+    const equity = toOptionalNumber(data.prsm_dpst_aset_amt, "국내 추정예탁자산");
+    const stockValue = toOptionalNumber(data.tot_evlt_amt, "국내 총평가금액");
+    if (equity === null || equity < 0 || (stockValue !== null && stockValue < 0) || data.pagination?.more
+      || ["tot_loan_amt", "tot_crd_loan_amt", "tot_crd_ls_amt"].some(key => toOptionalNumber(data[key], "국내 대출금") !== 0)) {
+      throw new Error("키움 국내 자산·대출·조회 완전성 미확인");
+    }
+    const cashData = await this.post("/api/dostk/acnt", {
+      apiId: "kt00001", authorization: true, body: { qry_tp: "3" },
+    });
+    const projectedCash = toOptionalNumber(cashData.d2_entra, "D+2 추정예수금");
+    // Preserve the broker's total; never call its unexplained residual cash.
+    const cash = projectedCash !== null && stockValue !== null && Math.abs(projectedCash + stockValue - equity) <= 2
+      ? projectedCash : null;
+    return { currency: "KRW", equity, cash, stockValue, scope: "domestic",
+      source: "KIWOOM:kt00018:prsm_dpst_aset_amt+kt00001:d2_entra" };
   }
 
   async getDomesticQuote({ symbol }: any = {}) {

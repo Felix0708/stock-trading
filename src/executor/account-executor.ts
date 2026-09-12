@@ -5,7 +5,7 @@ const { createHash } = require("node:crypto");
 const { Client, GatewayIntentBits } = require("discord.js");
 const { syncAccountPortfolio, strategyComparison, formatStrategyComparisonMessage } = require("./account-portfolio");
 const { writeAccountHealth } = require("./account-health");
-const { evidenceFile, readEvidence, writeEvidence, collectBrokerEvidence, applyEvidence, validateStatement, reconciliationPlan, koreanDate, refreshAccountEquity, equityAccountRef } = require("./account-evidence");
+const { evidenceFile, readEvidence, writeEvidence, collectBrokerEvidence, applyEvidence, validateStatement, reconciliationPlan, koreanDate, refreshAccountEquity, equityAccountRef, equityScopes } = require("./account-evidence");
 const { equityPerformance, importCashFlows } = require("./equity-performance");
 const { brokerStop, protectionReadiness, currentProtection, ensureProtection, releaseProtection } = require("./broker-protection");
 const { formatLifecycleCard } = require("./signal-lifecycle");
@@ -999,8 +999,10 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
     if (!equitySyncJob) equitySyncJob = (async () => {
       const file = evidenceFile(receipts.file);
       await Promise.all(brokers.map(broker => brokerWork(broker, async () => {
-        try { await refreshAccountEquity(broker, file); }
-        catch (error) { await reportError(`${broker.label} 자산 그래프 조회 실패 · 주문과 별개`, error); }
+        let collected;
+        try { collected = await refreshAccountEquity(broker, file); }
+        catch (error) { await reportEquityStatus(broker, error); return; }
+        if (collected) await reportEquityStatus(broker);
       }, "equity")));
       const synced = await syncStockBriefingEquity(readEvidence(file));
       console.log(`Stock-Briefing 계좌 자산 동기화: ${synced.series}계좌 범위 · ${synced.synced}일별 관측`);
@@ -1011,6 +1013,8 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
     if (readOnly || !receipts.file || !broker.overseasClient.getUsHistoricalExecutions) return null;
     const report = await collectBrokerEvidence(broker);
     const changed = applyEvidence(broker, report, evidenceFile(receipts.file));
+    if (report.equityError) await reportEquityStatus(broker, new Error(report.equityError));
+    else if (report.equity.length) await reportEquityStatus(broker);
     if (changed) void requestPortfolioSync();
     return { broker: broker.id, changed, discrepancies: report.remainingDiscrepancies.length,
       historyErrors: report.historyErrors, transactionError: report.transactionError, equityError: report.equityError };
@@ -1131,6 +1135,25 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
 
   const brokerAccountLabel = (broker) => `${broker.label} ${broker.environment === "live" ? "실계좌" : "모의계좌"}`;
   const accountSummary = () => brokers.map(brokerAccountLabel).join(" + ");
+
+  async function reportEquityStatus(broker, error = null) {
+    // Persist the incident, not a cooldown: restarting must not replay an hourly alert.
+    const key = `${broker.id}:${broker.environment}`;
+    const incidents = receipts.state.equityOutages ||= {};
+    if (error) {
+      const incident = incidents[key] ||= { since: new Date().toISOString(), notified: false };
+      incident.reason = String(error.message || error).slice(0, 1000);
+      receipts.write();
+      if (incident.notified) return;
+      await send(channels.system, { text: `⚠️ **${brokerAccountLabel(broker)} 자산 그래프 조회 지연 · 주문과 별개**\n${incident.reason}\n기존 자산 기록은 유지합니다. 같은 장애는 반복 통보하지 않고, 실제 조회 복구 시 알립니다.` });
+      incident.notified = true;
+      receipts.write();
+    } else if (incidents[key]) {
+      if (incidents[key].notified) await send(channels.system, { text: `✅ **${brokerAccountLabel(broker)} 자산 그래프 조회 복구**\n필요한 자산 조회가 다시 성공했습니다. 주문 체결이나 실시간 감시 복구를 뜻하지 않습니다.` });
+      delete incidents[key];
+      receipts.write();
+    }
+  }
 
   async function reportError(title, error, record = null) {
     const reportKey = [title, error?.message || error, record?.payload?.ticker || record?.symbol || ""].join("\n");
@@ -1986,12 +2009,12 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
       const studyFile = "forward-policy-study.json";
       const report = { at: new Date().toISOString(), notes: "실제 체결·최종청산 기준. 비용 미확인은 null. 신호가 대비 체결 차이는 실제 손익에 이미 반영되어 재차 차감하지 않음. 실현손익 낙폭은 계좌 MDD가 아님.",
         accounts: brokers.map(broker => ({ broker: broker.id, environment: broker.environment, ...strategyComparison(broker, receipts.state.signals) })),
-        accountEquity: brokers.flatMap(broker => {
-          const accountRef = equityAccountRef(evidence, broker);
+        accountEquity: brokers.flatMap(broker => equityScopes(broker).flatMap(scope => {
+          const accountRef = equityAccountRef(evidence, broker, scope);
           const scopes = new Map(evidence.equity.filter(row => row.accountRef === accountRef).map(row => [`${row.currency}:${row.scope}`, row]));
           return [...scopes.values() as Iterable<any>].map(row => ({ accountRef, scope: row.scope,
             ...equityPerformance(evidence, broker.id, broker.environment, row.currency, { accountRef, scope: row.scope }) }));
-        }),
+        })),
         evidenceStatus: Object.values(evidence.brokers || {}).map((row: any) => ({ brokerId: row.brokerId, environment: row.environment,
           capturedAt: row.capturedAt, discrepancies: row.remainingDiscrepancies, historyErrors: row.historyErrors,
           transactionError: row.transactionError, equityError: row.equityError })),
@@ -2097,7 +2120,7 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
     });
     await client.login(process.env.ACCOUNT_DISCORD_TOKEN || process.env.KIS_DISCORD_TOKEN || process.env.DISCORD_TOKEN_DRUCKENMILLER);
   }
-  return { listen, execute, executeOrDefer, retryDeferred, retryInbox, processMessage, processApproval, processOwnerCommand, reconcileOrders, checkManagedStops, refreshLifecycleCards };
+  return { listen, execute, executeOrDefer, retryDeferred, retryInbox, processMessage, processApproval, processOwnerCommand, reconcileOrders, checkManagedStops, refreshLifecycleCards, reportEquityStatus };
 }
 
 if (require.main === module) start().catch(require("../../scripts/network-failure.cjs").fatal);

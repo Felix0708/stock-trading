@@ -114,6 +114,50 @@ const { syncStockBriefingEquity } = require("../src/integrations/stock-briefing"
   assert.equal(await refreshAccountEquity(broker, file, collectionAt), false); // Failure does not trigger a burst of collection attempts.
   client.post = async () => ({ crnc_code: "USD", d0_usd_fx_entr: "100", d4_usd_fx_entr: "", tot_evlt_amt: "0" });
   await assert.rejects(collectAccountEquity(broker), /미확인/);
+  const domesticClient = new KiwoomClient({ appKey: "domestic-test", secretKey: "secret" });
+  let domesticData: any = { prsm_dpst_aset_amt: "1000", tot_evlt_amt: "400", tot_loan_amt: "0", tot_crd_loan_amt: "0", tot_crd_ls_amt: "0" };
+  let cashData = { entr: "9999", d2_entra: "600" };
+  domesticClient.post = async (_url, options) => {
+    if (options.apiId === "kt00018") { assert.deepEqual(options.body, { qry_tp: "1", dmst_stex_tp: "KRX" }); return domesticData; }
+    assert.equal(options.apiId, "kt00001"); assert.equal(options.body.qry_tp, "3"); return cashData;
+  };
+  const domesticPoint = await domesticClient.getDomesticEquity();
+  assert.equal(domesticPoint.equity, 1000); assert.equal(domesticPoint.cash, 600); assert.equal(domesticPoint.stockValue, 400);
+  cashData.d2_entra = "590"; assert.equal((await domesticClient.getDomesticEquity()).cash, null);
+  cashData.d2_entra = ""; assert.equal((await domesticClient.getDomesticEquity()).cash, null);
+  for (const bad of [{ prsm_dpst_aset_amt: "" }, { prsm_dpst_aset_amt: " " }, { tot_loan_amt: "" }, { tot_loan_amt: " " }, { tot_crd_loan_amt: "1" }, { tot_crd_ls_amt: "1" },
+    { prsm_dpst_aset_amt: "-1" }, { tot_evlt_amt: "-1" }, { pagination: { more: true } }]) {
+    const original = domesticData; domesticData = { ...original, ...bad };
+    await assert.rejects(domesticClient.getDomesticEquity(), /미확인/); domesticData = original;
+  }
+  const both = { ...broker, domesticClient };
+  const domesticState = readEvidence(path.join(root, "domestic.json"));
+  const domesticRef = equityAccountRef(domesticState, both, "domestic");
+  assert.notEqual(domesticRef, equityAccountRef(domesticState, both));
+  recordAccountEquity(domesticState, both, [domesticPoint, point], day1);
+  const scopedSeries = accountEquitySeries(domesticState, day3);
+  assert.equal(scopedSeries.length, 2);
+  assert.equal(scopedSeries.find(s => s.scope === "domestic").points[0].source, "KIWOOM_KR_EQUITY");
+  assert.equal(scopedSeries.find(s => s.scope === "domestic").currency, "KRW");
+  const domesticProof = { source: "domestic full statement", cashFlowCoverage: { accountRef: domesticRef, currency: "KRW", scope: "domestic", start: day1, end: day3 }, cashFlows: [] };
+  importCashFlows(domesticState, domesticProof, both);
+  assert.throws(() => importCashFlows(domesticState, { ...domesticProof, cashFlowCoverage: { ...domesticProof.cashFlowCoverage, accountRef: equityAccountRef(domesticState, both) } }, both), /accountRef/);
+  const invalidDomestic = structuredClone(domesticState); invalidDomestic.equity[0].brokerId = "KIS";
+  assert.throws(() => accountEquitySeries(invalidDomestic, day3), /範囲|범위/);
+  const partialFile = path.join(root, "partial.json");
+  let domesticQueries = 0, usQueries = 0;
+  const independent = { ...both, domesticClient: { accountIdentityKey: () => domesticClient.accountIdentityKey(),
+    getDomesticEquity: async (): Promise<any> => { domesticQueries++; throw Error("domestic offline"); } },
+    overseasClient: { accountIdentityKey: () => client.accountIdentityKey(), getAccountEquity: async () => { usQueries++; return point; } } };
+  await assert.rejects(refreshAccountEquity(independent, partialFile, collectionAt), /domestic offline/);
+  assert.equal(readEvidence(partialFile).equity.length, 1); assert.equal(readEvidence(partialFile).equity[0].scope, "overseas");
+  assert.equal(await refreshAccountEquity(independent, partialFile, collectionAt), false);
+  assert.equal(domesticQueries, 1); assert.equal(usQueries, 1);
+  independent.domesticClient.getDomesticEquity = async () => { domesticQueries++; return domesticPoint; };
+  const previous = readEvidence(partialFile); previous.equity.forEach(row => row.at = day1); previous.equityAttemptedAt = {}; writeEvidence(partialFile, previous);
+  assert.equal(await refreshAccountEquity(independent, partialFile, collectionAt), true);
+  assert.equal(readEvidence(partialFile).equity.length, 3); // One historical US sample plus two current scoped samples.
+  assert.deepEqual(readEvidence(partialFile).equityFailures, {});
   const kisClient = kis("12345678", "a");
   let summary: any = { tot_asst_amt: "1001", tot_loan_amt: "0", tot_dncl_amt: "100", frcr_evlu_tota: "700", evlu_amt_smtl_amt: "200", cma_evlu_amt: "0" };
   kisClient.request = async () => ({ output3: summary });

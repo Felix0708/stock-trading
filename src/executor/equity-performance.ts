@@ -39,9 +39,10 @@ function importCashFlows(state, input, broker) {
   if (!proof) return;
   if (broker.overseasClient?.accountIdentityKey) {
     const { equityAccountRef } = require("./account-evidence");
-    if (proof.accountRef !== equityAccountRef(state, broker)) throw Error("입출금 증빙의 accountRef가 현재 계좌와 일치해야 합니다.");
+    if (proof.accountRef !== equityAccountRef(state, broker, proof.scope)) throw Error("입출금 증빙의 accountRef가 현재 계좌와 일치해야 합니다.");
   }
-  if (!["KRW", "USD"].includes(proof.currency) || !["overseas", "account-total-assets"].includes(proof.scope)
+  if (!["KRW", "USD"].includes(proof.currency) || !["domestic", "overseas", "account-total-assets"].includes(proof.scope)
+    || (proof.scope === "domestic" && (broker.id !== "KIWOOM" || proof.currency !== "KRW"))
     || !Number.isFinite(Date.parse(proof.start)) || !Number.isFinite(Date.parse(proof.end)) || Date.parse(proof.end) <= Date.parse(proof.start)
     || Date.parse(proof.end) > Date.now() || !Array.isArray(input.cashFlows) || input.cashFlows.length > 5000) throw Error("입출금 전체 증빙 범위 오류");
   const rows = input.cashFlows.map(row => {
