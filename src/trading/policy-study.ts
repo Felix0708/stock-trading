@@ -1,7 +1,7 @@
 "use strict";
 const fs = require("node:fs"), path = require("node:path"), { createHash } = require("node:crypto");
 const { normalizedTimeframe } = require("./position-ownership");
-const POLICY_VERSION = "2026-09-14-mock-allocation-v1";
+const POLICY_VERSION = "2026-09-14-mock-allocation-v2";
 function policyFingerprint(env = process.env) {
   const hash = createHash("sha256");
   for (const file of ["position-sizer.ts", "position-ownership.ts", "trade-controller.ts", "paper-order-executor.ts", "../executor/account-executor.ts", "../executor/entry-allocation.ts", "../executor/broker-protection.ts", "../signals/signal-state-machine.ts"]) {

@@ -14,9 +14,9 @@ function allocatedBuy(record) {
 }
 
 // One owner/runtime only. KRW and USD market budgets are never added together.
-function allocationRisk(record, snapshots, receipts, riskRatio = 0.015) {
+function allocationRisk(record, snapshots, receipts) {
   const p = record.payload, at = Date.parse(record.receivedAt);
-  if (!(riskRatio > 0 && riskRatio <= 1) || !Number.isFinite(at) || !Number.isFinite(frameMs(p.timeframe))) return blocked("계좌 배정 기준 확인 필요");
+  if (!Number.isFinite(at) || !Number.isFinite(frameMs(p.timeframe))) return blocked("계좌 배정 기준 확인 필요");
   let equity = 0, exposure = 0, risk = 0;
   for (const { broker, account } of snapshots) {
     if (!(Number.isFinite(account.equity) && account.equity > 0)) return blocked("합산 계좌 자산 확인 필요");
@@ -62,7 +62,7 @@ function allocationRisk(record, snapshots, receipts, riskRatio = 0.015) {
   const waiting = [...receipts.listDeferred(), ...Object.values(receipts.state.pending) as any[]];
   if (waiting.some(item => item.record?.requestId !== record.requestId && item.expiresAt > Date.now()
     && item.record?.payload?.action === "BUY" && symbolKey(item.record.payload) === symbolKey(p))) return blocked("동일 종목의 기존 예약·승인 대기 먼저 처리");
-  return { blocked: false, equity, exposure, risk, riskLimit: equity * riskRatio };
+  return { blocked: false, equity, exposure, risk };
 }
 
 function chooseAccount(record, snapshots, routes) {
@@ -83,13 +83,12 @@ function capAllocatedPreview(preview, totals) {
   const perShareRisk = preview.entryPrice - preview.stopPrice;
   if (preview.capitalOnly || !(preview.stopPrice > 0 && perShareRisk > 0)) return { ...preview, ...blocked("유효한 손절가 없어 합산 매수 위험 계산 불가") };
   const quantity = Math.max(0, Math.min(preview.quantity,
-    Math.floor((totals.equity * preview.positionLimitRatio - totals.exposure) / preview.entryPrice),
-    Math.floor((totals.riskLimit - totals.risk) / perShareRisk)));
-  if (!quantity) return { ...preview, ...blocked("소유자 합산 종목 비중 또는 손절 위험 한도 초과") };
+    Math.floor((totals.equity * preview.positionLimitRatio - totals.exposure) / preview.entryPrice)));
+  if (!quantity) return { ...preview, ...blocked("소유자 합산 종목 비중 한도 초과") };
   return { ...preview, quantity, positionValue: quantity * preview.entryPrice, stopLossAmount: quantity * perShareRisk,
     projectedPositionValue: (preview.currentPositionValue || 0) + quantity * preview.entryPrice,
     projectedPositionRatio: ((preview.currentPositionValue || 0) + quantity * preview.entryPrice) / preview.equity * 100,
-    allocationSummary: `합산 종목 비중 ${((totals.exposure + quantity * preview.entryPrice) / totals.equity * 100).toFixed(1)}% · 합산 손절위험 ${((totals.risk + quantity * perShareRisk) / totals.equity * 100).toFixed(2)}%` };
+    allocationSummary: `합산 종목 비중 ${((totals.exposure + quantity * preview.entryPrice) / totals.equity * 100).toFixed(1)}% · 참고용 합산 손절위험 ${((totals.risk + quantity * perShareRisk) / totals.equity * 100).toFixed(2)}% (별도 차단 한도 없음)` };
 }
 
 module.exports = { allocatedBuy, allocationRisk, chooseAccount, capAllocatedPreview, symbolKey };

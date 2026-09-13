@@ -16,8 +16,9 @@ assert.equal(chooseAccount(record, snapshots, oldRoute).brokerId, "");
 oldRoute.old.at = now - 14400001;
 assert.equal(chooseAccount(record, snapshots, oldRoute).brokerId, "B");
 let totals = allocationRisk(record, snapshots, receipts);
-assert.equal(totals.equity, 20000); assert.equal(totals.riskLimit, 300);
-assert.equal(capAllocatedPreview(a.preview, { ...totals, risk: 250 }).quantity, 5);
+assert.equal(totals.equity, 20000); assert.equal(totals.riskLimit, undefined);
+// Aggregate risk above the former 1.5% does not override indicator-SL position sizing.
+for (const risk of [250, 308, 1000]) assert.equal(capAllocatedPreview(a.preview, { ...totals, risk }).quantity, 20);
 assert.equal(capAllocatedPreview(a.preview, { ...totals, exposure: 3900 }).quantity, 1);
 assert.equal(capAllocatedPreview({ ...a.preview, stopPrice: null, capitalOnly: true }, totals).blocked, true);
 const orders = a.broker.tracker.list();

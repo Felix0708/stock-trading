@@ -1243,7 +1243,7 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
           snapshots.push({ broker: candidate, ...await rawPreviewFor(candidate, structuredClone(record)) });
         }
       } catch (error) { throw Object.assign(error, { accountVerificationFailed: true }); }
-      const totals = allocationRisk(record, snapshots, receipts, Number(process.env.ACCOUNT_MAX_OPEN_RISK_RATIO || 0.015));
+      const totals = allocationRisk(record, snapshots, receipts);
       if (totals.blocked) return { label: broker.label, preview: totals };
       for (const s of snapshots) s.preview = capAllocatedPreview(s.preview, totals);
       if (!saved) {
