@@ -5,6 +5,7 @@ const { createHash } = require("node:crypto");
 const { Client, GatewayIntentBits } = require("discord.js");
 const { syncAccountPortfolio, strategyComparison, formatStrategyComparisonMessage } = require("./account-portfolio");
 const { writeAccountHealth } = require("./account-health");
+const { allocatedBuy, allocationRisk, chooseAccount, capAllocatedPreview, symbolKey } = require("./entry-allocation");
 const { evidenceFile, readEvidence, writeEvidence, collectBrokerEvidence, applyEvidence, validateStatement, reconciliationPlan, koreanDate, refreshAccountEquity, equityAccountRef, equityScopes } = require("./account-evidence");
 const { equityPerformance, importCashFlows } = require("./equity-performance");
 const { brokerStop, protectionReadiness, currentProtection, ensureProtection, releaseProtection } = require("./broker-protection");
@@ -960,7 +961,8 @@ async function start() {
 function createAccountRuntime({ brokers, receipts, client, readOnly = false, sourceChannelIds = new Set(), trusted,
   targetGuildId, channels, maxAgeMs = 30 * 60_000, maxOpenPositions = 5, riskPolicy = null, ownerId,
   approvalTtlMs = 30 * 60_000, deferredTtlMs = 5 * 24 * 60 * 60_000, portfolioSyncMinutes = 1440,
-  executorName = "계좌", accountLabel = "계좌", errorReports = new Map(), trackingOptions = {}, enrichNames = enrichInstrumentNames }: any) {
+  executorName = "계좌", accountLabel = "계좌", errorReports = new Map(), trackingOptions = {}, enrichNames = enrichInstrumentNames,
+  entryAllocation = process.env.ACCOUNT_ENTRY_ALLOCATION === "single" }: any) {
   receipts.state.environments ||= {};
   for (const broker of brokers) {
     if (readOnly) continue;
@@ -974,6 +976,14 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
   }
   if (!readOnly) receipts.write();
   const executionPolicyHash = policyFingerprint();
+  const allocated = (broker, record) => entryAllocation && broker.environment === "mock" && !readOnly && allocatedBuy(record);
+  // ponytail: serialize owner BUYs through submission; split the lock by market only if latency becomes material.
+  let buyQueue = Promise.resolve(), allocationQueue = Promise.resolve();
+  function serialBuy(task) {
+    const job = buyQueue.then(task);
+    buyQueue = job.catch(() => {});
+    return job;
+  }
   const brokerQueues = new Map();
   const submitting = new Set();
   const brokerCompletedAt = new Map(brokers.map(broker => [broker.id, Date.now()]));
@@ -1220,6 +1230,41 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
   }
 
   async function previewFor(broker, record) {
+    if (!allocated(broker, record)) return rawPreviewFor(broker, record);
+    const job = allocationQueue.then(async () => {
+      const routes = receipts.state.entryAllocations ||= {};
+      const saved = routes[record.requestId];
+      if (saved && saved.brokerId !== broker.id) return { label: broker.label, preview: {
+        blocked: true, quantity: 0, skipStatus: "NO_ACTION", reason: saved.reason,
+      } };
+      const snapshots = [];
+      try {
+        for (const candidate of brokers.filter(b => b.environment === broker.environment)) {
+          snapshots.push({ broker: candidate, ...await rawPreviewFor(candidate, structuredClone(record)) });
+        }
+      } catch (error) { throw Object.assign(error, { accountVerificationFailed: true }); }
+      const totals = allocationRisk(record, snapshots, receipts, Number(process.env.ACCOUNT_MAX_OPEN_RISK_RATIO || 0.015));
+      if (totals.blocked) return { label: broker.label, preview: totals };
+      for (const s of snapshots) s.preview = capAllocatedPreview(s.preview, totals);
+      if (!saved) {
+        const choice = chooseAccount(record, snapshots, routes);
+        routes[record.requestId] = { ...choice, requestId: record.requestId, symbol: symbolKey(record.payload),
+          at: Date.parse(record.receivedAt), timeframe: record.payload.timeframe };
+        receipts.write(); // Persist before approvals, reservations or broker HTTP.
+      }
+      const route = routes[record.requestId];
+      if (route.brokerId !== broker.id) return { label: broker.label, preview: {
+        blocked: true, quantity: 0, skipStatus: "NO_ACTION", reason: route.reason,
+      } };
+      const selected = snapshots.find(s => s.broker.id === broker.id);
+      return { label: broker.label, preview: { ...selected.preview,
+        reason: selected.preview.blocked ? selected.preview.reason : `${route.reason} · ${selected.preview.allocationSummary}` } };
+    });
+    allocationQueue = job.then(() => {}, () => {});
+    return job;
+  }
+
+  async function rawPreviewFor(broker, record) {
     if (record.payload?.action === "BUY" && broker.environment === "live") {
       const reason = protectionReadiness(broker, record.payload.exchange);
       if (reason) return { label: broker.label, preview: { blocked: true, quantity: 0, reason } };
@@ -1244,7 +1289,7 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
     const calculated = executionPreview(sizingRecord, ownAccount, calculateWebhookPositionPreview(sizingRecord, ownAccount, broker.environment));
     const pendingOrder = pendingSymbolOrder(broker.tracker.list(), sizingRecord);
     if (pendingOrder) {
-      return { label: broker.label, preview: {
+      return { label: broker.label, account: ownAccount, preview: {
         ...calculated,
         blocked: true,
         retryable: true,
@@ -1256,7 +1301,7 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
       scopePositionPreview(sizingRecord, enforceOwnAccountRules(sizingRecord, ownAccount, calculated), broker.tracker.list(), broker.environment),
       broker.tracker.list());
     const preview = liveRiskPolicy && record.payload.action === "BUY" ? enforceOpenRiskLimit(sized) : sized;
-    return { label: broker.label, preview };
+    return { label: broker.label, account: ownAccount, preview };
   }
 
   async function withPortfolioMetrics(broker, order) {
@@ -1287,6 +1332,11 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
   }
 
   async function execute(broker, record, options = {}) {
+    if (allocated(broker, record)) return serialBuy(() => executeTracked(broker, record, options));
+    return executeTracked(broker, record, options);
+  }
+
+  async function executeTracked(broker, record, options = {}) {
     progress(broker, record, { status: "PROCESSING" });
     try {
       const result = await executeOrder(broker, record, options);
@@ -1493,12 +1543,20 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
       progress(broker, record, { status: "NO_ACTION", reason: "이전 진입 예약이 이미 대기 중 · 중복 예약 안 함" });
       return null;
     }
-    if (!retry && !requiresExistingPosition(record) && shouldDelayOrder(record, new Date(), broker)) {
-      receipts.putDeferred(broker.id, record, deferredTtlMs);
-      progress(broker, record, { status: "DEFER_REQUIRED" });
-      return null;
-    }
     try {
+      if (!retry && !requiresExistingPosition(record) && shouldDelayOrder(record, new Date(), broker)) {
+        if (allocated(broker, record)) {
+          const { preview } = await previewFor(broker, record);
+          if (preview.blocked) {
+            const result = { status: preview.skipStatus || "BLOCKED", reason: preview.reason };
+            progress(broker, record, result);
+            return result;
+          }
+        }
+        receipts.putDeferred(broker.id, record, deferredTtlMs);
+        progress(broker, record, { status: "DEFER_REQUIRED" });
+        return null;
+      }
       const result = await execute(broker, record, { manual });
       if (result?.status === "DEFER_REQUIRED") {
         const deferred = receipts.putDeferred(broker.id, record, deferredTtlMs, { kind: result.verificationPending ? "VERIFY" : "ORDER" });
@@ -1852,7 +1910,7 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
     const allowedBrokerIds = pending.brokerIds || command.brokers;
     const selected = brokers.filter((broker) => command.brokers.includes(broker.id) && allowedBrokerIds.includes(broker.id));
     if (!selected.length) {
-      await message.reply("선택한 증권사 실행기가 연결되어 있지 않습니다.");
+      await message.reply(entryAllocation ? "선택한 계좌는 이 신호에 배정·승인된 계좌가 아닙니다. 카드의 배정 계좌를 확인하세요." : "선택한 증권사 실행기가 연결되어 있지 않습니다.");
       return true;
     }
     const approved = structuredClone(pending.record);
@@ -1932,8 +1990,8 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
           return;
         }
         if (result.preview?.blocked) {
-          progress(broker, record, { status: "BLOCKED", reason: result.preview.reason });
-          if (!skippedExistingEntry(record, result.preview)) await send(channels.execution,
+          progress(broker, record, { status: result.preview.skipStatus || "BLOCKED", reason: result.preview.reason });
+          if (!result.preview.skipStatus && !skippedExistingEntry(record, result.preview)) await send(channels.execution,
             formatUncreatedOrder(brokerAccountLabel(broker), record, { title: "주문 차단", reason: result.preview.reason }));
         } else if (!receipts.state.signals[record.requestId]?.declined) {
           const previous: any = Object.values(receipts.state.pending).find((pending: any) => pending.record.requestId === record.requestId);
@@ -2072,12 +2130,12 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
         `Discord: ${client.user.tag}`,
         `계좌: ${accountSummary()} · 실계좌 기능 지원`,
         `수신: 매매신호 채널 ${sourceChannelIds.size}개`,
-        `처리: ${readOnly ? "읽기 전용 · 주문 없는 테스트만" : `공통 신호 → 계좌별 수량 계산 → ${receipts.autoTrading() ? "자동 주문" : "BUY 승인"}`}`,
+        `처리: ${readOnly ? "읽기 전용 · 주문 없는 테스트만" : `공통 신호 → ${entryAllocation ? "소유자별 단일 계좌 배정(모의)" : "계좌별 수량 계산"} → ${receipts.autoTrading() ? "자동 주문" : "BUY 승인"}`}`,
       ].join("\n"));
       await send(channels.system, { text: formatBrokerStartup(
         `${accountLabel} 주문 실행기`,
         client.user.tag,
-        `${accountSummary()} · 신뢰 채널 ${sourceChannelIds.size}개 · ${readOnly ? "읽기 전용" : `자동매매 ${receipts.autoTrading() ? "ON" : "OFF"}`}`,
+        `${accountSummary()} · 신뢰 채널 ${sourceChannelIds.size}개 · ${readOnly ? "읽기 전용" : `자동매매 ${receipts.autoTrading() ? "ON" : "OFF"}`}${entryAllocation ? " · 모의 단일 계좌 배정" : ""}`,
         readOnly ? "주문 잠금 · 주문 없는 종단간 테스트만 허용" : brokers.some((broker) => broker.environment === "live") ? "실계좌 활성 · 강한 BUY 자동, 축소 BUY 승인" : "실계좌 지원 · 현재 잠금",
       ) }).catch(error => reportError("시작 알림 전송 실패", error));
       if (!readOnly) for (const broker of brokers) void brokerWork(broker, () => reconcileOrders([broker]), "reconcile");

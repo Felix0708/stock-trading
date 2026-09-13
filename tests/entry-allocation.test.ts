@@ -1,0 +1,43 @@
+"use strict";
+const assert = require("node:assert/strict");
+const { chooseAccount, allocationRisk, capAllocatedPreview } = require("../src/executor/entry-allocation");
+const now = Date.now(), record = { requestId: "new", receivedAt: new Date(now).toISOString(), payload: { exchange: "NASDAQ", ticker: "X", price: 100, timeframe: "240" }, outcome: { decision: "ENTRY_CANDIDATE" } };
+function snapshot(id, cash = 10000) {
+  const orders = [];
+  return { broker: { id, label: id, environment: "mock", tracker: { list: () => orders } },
+    account: { equity: 10000, availableCash: cash, openPositions: 0, domesticHoldings: [], usHoldings: [] },
+    preview: { quantity: 20, entryPrice: 100, stopPrice: 90, equity: 10000, positionLimitRatio: 0.2, currentPositionValue: 0 } };
+}
+const receipts = { state: { attempts: {}, exits: {}, pending: {} }, listDeferred: () => [] };
+const a = snapshot("A", 2000), b = snapshot("B", 9000), snapshots = [a, b];
+assert.equal(chooseAccount(record, snapshots, {}).brokerId, "B");
+const oldRoute = { old: { requestId: "old", symbol: "US:X", brokerId: "A", at: now - 1000, timeframe: "240" } };
+assert.equal(chooseAccount(record, snapshots, oldRoute).brokerId, "");
+oldRoute.old.at = now - 14400001;
+assert.equal(chooseAccount(record, snapshots, oldRoute).brokerId, "B");
+let totals = allocationRisk(record, snapshots, receipts);
+assert.equal(totals.equity, 20000); assert.equal(totals.riskLimit, 300);
+assert.equal(capAllocatedPreview(a.preview, { ...totals, risk: 250 }).quantity, 5);
+assert.equal(capAllocatedPreview(a.preview, { ...totals, exposure: 3900 }).quantity, 1);
+assert.equal(capAllocatedPreview({ ...a.preview, stopPrice: null, capitalOnly: true }, totals).blocked, true);
+const orders = a.broker.tracker.list();
+orders.push({ requestId: "old", orderNo: "1", symbol: "X", market: "NASDAQ", side: "BUY", entryType: "PAPER_ENTRY", environment: "mock", status: "FILLED", filledQuantity: 10, fillPrice: 100, stopPrice: 90, timeframe: "240", createdAt: new Date(now - 14400001).toISOString() });
+a.account.usHoldings.push({ code: "X", quantity: 10, evaluationAmount: 1000 });
+totals = allocationRisk(record, snapshots, receipts);
+assert.equal(totals.blocked, false); assert.equal(totals.risk, 100); assert.equal(totals.exposure, 1000);
+a.account.usHoldings[0].evaluationAmount = 890;
+assert.match(allocationRisk(record, snapshots, receipts).reason, /손절 이탈/);
+a.account.usHoldings[0].evaluationAmount = 1000;
+receipts.state.exits['A:NASDAQ:X:240'] = now - 1000;
+assert.match(allocationRisk(record, snapshots, receipts).reason, /청산/);
+delete receipts.state.exits['A:NASDAQ:X:240'];
+orders.push({ market: "NYSE", symbol: "Y", status: "ACCEPTED", side: "BUY", orderQuantity: 10, remainingQuantity: 5, plannedInvestment: 1000, plannedRisk: 100 });
+assert.equal(allocationRisk(record, snapshots, receipts).risk, 150);
+orders[1].symbol = "X";
+assert.match(allocationRisk(record, snapshots, receipts).reason, /미체결/);
+orders[1].status = "UNKNOWN";
+assert.match(allocationRisk(record, snapshots, receipts).reason, /접수 여부/);
+orders.pop(); a.account.usHoldings[0].quantity = 11;
+assert.match(allocationRisk(record, snapshots, receipts).reason, /수량/);
+assert.equal(allocationRisk(record, [snapshot("single")], receipts).equity, 10000);
+console.log("entry-allocation tests OK");

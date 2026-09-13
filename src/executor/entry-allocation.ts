@@ -1,0 +1,95 @@
+"use strict";
+
+const { normalizedSymbol, normalizedTimeframe, managedPosition } = require("../trading/position-ownership");
+const pending = new Set(["ACCEPTED", "PARTIALLY_FILLED", "CANCEL_REQUESTED", "UNKNOWN"]);
+const market = value => ["KRX", "KOSPI", "KOSDAQ"].includes(String(value).toUpperCase()) ? "KRX" : "US";
+const symbolKey = payload => `${market(payload.exchange)}:${normalizedSymbol(payload.ticker)}`;
+const frameMs = value => normalizedTimeframe(value) === "1D" ? 86400000 : normalizedTimeframe(value) === "240" ? 14400000 : Infinity;
+const same = (order, payload) => symbolKey({ exchange: order.market, ticker: order.symbol }) === symbolKey(payload);
+const blocked = reason => ({ blocked: true, quantity: 0, reason });
+
+function allocatedBuy(record) {
+  return record.payload?.action === "BUY" && record.payload?.paper_order_test !== true
+    && ["PAPER_ENTRY", "PAPER_ADD", "BUY_PENDING_APPROVAL"].includes(record.risk?.verdict);
+}
+
+// One owner/runtime only. KRW and USD market budgets are never added together.
+function allocationRisk(record, snapshots, receipts, riskRatio = 0.015) {
+  const p = record.payload, at = Date.parse(record.receivedAt);
+  if (!(riskRatio > 0 && riskRatio <= 1) || !Number.isFinite(at) || !Number.isFinite(frameMs(p.timeframe))) return blocked("계좌 배정 기준 확인 필요");
+  let equity = 0, exposure = 0, risk = 0;
+  for (const { broker, account } of snapshots) {
+    if (!(Number.isFinite(account.equity) && account.equity > 0)) return blocked("합산 계좌 자산 확인 필요");
+    equity += account.equity;
+    const orders = broker.tracker.list();
+    if (orders.some(o => o.status === "UNKNOWN" || o.reconciliationRequired)
+      || Object.entries(receipts.state.attempts).some(([key, a]: [string, any]) => key.startsWith(`${broker.id}:`) && ["UNKNOWN", "SUBMITTING"].includes(a.status))) {
+      return blocked("다른 계좌 포함 주문 접수 여부 확인 필요 · 매수 우회 금지");
+    }
+    const holdings = market(p.exchange) === "KRX" ? account.domesticHoldings : account.usHoldings;
+    for (const ticker of new Set(orders.filter(o => market(o.market) === market(p.exchange)).map(o => normalizedSymbol(o.symbol)))) {
+      const owned = managedPosition(orders, { exchange: p.exchange, ticker }, broker.environment);
+      const quantity = holdings.filter(h => normalizedSymbol(h.code) === ticker).reduce((n, h) => n + h.quantity, 0);
+      if (owned.quantity > quantity) return blocked("자동매매 기록과 실제 잔고 수량 불일치 · 합산 위험 확인 필요");
+    }
+    for (const h of holdings) {
+      if (!(h.quantity > 0)) continue;
+      const owned = managedPosition(orders, { exchange: p.exchange, ticker: h.code }, broker.environment);
+      if (!(owned.quantity === h.quantity && owned.stopPrice > 0 && owned.averagePrice > 0 && h.evaluationAmount > 0)) return blocked("보유분 수량·손절 기준 미확인 · 합산 위험 확인 필요");
+      const current = normalizedSymbol(h.code) === normalizedSymbol(p.ticker);
+      const price = h.evaluationAmount / h.quantity;
+      if (price <= owned.stopPrice || (current && p.price <= owned.stopPrice)) return blocked("기존 보유분 손절 이탈 · 다른 계좌 매수 우회 금지");
+      risk += h.quantity * Math.max(price - owned.stopPrice, owned.averagePrice - owned.stopPrice, 0);
+      if (current) {
+        exposure += h.evaluationAmount;
+        const exitPrefix = `${broker.id}:`;
+        const exitPending = Object.entries(receipts.state.exits).some(([key, time]) => {
+          const [id, exchange, ticker, frame] = key.split(":");
+          return key.startsWith(exitPrefix) && symbolKey({ exchange, ticker }) === symbolKey(p)
+            && (!frame || frame === "ALL" || normalizedTimeframe(frame) === owned.timeframe) && Number(time) >= owned.entryAt;
+        });
+        if (exitPending) return blocked("기존 보유분 청산 신호 처리 확인 필요 · 재진입 보류");
+        if (record.outcome?.decision !== "ADD_CANDIDATE" && at - owned.entryAt < Math.max(frameMs(p.timeframe), frameMs(owned.timeframe))) return blocked("별도 재진입은 기존 진입 후 최소 한 봉 간격 필요");
+      }
+    }
+    for (const o of orders.filter(o => pending.has(o.status) && market(o.market) === market(p.exchange))) {
+      if (same(o, p) && !(o.orderStyle === "BROKER_STOP" && o.status === "ACCEPTED" && !o.cancelSubmitted)) return blocked("동일 종목 미체결 주문 확인 중 · 계좌 간 중복 매수 방지");
+      if (o.side !== "BUY") continue;
+      if (!(o.orderQuantity > 0 && Number.isFinite(o.remainingQuantity) && o.remainingQuantity >= 0 && o.plannedInvestment > 0 && o.plannedRisk > 0)) return blocked("미체결 매수의 금액·손절 위험 확인 필요");
+      risk += o.plannedRisk * o.remainingQuantity / o.orderQuantity;
+    }
+  }
+  const waiting = [...receipts.listDeferred(), ...Object.values(receipts.state.pending) as any[]];
+  if (waiting.some(item => item.record?.requestId !== record.requestId && item.expiresAt > Date.now()
+    && item.record?.payload?.action === "BUY" && symbolKey(item.record.payload) === symbolKey(p))) return blocked("동일 종목의 기존 예약·승인 대기 먼저 처리");
+  return { blocked: false, equity, exposure, risk, riskLimit: equity * riskRatio };
+}
+
+function chooseAccount(record, snapshots, routes) {
+  const at = Date.parse(record.receivedAt), key = symbolKey(record.payload);
+  const previous = Object.values(routes).filter((r: any) => r.symbol === key && r.brokerId && r.requestId !== record.requestId) as any[];
+  if (record.outcome?.decision !== "ADD_CANDIDATE" && previous.some(r => at - r.at < Math.max(frameMs(record.payload.timeframe), frameMs(r.timeframe)))) return { brokerId: "", reason: "같은 구간의 진입 신호 · 최소 한 봉 간격 후 새 신호 필요" };
+  const candidates = snapshots.filter(s => !s.preview?.blocked && s.preview?.quantity > 0);
+  candidates.sort((a, b) => b.account.availableCash / b.account.equity - a.account.availableCash / a.account.equity
+    || a.account.openPositions - b.account.openPositions || a.broker.id.localeCompare(b.broker.id));
+  const selected = candidates[0];
+  return { brokerId: selected?.broker.id || "", reason: selected ? `단일 계좌 배정: ${selected.broker.label} · 현금 여유 비율 우선`
+    : `진입 가능 계좌 없음 · ${snapshots.map(s => `${s.broker.label}: ${s.preview?.reason || "수량 없음"}`).join(" / ")}` };
+}
+
+function capAllocatedPreview(preview, totals) {
+  if (totals.blocked) return { ...preview, ...totals };
+  if (!preview || preview.blocked) return preview;
+  const perShareRisk = preview.entryPrice - preview.stopPrice;
+  if (preview.capitalOnly || !(preview.stopPrice > 0 && perShareRisk > 0)) return { ...preview, ...blocked("유효한 손절가 없어 합산 매수 위험 계산 불가") };
+  const quantity = Math.max(0, Math.min(preview.quantity,
+    Math.floor((totals.equity * preview.positionLimitRatio - totals.exposure) / preview.entryPrice),
+    Math.floor((totals.riskLimit - totals.risk) / perShareRisk)));
+  if (!quantity) return { ...preview, ...blocked("소유자 합산 종목 비중 또는 손절 위험 한도 초과") };
+  return { ...preview, quantity, positionValue: quantity * preview.entryPrice, stopLossAmount: quantity * perShareRisk,
+    projectedPositionValue: (preview.currentPositionValue || 0) + quantity * preview.entryPrice,
+    projectedPositionRatio: ((preview.currentPositionValue || 0) + quantity * preview.entryPrice) / preview.equity * 100,
+    allocationSummary: `합산 종목 비중 ${((totals.exposure + quantity * preview.entryPrice) / totals.equity * 100).toFixed(1)}% · 합산 손절위험 ${((totals.risk + quantity * perShareRisk) / totals.equity * 100).toFixed(2)}%` };
+}
+
+module.exports = { allocatedBuy, allocationRisk, chooseAccount, capAllocatedPreview, symbolKey };

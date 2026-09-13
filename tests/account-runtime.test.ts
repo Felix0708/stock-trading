@@ -1,6 +1,7 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+require("./entry-allocation.test");
 const { createAccountRuntime, SignalReceiptStore } = require("../src/executor/account-executor");
 const { encodeSignalEnvelope } = require("../src/discord/discord-signal-envelope");
 
@@ -19,7 +20,7 @@ function record(id, action = "BUY") {
     risk: { verdict: action === "BUY" ? "PAPER_ENTRY" : "PAPER_EXIT" } };
 }
 
-function fixture(ids = ["KIS"], environment = "mock", readOnly = false) {
+function fixture(ids = ["KIS"], environment = "mock", readOnly = false, entryAllocation = false) {
   const receipts = new SignalReceiptStore(null, true);
   const sent = [];
   const messages = new Map();
@@ -56,7 +57,7 @@ function fixture(ids = ["KIS"], environment = "mock", readOnly = false) {
     .map(id => [id, id === "order" ? channel : { ...channel, id, name: id }])) } };
   const channels = { order: "order", execution: "execution", system: "system", journal: "journal" };
   const runtime = createAccountRuntime({ brokers, receipts, client: { guilds: { fetch: async () => guild } },
-    ownerId: "owner", targetGuildId: "guild", channels, readOnly,
+    ownerId: "owner", targetGuildId: "guild", channels, readOnly, entryAllocation,
     trusted: { sourceChannelIds: new Set(["signal"]), sourceBotIds: new Set(["source"]) },
     trackingOptions: { attempts: 0 }, enrichNames: async items => items });
   return { runtime, receipts, brokers, sent, messages, channels, channel, guild, failDiscord: value => { discordFails = value; } };
@@ -65,6 +66,53 @@ function fixture(ids = ["KIS"], environment = "mock", readOnly = false) {
 function message(r) { return { id: r.requestId, channelId: "signal", author: { id: "source", bot: true }, embeds: [{ footer: { text: encodeSignalEnvelope(r) } }] }; }
 
 (async () => {
+  const allocated = fixture(["KIWOOM", "KIS"], "mock", false, true);
+  const buy = record("allocated-one");
+  await allocated.runtime.processMessage(message(buy));
+  assert.equal(allocated.brokers.reduce((n, b) => n + b.state.requests.length, 0), 1);
+  const route = allocated.receipts.state.entryAllocations[buy.requestId];
+  assert.ok(route.brokerId);
+  const other = allocated.brokers.find(b => b.id !== route.brokerId);
+  assert.equal((await allocated.runtime.execute(other, structuredClone(buy), { manual: true })).status, "NO_ACTION");
+  const chosen = allocated.brokers.find(b => b.id === route.brokerId);
+  const entryOrder = chosen.state.orders[0];
+  Object.assign(entryOrder, { status: "FILLED", filledQuantity: entryOrder.orderQuantity, remainingQuantity: 0, fillPrice: 100 });
+  chosen.state.holdings = [{ code: "TEST", quantity: entryOrder.orderQuantity, evaluationAmount: entryOrder.orderQuantity * 100, purchaseAmount: entryOrder.orderQuantity * 100 }];
+  const routeClock = clock;
+  clock += 14400001;
+  await allocated.runtime.processMessage(message(record("later-independent-entry")));
+  assert.equal(other.state.requests.length, 1);
+  const restart = fixture(["KIWOOM", "KIS"], "mock", false, true);
+  restart.receipts.state = JSON.parse(JSON.stringify(allocated.receipts.state));
+  assert.equal((await restart.runtime.execute(restart.brokers.find(b => b.id !== route.brokerId), structuredClone(buy), { manual: true })).status, "NO_ACTION");
+  assert.equal(restart.brokers.reduce((n, b) => n + b.state.requests.length, 0), 0);
+  clock = routeClock;
+  // A different owner has a different ledger and independently allocates the same signal.
+  const independent = fixture(["KIS"], "mock", false, true);
+  await independent.runtime.processMessage(message(buy));
+  assert.equal(independent.brokers[0].state.requests.length, 1);
+  const concurrent = fixture(["KIWOOM", "KIS"], "mock", false, true);
+  await Promise.all([concurrent.runtime.processMessage(message(record("race-a"))), concurrent.runtime.processMessage(message(record("race-b")))]);
+  assert.equal(concurrent.brokers.reduce((n, b) => n + b.state.requests.length, 0), 1);
+  const routeOutage = fixture(["KIWOOM", "KIS"], "mock", false, true);
+  routeOutage.brokers[0].state.failBalance = true;
+  await routeOutage.runtime.processMessage(message(record("route-outage")));
+  assert.equal(routeOutage.brokers.reduce((n, b) => n + b.state.requests.length, 0), 0);
+  assert.ok(routeOutage.receipts.listDeferred().length);
+  const approvalRoute = fixture(["KIWOOM", "KIS"], "mock", false, true);
+  approvalRoute.receipts.setAutoTrading(false);
+  await approvalRoute.runtime.processMessage(message(record("route-approval")));
+  const onlyPending: any = Object.values(approvalRoute.receipts.state.pending)[0];
+  assert.equal(onlyPending.brokerIds.length, 1);
+  await approvalRoute.runtime.processApproval({ author: { id: "owner", bot: false }, guildId: "guild", channelId: "order", content: "둘다", reply: async () => {} });
+  assert.equal(approvalRoute.brokers.reduce((n, b) => n + b.state.requests.length, 0), 1);
+  const beforeRouteClock = clock;
+  clock = new RealDate("2026-09-08T22:00:00Z").getTime();
+  const reserved = fixture(["KIWOOM", "KIS"], "mock", false, true);
+  await reserved.runtime.processMessage(message(record("route-closed")));
+  assert.equal(reserved.receipts.listDeferred().length, 1);
+  assert.equal(reserved.brokers.reduce((n, b) => n + b.state.requests.length, 0), 0);
+  clock = beforeRouteClock;
   const initialClock = clock;
   const equityAlerts = fixture(["KIWOOM", "KIS"]);
   await equityAlerts.runtime.reportEquityStatus(equityAlerts.brokers[0], new Error("점검 중"));
@@ -332,7 +380,7 @@ function message(r) { return { id: r.requestId, channelId: "signal", author: { i
       const dailyExit = record("owned-exit", "SELL"); dailyExit.payload.timeframe = "D";
       await scoped.runtime.executeOrDefer(broker, dailyExit);
       assert.equal(broker.state.requests[0].quantity, 10); // 90 manual shares are untouched
-      assert.equal(broker.state.orders.find(o => o.requestId === "owned-exit").policyVersion, "2026-09-10-mock-stop-v1");
+      assert.equal(broker.state.orders.find(o => o.requestId === "owned-exit").policyVersion, require("../src/trading/policy-study").POLICY_VERSION);
     }
   }
   const unmanaged = fixture();
