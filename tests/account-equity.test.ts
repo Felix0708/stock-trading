@@ -237,6 +237,13 @@ const { collectKiwoomTotal, equityBreakdown } = require("../src/brokers/account-
   const safeKis = await kisClient.getAccountEquity({ includeBreakdown: true });
   assert.equal(safeKis.equity, 14100); assert.equal(safeKis.breakdown, undefined);
   const calls = [], token = `sb_sync_${"a".repeat(43)}`;
+  const originalTimeout = AbortSignal.timeout, timeoutBudgets = [];
+  try {
+    AbortSignal.timeout = ms => { timeoutBudgets.push(ms); return originalTimeout(ms); };
+    await syncStockBriefingEquity(state, { token, fetchImpl: async () => new Response('{"ok":true,"synced":0}') });
+    assert.ok(timeoutBudgets.length > 0);
+    assert.ok(timeoutBudgets.every(ms => ms === 25_000)); // Receiver's upstream timeout is 15s.
+  } finally { AbortSignal.timeout = originalTimeout; }
   const many = structuredClone(state); many.cashFlowCoverage = []; many.equity = Array.from({ length: 501 }, (_, i) => ({ ...state.equity[0], at: new Date(Date.UTC(2024, 0, i + 1)).toISOString() }));
   const synced = await syncStockBriefingEquity(many, { token, apiUrl: "http://127.0.0.1:3000", fetchImpl: async (url, options) => {
     const data = JSON.parse(options.body); calls.push(data);
@@ -268,6 +275,38 @@ const { collectKiwoomTotal, equityBreakdown } = require("../src/brokers/account-
   assert.equal((await syncStockBriefingEquity(corrected, { ...delivery, checkpoint: restored, token: `sb_sync_${"b".repeat(43)}` })).sent, 2);
   assert.equal((await syncStockBriefingEquity(corrected, { ...delivery, checkpoint: restored, apiUrl: "http://localhost:3001" })).sent, 2);
   assert.ok(!JSON.stringify(restored).includes(token));
+  // Failure of the first history must not starve later batches/accounts.
+  for (const failure of ["http", "transport", "invalid-json", "invalid-ack", "null", "excess-ack"]) {
+    const isolatedCheckpoint: any = {};
+    let attempted = 0;
+    await assert.rejects(syncStockBriefingEquity(many, { token, checkpoint: isolatedCheckpoint,
+      fetchImpl: async () => {
+        if (++attempted === 1) {
+          if (failure === "transport") throw new Error("connection failed");
+          if (failure === "invalid-json") return new Response("not JSON");
+          if (failure === "invalid-ack") return new Response('{"ok":true,"synced":"1"}');
+          if (failure === "null") return new Response('null');
+          if (failure === "excess-ack") return new Response('{"ok":true,"synced":501}');
+          return new Response('{"ok":false}', { status: 502 });
+        }
+        return new Response('{"ok":true,"synced":1}');
+      },
+    }), /1개 요청 미확인, 1개 성공/);
+    assert.equal(attempted, 2);
+    assert.equal(Object.keys(isolatedCheckpoint.batches).length, 1);
+    const recovered = await syncStockBriefingEquity(many, { token,
+      checkpoint: JSON.parse(JSON.stringify(isolatedCheckpoint)), fetchImpl: async (_url, options) => {
+        assert.equal(JSON.parse(options.body).series[0].points.length, 500);
+        return new Response('{"ok":true,"synced":500}');
+      } });
+    assert.equal(recovered.sent, 1); assert.equal(recovered.skipped, 1);
+  }
+  // A checkpoint disk failure is not a remote failure; stop before sending more data.
+  let beforeSaveFailure = 0;
+  await assert.rejects(syncStockBriefingEquity(many, { token, saveCheckpoint: () => { throw Error("disk failed"); },
+    fetchImpl: async () => { beforeSaveFailure++; return new Response('{"ok":true,"synced":1}'); },
+  }), /disk failed/);
+  assert.equal(beforeSaveFailure, 1);
   // An invalid/failed acknowledgement must never suppress a retry.
   const rejectedCheckpoint: any = {};
   await assert.rejects(syncStockBriefingEquity(state, { token, checkpoint: rejectedCheckpoint,

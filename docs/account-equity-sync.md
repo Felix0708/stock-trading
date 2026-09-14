@@ -88,6 +88,8 @@ Newer collected_at wins; on a tie newer calculated_at wins. Exact time ties with
 different contents return 409. Server received_at is separate. Per-observation return
 method/base prevents joining curves with different bases. Gaps are not interpolated.
 Maximum request: 1 MiB, 20 series, 500 points total. Client batches at 500 points.
+The equity sender waits up to 25 seconds, allowing the receiver's 15-second upstream
+deadline plus response/network overhead. This does not change broker order timeouts.
 
 Producer identities are private: KIS account/product identity, Kiwoom account-linked
 app-key fingerprint. KIWOOM domestic identity uses its domestic client and a separate
@@ -101,8 +103,9 @@ observations; failed equity sync does not block holdings sync or broker order pr
 Confirmed sync batches are fingerprinted in the private receipt state. Unchanged content
 (ignoring only calculated_at) is not resent, including after restart. Changed observations,
 return calculations, destination URL or member token require a new acknowledgement.
-Partial failure preserves successful batch acknowledgements; pending batches retry on the
-next hourly sync. Sync incidents persist across restart, notify once and announce recovery
+Partial failure preserves successful batch acknowledgements and still attempts later independent
+batches; pending batches retry on the next hourly sync. A local checkpoint write failure stops
+the run. Partial success never announces whole-sync recovery. Sync incidents persist across restart, notify once and announce recovery
 only when the desired data is acknowledged. Logs contain status, duration and a validated
 request ID, never the token, request body or monetary values.
 Both hourly and daily-evidence equity reads pause outside the checked-in market calendar's
