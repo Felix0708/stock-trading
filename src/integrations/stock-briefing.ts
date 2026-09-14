@@ -103,7 +103,8 @@ async function syncStockBriefingHoldings(accounts, {
       method: "PUT",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
       body: JSON.stringify({ holdings, performance }),
-      signal: AbortSignal.timeout(10_000),
+      // Receiver resolves the member, then stores holdings: two sequential 15s calls.
+      signal: AbortSignal.timeout(40_000),
     });
   } catch {
     throw new Error("Stock-Briefing 보유종목 동기화 요청에 실패했습니다.");

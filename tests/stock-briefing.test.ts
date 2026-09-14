@@ -72,6 +72,12 @@ assert.throws(() => stockBriefingSnapshot([{
 
 (async () => {
   const token = `sb_sync_${"a".repeat(43)}`;
+  const originalTimeout = AbortSignal.timeout, timeoutBudgets = [];
+  try {
+    AbortSignal.timeout = ms => { timeoutBudgets.push(ms); return originalTimeout(ms); };
+    await syncStockBriefingHoldings(accounts, { token, fetchImpl: async () => Response.json({ ok: true, synced: 6 }) });
+    assert.deepEqual(timeoutBudgets, [40_000]); // Two sequential receiver calls, each bounded at 15s.
+  } finally { AbortSignal.timeout = originalTimeout; }
   let request;
   const synced = await syncStockBriefingHoldings(accounts, {
     token,

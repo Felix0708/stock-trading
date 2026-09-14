@@ -90,6 +90,8 @@ method/base prevents joining curves with different bases. Gaps are not interpola
 Maximum request: 1 MiB, 20 series, 500 points total. Client batches at 500 points.
 The equity sender waits up to 25 seconds, allowing the receiver's 15-second upstream
 deadline plus response/network overhead. This does not change broker order timeouts.
+Holdings sync waits up to 40 seconds because its receiver first resolves the member and
+then stores the snapshot (two sequential upstream calls, each limited to 15 seconds).
 
 Producer identities are private: KIS account/product identity, Kiwoom account-linked
 app-key fingerprint. KIWOOM domestic identity uses its domestic client and a separate
