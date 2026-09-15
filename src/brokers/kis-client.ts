@@ -418,12 +418,14 @@ class KisClient {
     return { orderNo: String(orderNo), symbol, side, status: "ACCEPTED" };
   }
 
-  async getUsOrderExecutions({ exchange = "ND", symbol = "" }: any = {}) {
-    const result = await this.request("/uapi/overseas-stock/v1/trading/inquire-ccnl", {
-      trId: this.trId("VTTS3035R", "TTTS3035R"),
-      params: this.accountParams({ PDNO: symbol, ORD_STRT_DT: "", ORD_END_DT: "", SLL_BUY_DVSN: "00", CCLD_NCCS_DVSN: "00", OVRS_EXCG_CD: this.kisExchange(exchange), SORT_SQN: "DS", ORD_DT: "", ORD_GNO_BRNO: "", ODNO: "", CTX_AREA_FK200: "", CTX_AREA_NK200: "" }),
-    });
-    return (result.output || result.output1 || []).map((item: any) => {
+  async getUsOrderExecutions({ exchange = "ND", symbol = "", date = new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date()).replaceAll("-", "") }: any = {}) {
+    if (!/^\d{8}$/.test(date) || (symbol && !/^[A-Z0-9.-]{1,12}$/.test(symbol))) throw new Error("체결 조회 날짜·종목 오류");
+    // KIS mock supports only all-symbol/all-exchange queries; filter after all pages arrive.
+    const rows = await this.getUsHistoryPages("/uapi/overseas-stock/v1/trading/inquire-ccnl", this.trId("VTTS3035R", "TTTS3035R"), {
+      PDNO: this.environment === "mock" ? "" : symbol || "%", ORD_STRT_DT: date, ORD_END_DT: date,
+      SLL_BUY_DVSN: "00", CCLD_NCCS_DVSN: "00", OVRS_EXCG_CD: this.environment === "mock" ? "" : this.kisExchange(exchange),
+      SORT_SQN: "DS", ORD_DT: "", ORD_GNO_BRNO: "", ODNO: "", CTX_AREA_FK200: "", CTX_AREA_NK200: "" });
+    return rows.filter((item: any) => !symbol || item.pdno === symbol).map((item: any) => {
       const orderQuantity = number(item.ft_ord_qty || item.ord_qty);
       const filledQuantity = number(item.ft_ccld_qty || item.tot_ccld_qty);
       const remainingQuantity = number(item.nccs_qty ?? orderQuantity - filledQuantity);

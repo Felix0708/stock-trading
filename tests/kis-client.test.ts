@@ -38,6 +38,26 @@ async function fakeFetch(url, options) {
 }
 
 (async () => {
+  const executionCalls = [];
+  const executionClient = new KisClient({ appKey: "a", appSecret: "b", accountNo: "12345678", requestIntervalMs: 0,
+    fetchImpl: async (url, options) => {
+      if (url.endsWith("tokenP")) return new Response(JSON.stringify({ access_token: "fake", expires_in: 86400 }));
+      const query = new URL(url).searchParams;
+      executionCalls.push({ query, headers: options.headers });
+      assert.equal(query.get("PDNO"), "");
+      assert.equal(query.get("OVRS_EXCG_CD"), "");
+      assert.equal(query.get("ORD_STRT_DT"), "20260915");
+      assert.equal(query.get("ORD_END_DT"), "20260915");
+      const next = query.get("CTX_AREA_NK200") === "next";
+      return new Response(JSON.stringify({ rt_cd: "0", output: [{ odno: next ? "2" : "1", pdno: next ? "TEST" : "OTHER", ft_ord_qty: "5", ft_ccld_qty: "2", nccs_qty: "3" }],
+        ctx_area_fk200: "context", ctx_area_nk200: next ? "" : "next" }), { headers: { tr_cont: next ? "D" : "M" } });
+    } });
+  const executions = await executionClient.getUsOrderExecutions({ exchange: "NY", symbol: "TEST", date: "20260915" });
+  assert.equal(executions.length, 1);
+  assert.equal(executions[0].orderNo, "2");
+  assert.equal(executionCalls.length, 2);
+  assert.equal(executionCalls[1].headers.tr_cont, "N");
+  await assert.rejects(executionClient.getUsOrderExecutions({ date: "invalid" }), /날짜/);
   const liveCalls = [];
   const liveClient = new KisClient({
     appKey: "a", appSecret: "b", accountNo: "12345678", environment: "live", requestIntervalMs: 0,

@@ -20,6 +20,7 @@ function koreanDate(value, timeZone = "Asia/Seoul") {
 }
 
 function executionDateMatches(order, row) {
+  if (String(row.source).startsWith("KIS:inquire-ccnl:")) return row.date === koreanDate(order.createdAt, "America/New_York");
   const date = koreanDate(order.createdAt);
   if (!String(row.source).startsWith("KIWOOM:ust21150:")) return row.date === date;
   if (![date, koreanDate(order.createdAt, "America/New_York")].includes(row.date) || !/^\d\d:\d\d:\d\d$/.test(row.orderTime || "")) return false;
@@ -243,7 +244,7 @@ async function collectBrokerEvidence(broker, now = new Date()) {
   const discrepancies = holdingDiscrepancies(orders, holdings, broker.environment);
   const affected = new Set(discrepancies.map(row => row.symbol));
   const targets = [...new Map(orders.filter(o => o.market !== "KRX" && affected.has(o.symbol)).flatMap(o => {
-    const dates = broker.id === "KIWOOM" ? [koreanDate(o.createdAt), koreanDate(o.createdAt, "America/New_York")] : [koreanDate(o.createdAt)];
+    const dates = broker.id === "KIWOOM" ? [koreanDate(o.createdAt), koreanDate(o.createdAt, "America/New_York")] : [koreanDate(o.createdAt, "America/New_York")];
     return [...new Set(dates)].map(date => {
     const target = { date, exchange: o.exchange || ({ NASDAQ: "ND", NYSE: "NY", AMEX: "NA" })[o.market],
       ...(broker.id === "KIWOOM" ? { symbol: normalizedSymbol(o.symbol) } : {}) };

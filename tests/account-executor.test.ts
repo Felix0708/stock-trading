@@ -365,12 +365,12 @@ assert.equal(enforceOpenRiskLimit(exitRiskPreview).blocked, true); // 손절위�
   assert.equal(changes.length, 1);
   assert.equal(changes[0].current.status, "FILLED");
   assert.equal(changes[0].previous.status, "ACCEPTED");
-  let savedOrder = { historyCheckedAt: "", reconciliationRequired: false, orderNo: "old", requestId: "old", market: "NYSE", exchange: "NY", symbol: "ZETA", side: "SELL", environment: "mock", createdAt: "2026-09-01T13:30:00Z", status: "ACCEPTED", orderQuantity: 30, filledQuantity: 0, remainingQuantity: 30 };
+  let savedOrder = { historyCheckedAt: "", reconciliationRequired: false, orderNo: "old", requestId: "old", market: "NYSE", exchange: "NY", symbol: "ZETA", side: "SELL", environment: "mock", createdAt: "2026-09-01T19:30:00Z", status: "ACCEPTED", orderQuantity: 30, filledQuantity: 0, remainingQuantity: 30 };
   let historyReads = 0;
   const historyRow = { orderNo: "old", symbol: "ZETA", side: "SELL", date: "20260901", source: "KIS:inquire-ccnl:20260901", orderQuantity: 30, filledQuantity: 0, remainingQuantity: 30, fillPrice: 0 };
   const oldBroker = { id: "KIS", environment: "mock", tracker: { pending: () => [savedOrder], record: o => savedOrder = o }, overseasClient: {
     getUsOrderExecutions: async () => { throw Error("old order must use dated history"); },
-    getUsHistoricalExecutions: async () => { historyReads++; return [historyRow]; },
+    getUsHistoricalExecutions: async ({ date }) => { assert.equal(date, "20260901", "US execution history uses exchange date, not next-day Korean date"); historyReads++; return [historyRow]; },
   } };
   await reconcilePendingBrokerOrders(oldBroker);
   assert.equal(savedOrder.status, "ACCEPTED");

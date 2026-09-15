@@ -813,9 +813,9 @@ async function reconcilePendingBrokerOrders(broker) {
   for (const previous of broker.tracker.pending()) {
     if (brokerStop(previous)) continue; // Native protection has stricter identity/trigger verification.
     let current;
-    const date = koreanDate(previous.createdAt, broker.id === "KIWOOM" ? "America/New_York" : "Asia/Seoul");
+    const date = koreanDate(previous.createdAt, "America/New_York");
     if (previous.status !== "UNKNOWN" && previous.market !== "KRX" && date
-      && date < koreanDate(new Date(), broker.id === "KIWOOM" ? "America/New_York" : "Asia/Seoul")
+      && date < koreanDate(new Date(), "America/New_York")
       && broker.overseasClient.getUsHistoricalExecutions) {
       if (Date.now() - Date.parse(previous.historyCheckedAt || "") < 300000) continue;
       const rows = await broker.overseasClient.getUsHistoricalExecutions({ date, symbol: previous.symbol, exchange: previous.exchange });

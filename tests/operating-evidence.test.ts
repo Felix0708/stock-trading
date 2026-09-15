@@ -33,6 +33,9 @@ const { probe, monitor, marker } = require("../scripts/monitor-health.cjs");
   assert.equal(dateFix.expirationReason, null); assert.equal(dateFix.resultAt, null);
   assert.equal(reconciliationPlan([order], [{ ...usDateRow, orderTime: "04:30:21" }], "mock").updates.length, 0);
   assert.equal(reconciliationPlan([order], [{ ...usDateRow, date: "20260816" }], "mock").updates.length, 0);
+  const kisDateRow = { ...usDateRow, source: "KIS:inquire-ccnl:20260817" };
+  assert.equal(reconciliationPlan([order], [kisDateRow], "mock").updates[0].filledQuantity, 51);
+  assert.equal(reconciliationPlan([order], [{ ...kisDateRow, date: "20260818" }], "mock").updates.length, 0);
   const broker = { id: "KIWOOM", environment: "mock", tracker };
   const report = { brokerId: "KIWOOM", environment: "mock", capturedAt: "2026-09-07T00:00:00Z", reconciliation: reconciliationPlan([order], [row], "mock"), costs: { updates: [] } };
   const file = path.join(root, "evidence.json");
@@ -73,6 +76,10 @@ const { probe, monitor, marker } = require("../scripts/monitor-health.cjs");
   assert.deepEqual(historyScopes.map(s => s.symbol), ["ZETA", "ZETA", "SE", "SE", "BE", "BE"]); // KST and US dates, each ticker.
   assert.deepEqual(transactionScopes.map(s => s.symbol), ["ZETA", "SE"]);
   assert.deepEqual(partial.transactions, []); // Discard the first symbol's rows when the next fails.
+  historyScopes.length = 0;
+  await collectBrokerEvidence({ ...twoSymbols, id: "KIS" });
+  assert.ok(historyScopes.length > 0);
+  assert.ok(historyScopes.every(scope => scope.date === "20260817"), "KIS history collection uses the exchange date");
 
   const kis = new KisClient({ appKey: "a", appSecret: "b", accountNo: "12345678", requestIntervalMs: 0 });
   const pages = []; kis.request = async (_path, options) => { pages.push(options); return pages.length === 1
