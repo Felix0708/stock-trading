@@ -1005,7 +1005,7 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
   let portfolioJob = null;
   let equitySyncJob = null;
   function requestEquitySync() {
-    if (readOnly || !receipts.file || !process.env.STOCK_BRIEFING_TOKEN) return;
+    if (readOnly || !receipts.file) return;
     if (!equitySyncJob) equitySyncJob = (async () => {
       const file = evidenceFile(receipts.file);
       await Promise.all(brokers.map(broker => brokerWork(broker, async () => {
@@ -1014,6 +1014,8 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
         catch (error) { await reportEquityStatus(broker, error); return; }
         if (collected) await reportEquityStatus(broker);
       }, "equity")));
+      // Local evidence and outage recovery must not depend on optional website linking.
+      if (!process.env.STOCK_BRIEFING_TOKEN) return;
       const synced = await syncStockBriefingEquity(readEvidence(file), {
         checkpoint: receipts.state.briefingEquitySync ||= {}, saveCheckpoint: () => receipts.write(),
       });
@@ -1022,6 +1024,7 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
     })().catch(error => reportDataStatus("briefing-equity-sync", "Stock-Briefing 계좌 자산 동기화", error))
       .catch(error => console.error("자산 동기화 상태 알림 저장/전송 실패:", error.message))
       .finally(() => { equitySyncJob = null; });
+    return equitySyncJob;
   }
   async function reconcileEvidence(broker) {
     if (readOnly || !receipts.file || !broker.overseasClient.getUsHistoricalExecutions) return null;
@@ -2187,7 +2190,7 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
     });
     await client.login(process.env.ACCOUNT_DISCORD_TOKEN || process.env.KIS_DISCORD_TOKEN || process.env.DISCORD_TOKEN_DRUCKENMILLER);
   }
-  return { listen, execute, executeOrDefer, retryDeferred, retryInbox, processMessage, processApproval, processOwnerCommand, reconcileOrders, checkManagedStops, refreshLifecycleCards, reportEquityStatus, reportDataStatus };
+  return { listen, execute, executeOrDefer, retryDeferred, retryInbox, processMessage, processApproval, processOwnerCommand, reconcileOrders, checkManagedStops, refreshLifecycleCards, requestEquitySync, reportEquityStatus, reportDataStatus };
 }
 
 if (require.main === module) start().catch(require("../../scripts/network-failure.cjs").fatal);

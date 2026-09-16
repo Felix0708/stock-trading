@@ -562,7 +562,25 @@ function message(r) { return { id: r.requestId, channelId: "signal", author: { i
   assert.equal(turningOff.receipts.listDeferred().length, 1);
   const fs = require("node:fs"), os = require("node:os"), path = require("node:path");
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "executor-recovery-"));
+  const briefingToken = process.env.STOCK_BRIEFING_TOKEN;
   try {
+    delete process.env.STOCK_BRIEFING_TOKEN;
+    clock = new RealDate("2026-09-08T14:00:00Z").getTime();
+    const localEquity = fixture();
+    localEquity.receipts.file = path.join(dir, "local-equity.json");
+    let equityQueries = 0;
+    Object.assign(localEquity.brokers[0].overseasClient, { accountIdentityKey: () => "a".repeat(64), getAccountEquity: async () => {
+      equityQueries++;
+      return { scope: "account-total-assets", currency: "KRW", equity: 100, source: "test" };
+    } });
+    await localEquity.runtime.reportEquityStatus(localEquity.brokers[0], new Error("test outage"));
+    await localEquity.runtime.requestEquitySync();
+    assert.equal(equityQueries, 1, "unlinked accounts must still collect local equity");
+    assert.equal(JSON.parse(fs.readFileSync(localEquity.receipts.file + ".evidence.json", "utf8")).equity.length, 1);
+    assert.deepEqual(localEquity.receipts.state.equityOutages, {}, "successful local collection clears its outage");
+    assert.equal(localEquity.receipts.state.briefingEquitySync, undefined, "no external sync without a token");
+    await localEquity.runtime.requestEquitySync();
+    assert.equal(equityQueries, 1, "retain hourly collection limit");
     const file = path.join(dir, "receipts.json");
     const before = new SignalReceiptStore(file, true);
     const item = before.receive(record("durable"), "durable-message");
@@ -572,7 +590,11 @@ function message(r) { return { id: r.requestId, channelId: "signal", author: { i
     assert.deepEqual(after.state.inbox.durable.completed, ["KIWOOM"]);
     assert.equal(after.attempt("KIS", record("durable")).status, "SUBMITTING");
     assert.equal(after.receive(record("durable"), "different-message"), after.state.inbox.durable);
-  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  } finally {
+    if (briefingToken === undefined) delete process.env.STOCK_BRIEFING_TOKEN;
+    else process.env.STOCK_BRIEFING_TOKEN = briefingToken;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
   const switching = fixture();
   switching.brokers[0].environment = "live";
   assert.throws(() => createAccountRuntime({ brokers: switching.brokers, receipts: switching.receipts }), /상태 파일을 분리/);
