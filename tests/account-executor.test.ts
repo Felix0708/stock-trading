@@ -62,6 +62,15 @@ assert.equal(shouldConsumeMessage({ channelId: "channel-2", author: { id: "bot-1
 assert.equal(shouldConsumeMessage({ channelId: "channel-1", author: { id: "human", bot: false } }, trusted), false);
 
 const store = new SignalReceiptStore(null);
+const historyRecord = { requestId: "history-check", policyHash: "baseline", payload: { ticker: "TEST", timeframe: "240" } };
+store.signal(historyRecord, "KIS", { status: "DEFER_REQUIRED", reason: "조회 대기" });
+store.signal(historyRecord, "KIS", { status: "DEFER_REQUIRED", reason: "조회 대기" });
+store.signal(historyRecord, "KIS", { status: "EXPIRED", reason: "기한 만료" });
+assert.deepEqual(store.state.signals[historyRecord.requestId].progressHistory.map(x => x.status), ["DEFER_REQUIRED", "EXPIRED"]);
+assert.equal(store.state.signals[historyRecord.requestId].progressHistory[0].policyHash, "baseline");
+store.signal(historyRecord, "KIS", { status: "PARTIALLY_FILLED", filledQuantity: 1, remainingQuantity: 2 });
+store.signal(historyRecord, "KIS", { status: "PARTIALLY_FILLED", filledQuantity: 2, remainingQuantity: 1 });
+assert.equal(store.state.signals[historyRecord.requestId].progressHistory.length, 4);
 assert.equal(store.autoTrading(), false);
 store.setAutoTrading(true);
 assert.equal(store.autoTrading(), true);

@@ -20,7 +20,7 @@ const { stockBriefingSyncReady, syncStockBriefingHoldings, syncStockBriefingEqui
 const { OrderTracker } = require("../trading/order-tracker");
 const { normalizedSymbol, normalizedTimeframe, sameTimeframe, emergencyExit, managedPosition, scopePositionPreview, restoreOrderSignalMetadata, orderTime } = require("../trading/position-ownership");
 
-const { POLICY_VERSION, policyFingerprint, assertLivePolicy } = require("../trading/policy-study");
+const { POLICY_VERSION, policyFingerprint, assertLivePolicy, entryTimingSummary } = require("../trading/policy-study");
 const {
   domesticSession,
   domesticSessionClock,
@@ -153,10 +153,19 @@ class SignalReceiptStore {
     const entry = this.state.signals[record.requestId] ||= { record: {
       requestId: record.requestId, receivedAt: record.receivedAt,
       payload: Object.fromEntries(["ticker", "exchange", "action", "timeframe", "name", "koreanName", "englishName", "price", "sl", "conviction", "sb_z_score"].map(key => [key, record.payload?.[key]])),
-      outcome: { signal: record.outcome?.signal }, risk: record.risk, policyVersion: record.policyVersion || POLICY_VERSION,
+      outcome: { signal: record.outcome?.signal, decision: record.outcome?.decision }, risk: record.risk, policyVersion: record.policyVersion || POLICY_VERSION,
     }, progress: {}, messageId: "" };
     for (const key of ["name", "koreanName", "englishName"]) if (record.payload?.[key]) entry.record.payload[key] = record.payload[key];
-    if (brokerId && result) entry.progress[brokerId] = { status: result.status, reason: result.reason || "", updatedAt: Date.now() };
+    if (brokerId && result) {
+      const next = { status: result.status, reason: result.reason || "", reasonCode: result.reasonCode || "",
+        filledQuantity: result.filledQuantity ?? null, remainingQuantity: result.remainingQuantity ?? null,
+        policyHash: record.policyHash || null, updatedAt: Date.now() };
+      const prior = entry.progress[brokerId];
+      if (!prior || ["status", "reason", "reasonCode", "policyHash", "filledQuantity", "remainingQuantity"].some(key => prior[key] !== next[key])) {
+        (entry.progressHistory ||= []).push({ brokerId, ...next });
+      }
+      entry.progress[brokerId] = next;
+    }
     this.write();
     return entry;
   }
@@ -989,6 +998,10 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
   }
   if (!readOnly) receipts.write();
   const executionPolicyHash = policyFingerprint();
+  if (!readOnly && !receipts.state.studyBaselineHash) {
+    receipts.state.studyBaselineHash = executionPolicyHash;
+    receipts.write(); // Freeze the comparison baseline only, never the order executor.
+  }
   const allocated = (broker, record) => entryAllocation && broker.environment === "mock" && !readOnly && allocatedBuy(record);
   // ponytail: serialize owner BUYs through submission; split the lock by market only if latency becomes material.
   let buyQueue = Promise.resolve(), allocationQueue = Promise.resolve();
@@ -1135,7 +1148,7 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
 
   function progress(broker, record, result) {
     if (!record.requestId || record.payload?.paper_order_test) return;
-    receipts.signal(record, broker.id, result);
+    receipts.signal({ ...record, policyHash: executionPolicyHash }, broker.id, result);
     void refreshLifecycleCards();
   }
 
@@ -1346,6 +1359,8 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
   async function reportOrderResult(broker, order) {
     let reported = { ...order, resultAt: order.resultAt || order.updatedAt };
     receipts.reconcileTradeStage(broker.id, reported);
+    const entry = receipts.state.signals[order.requestId];
+    if (entry) receipts.signal({ ...entry.record, policyHash: order.policyHash }, broker.id, reported);
     if (reported.executionReportedStatus !== reported.status || reported.executionReportedFilledQuantity !== reported.filledQuantity) {
       await send(channels.execution, formatOrderStatus(reported));
       broker.tracker.record({ ...latestOrder(broker, order), executionReportedStatus: reported.status, executionReportedFilledQuantity: reported.filledQuantity });
@@ -2122,7 +2137,11 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
       const latest = new Map(decisions.map(row => [row.requestId, row]));
       const evidence = receipts.file ? readEvidence(evidenceFile(receipts.file)) : { equity: [], cashFlows: [], cashFlowCoverage: [] };
       const studyFile = "forward-policy-study.json";
+      const study = fs.existsSync(studyFile) ? JSON.parse(fs.readFileSync(studyFile, "utf8")) : { observations: [] };
+      const timing = entryTimingSummary(study, receipts.state.signals, Date.now(), brokers);
       const report = { at: new Date().toISOString(), notes: "실제 체결·최종청산 기준. 비용 미확인은 null. 신호가 대비 체결 차이는 실제 손익에 이미 반영되어 재차 차감하지 않음. 실현손익 낙폭은 계좌 MDD가 아님.",
+        accountPolicyComparison: { baselineHash: receipts.state.studyBaselineHash || null, currentHash: executionPolicyHash,
+          status: receipts.state.studyBaselineHash === executionPolicyHash ? "BASELINE_UNCHANGED" : "POLICY_CHANGED_DO_NOT_POOL" },
         accounts: brokers.map(broker => ({ broker: broker.id, environment: broker.environment, ...strategyComparison(broker, receipts.state.signals) })),
         accountEquity: brokers.flatMap(broker => [...equityScopes(broker),
           ...(broker.id === "KIWOOM" && broker.domesticClient ? ["account-total-assets"] : [])].flatMap(scope => {
@@ -2134,10 +2153,15 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
         evidenceStatus: Object.values(evidence.brokers || {}).map((row: any) => ({ brokerId: row.brokerId, environment: row.environment,
           capturedAt: row.capturedAt, discrepancies: row.remainingDiscrepancies, historyErrors: row.historyErrors,
           transactionError: row.transactionError, equityError: row.equityError })),
-        forwardStudy: fs.existsSync(studyFile) ? JSON.parse(fs.readFileSync(studyFile, "utf8")) : { observations: [], reason: "새 신호 수신 후 비교 시작" },
+        forwardStudy: study, entryTimingComparison: timing,
+        accountSignalOutcomes: Object.values(receipts.state.signals).map((entry: any) => ({
+          requestId: entry.record.requestId, ticker: entry.record.payload?.ticker, timeframe: entry.record.payload?.timeframe,
+          progress: entry.progress, history: entry.progressHistory || [] })),
         commonSignalBlocks: [...latest.values() as Iterable<any>].filter(row => String(row.verdict).startsWith("BLOCKED"))
           .map(({ requestId, at, ticker, timeframe, signalCode, sigmaZ, policyVersion, verdict, reason }) => ({ requestId, at, ticker, timeframe, signalCode, sigmaZ, policyVersion, verdict, reason })) };
-      await message.reply({ ...formatStrategyComparisonMessage(brokers, receipts.state.signals), files: [{ name: "strategy-performance.json", attachment: Buffer.from(JSON.stringify(report, null, 2)) }] });
+      await message.reply({ ...formatStrategyComparisonMessage(brokers, receipts.state.signals),
+        content: `주문 없는 일봉→4시간봉 비교: ${timing.status} · 후보 ${timing.candidates.length}건. 신호 가격 차이를 가상 수익률로 표시하지 않습니다.`,
+        files: [{ name: "strategy-performance.json", attachment: Buffer.from(JSON.stringify(report, null, 2)) }] });
     } else if (command === "STATUS") {
       await message.reply([`🧭 **${accountLabel} 주문 실행기 상태**`, `증권사: ${accountSummary()}`, `신뢰 채널: ${sourceChannelIds.size}개`, `자동매매: ${receipts.autoTrading() ? "ON" : "OFF"}`, `실계좌: ${brokers.some((broker) => broker.environment === "live") ? "활성 · 강한 BUY 자동, 축소 BUY 승인" : "지원 · 현재 잠금"}`].join("\n"));
     } else if (["AUTO_ON", "AUTO_OFF", "AUTO_STATUS"].includes(command)) {

@@ -75,6 +75,17 @@ const emptyBroker = (id, label): any => ({
   assert.equal(comparison.groups[0].realizedDrawdown, 40);
   assert.equal(comparison.blocked[0].count, 1);
   assert.equal(comparison.groups[0].count, 1); // blocked signals are never fictional trades
+  const cohorts = ["policy-a", "policy-b"].flatMap(policyHash => strategyOrders.map(order => ({ ...order,
+    symbol: policyHash, policyHash })));
+  const cohortBroker = { ...comparisonBroker, tracker: { list: () => cohorts } };
+  const cohortGroups = strategyComparison(cohortBroker).groups.filter(group => group.dimension === "timeframe");
+  assert.equal(cohortGroups.length, 2, "same named policy but different settings must not merge");
+  assert.deepEqual(cohortGroups.map(group => group.count), [1, 1]);
+  assert.equal(cohortGroups[0].averageNetLoss, -43);
+  assert.equal(cohortGroups[0].averageNetWin, null);
+  const mixed = strategyOrders.map((order, index) => ({ ...order, policyHash: index ? "new" : "old" }));
+  assert.equal(calculateTradingPerformance(mixed).all.count, 1);
+  assert.equal(strategyComparison({ ...comparisonBroker, tracker: { list: () => mixed } }).operational.length, 1);
   strategyOrders[0].executionCosts.filledQuantity = 9; // stale cost evidence after another fill
   assert.equal(strategyComparison(comparisonBroker).groups[0].netProfitLoss, null);
   const comparisonCard = formatStrategyComparisonMessage([comparisonBroker, comparisonBroker]);

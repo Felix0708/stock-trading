@@ -3,7 +3,7 @@ const assert = require("node:assert/strict"), fs = require("node:fs"), os = requ
 const { reconciliationPlan, settlementCosts, collectBrokerEvidence, applyEvidence, validateStatement, readEvidence, writeEvidence } = require("../src/executor/account-evidence");
 const { equityPerformance, importCashFlows } = require("../src/executor/equity-performance");
 const { recordAlertReceipt, confirmAlert, applyAlertSnapshot, alertEvidenceSummary } = require("../src/signals/alert-evidence");
-const { policyFingerprint, assertLivePolicy, recordForwardStudy } = require("../src/trading/policy-study");
+const { policyFingerprint, assertLivePolicy, recordForwardStudy, nextDailyClose, entryTimingSummary } = require("../src/trading/policy-study");
 const { KiwoomClient } = require("../src/brokers/kiwoom-client");
 const { KisClient } = require("../src/brokers/kis-client");
 const { OrderTracker } = require("../src/trading/order-tracker");
@@ -112,12 +112,66 @@ const { probe, monitor, marker } = require("../scripts/monitor-health.cjs");
   assert.equal(alertEvidenceSummary(items, alertEvidence, now).verified, 2);
   const hash = policyFingerprint({}); assert.equal(hash.length, 64); assert.throws(() => assertLivePolicy({ KIS: "live" }, false, hash, {}));
   assert.notEqual(hash, policyFingerprint({ KIS_LIVE_AFTER_MARKET_EXTENDED: "true" }));
+  assert.notEqual(hash, policyFingerprint({ ACCOUNT_SIGNAL_MAX_AGE_MINUTES: "60" }));
   assertLivePolicy({ KIS: "mock" }, false, hash, {}); assertLivePolicy({ KIS: "live" }, false, hash, { ACCOUNT_APPROVED_POLICY_HASH: hash });
   const studyFile = path.join(root, "forward.json"), at = new Date().toISOString();
   const signal = { requestId: "future-1", receivedAt: at, validation: { ok: true }, payload: { ticker: "NVDA", exchange: "NASDAQ", timeframe: "240", action: "BUY", price: 100, sb_z_score: 3 }, outcome: { decision: "ENTRY_CANDIDATE" }, risk: { verdict: "PAPER_ENTRY" } };
   assert.equal(recordForwardStudy(studyFile, signal, { recovered: true }), false);
   assert.equal(recordForwardStudy(studyFile, signal), true); assert.equal(recordForwardStudy(studyFile, signal), false);
   const study = JSON.parse(fs.readFileSync(studyFile)); assert.equal(study.observations[0].comparison.liveSigmaCeiling25, false); assert.equal(study.observations[0].comparison.mockSigmaCeiling35, true);
+
+  // No orders or hypothetical fills: pair forward daily/4h observations with original IDs.
+  assert.equal(new Date(nextDailyClose("NYSE", Date.parse("2026-09-04T20:01:00Z"))).toISOString(), "2026-09-08T20:00:00.000Z"); // weekend + Labor Day
+  assert.equal(new Date(nextDailyClose("NYSE", Date.parse("2026-10-30T20:01:00Z"))).toISOString(), "2026-11-02T21:00:00.000Z"); // DST
+  assert.equal(new Date(nextDailyClose("NYSE", Date.parse("2026-11-25T21:01:00Z"))).toISOString(), "2026-11-27T18:00:00.000Z"); // early close
+  assert.equal(new Date(nextDailyClose("KRX", Date.parse("2026-09-23T06:31:00Z"))).toISOString(), "2026-09-28T06:30:00.000Z");
+  assert.equal(nextDailyClose("KRX", Date.parse("2026-11-18T06:31:00Z")), null); // unknown special hours
+  assert.equal(nextDailyClose("TSE", Date.now()), null);
+  const timingFile = path.join(root, "timing.json"), start = Date.parse("2026-09-16T20:01:00Z");
+  const observe = (id, offset, frame = "1D", decision = "ENTRY_CANDIDATE", policyHash = "fixed", file = timingFile) => {
+    const record = structuredClone(signal);
+    Object.assign(record, { requestId: id, receivedAt: new Date(start + offset).toISOString() });
+    Object.assign(record.payload, { timeframe: frame, sl: 90, action: decision === "ENTRY_CANDIDATE" ? "BUY" : "SELL" });
+    record.outcome.decision = decision;
+    recordForwardStudy(file, record, { now: start + offset, policyHash });
+    return JSON.parse(fs.readFileSync(file));
+  };
+  observe("daily", 0);
+  const paired = observe("four", 18 * 3600000, "240");
+  assert.equal(paired.entryTiming.candidates[0].status, "NEW_4H_SIGNAL");
+  assert.equal(paired.entryTiming.candidates[0].trigger.requestId, "four");
+  assert.equal(paired.entryTiming.candidates[0].executionStatus, "NOT_SIMULATED");
+  assert.equal(observe("four", 18 * 3600000, "240").entryTiming.events.length, 2);
+  const summary = entryTimingSummary(paired, { daily: { progress: { KIS: { status: "BLOCKED", reason: "Sigma" } } } }, start + 19 * 3600000);
+  assert.equal(summary.candidates[0].baselineAccountResults.KIS.status, "BLOCKED");
+  assert.equal(summary.hypotheticalNetReturn, null);
+  assert.equal(summary.hypotheticalMaxDrawdown, null);
+  const withOrders = entryTimingSummary(paired, {}, start + 19 * 3600000, [{ id: "KIS", environment: "mock", tracker: { list: () => [
+    { requestId: "daily", environment: "live", status: "FILLED" },
+    { requestId: "daily", environment: "mock", status: "PARTIALLY_FILLED", filledQuantity: 1, remainingQuantity: 2 },
+  ] } }]);
+  assert.equal(withOrders.candidates[0].baselineAccountResults.KIS.orderStatus, "PARTIALLY_FILLED");
+  const expiryFile = path.join(root, "expiry.json");
+  observe("daily", 0, "1D", "ENTRY_CANDIDATE", "fixed", expiryFile);
+  assert.equal(observe("late", 24 * 3600000, "240", "ENTRY_CANDIDATE", "fixed", expiryFile).entryTiming.candidates[0].status, "EXPIRED");
+  const invalidFile = path.join(root, "invalid.json");
+  observe("daily", 0, "1D", "ENTRY_CANDIDATE", "fixed", invalidFile);
+  observe("exit", 1000, "1D", "EXIT_CANDIDATE", "fixed", invalidFile);
+  assert.equal(observe("four", 2000, "240", "ENTRY_CANDIDATE", "fixed", invalidFile).entryTiming.candidates[0].status, "INVALIDATED");
+  const changedFile = path.join(root, "changed.json");
+  observe("daily", 0, "1D", "ENTRY_CANDIDATE", "fixed", changedFile);
+  const changed = observe("four", 1000, "240", "ENTRY_CANDIDATE", "new-policy", changedFile);
+  assert.equal(changed.entryTiming.status, "PAUSED_POLICY_CHANGE");
+  assert.equal(changed.entryTiming.candidates[0].status, "POLICY_CHANGED");
+  assert.equal(observe("later", 2000, "240", "ENTRY_CANDIDATE", "fixed", changedFile).entryTiming.status, "PAUSED_POLICY_CHANGE");
+  const orderingFile = path.join(root, "ordering.json");
+  observe("daily", 0, "1D", "ENTRY_CANDIDATE", "fixed", orderingFile);
+  observe("new-day", 1000, "1D", "ENTRY_CANDIDATE", "fixed", orderingFile);
+  const unordered = observe("earlier-four", 500, "240", "ENTRY_CANDIDATE", "fixed", orderingFile);
+  assert.equal(unordered.entryTiming.candidates[0].status, "SUPERSEDED");
+  assert.equal(unordered.entryTiming.candidates[1].status, "WAITING");
+  assert.equal(unordered.entryTiming.events.at(-1).excludedReason, "OUT_OF_ORDER");
+  assert.equal(recordForwardStudy(timingFile, { ...signal, requestId: "smoke", payload: { ...signal.payload, paper_order_test: true } }), false);
 
   assert.equal(await probe("https://example.com/health", async () => new Response('{"ok":true}')), true);
   assert.equal(await probe("https://example.com/health", async () => new Response('{"ok":false}')), false);
