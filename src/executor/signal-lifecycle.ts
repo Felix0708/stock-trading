@@ -18,8 +18,11 @@ function lifecycleBrokerState(entry, broker, receipts, now = Date.now()) {
   const progress = entry.progress[broker.id] || { status: receipts.state.inbox[record.requestId] ? "RECEIVED" : "NO_ACTION", reason: "" };
   const order = broker.tracker.list().find(order => order.requestId === record.requestId);
   if (order) return { ...progress, ...order, status: order.status,
-    next: order.reconciliationRequired ? "5분 주기로 원주문 과거 내역 대조 · 중복 재주문 차단" : ["ACCEPTED", "PARTIALLY_FILLED", "CANCEL_REQUESTED"].includes(order.status) ? "30초 주기로 체결 확인" : "",
-    reason: order.reconciliationRequired ? "이전 거래일 주문의 잔량 종료 증빙 미확인 · 접수 상태만으로 체결·만료를 추정하지 않습니다." : "" };
+    next: order.reconciliationRequired ? "기존 조회 주기로 원주문 대조 · 과거 내역은 5분 간격 · 중복 재주문 차단" : ["ACCEPTED", "PARTIALLY_FILLED", "CANCEL_REQUESTED"].includes(order.status) ? "30초 주기로 체결 확인" : "",
+    reason: [order.reconciliationRequired ? "주문 최종 상태 증빙 미확인 · 접수 상태만으로 체결·만료를 추정하지 않습니다." : "",
+      ({ QUERY_FAILED: "최근 조회 실패", NOT_FOUND: "최근 조회에서 일치 주문 없음", HISTORY_UNRESOLVED: "과거 이력은 조회됐으나 종료 증빙 없음" })[order.orderCheck?.reasonCode] || "",
+      ({ SUBMITTING: "취소 전송 기록 있음 · 결과 확인 필요", REQUESTED: "취소 접수 · 완료 확인 전", UNKNOWN: "취소 응답 미확인 · 자동 재전송 안 함", REJECTED: "취소 거절 · 사유 확인 전 재전송 안 함" })[order.cancellation?.status] || "",
+    ].filter(Boolean).join("\n") };
   const attempt = receipts.state.attempts[`${broker.id}:${record.requestId}`];
   if (attempt?.status === "SUBMITTING" && broker.submitting?.has(`${broker.id}:${record.requestId}`)) return { status: "SUBMITTING", reason: "증권사 응답 대기 · 아직 접수 확정 아님" };
   if (["SUBMITTING", "UNKNOWN"].includes(attempt?.status)) return { status: "UNKNOWN", reason: "증권사 접수 여부 대조 필요 · 자동 재주문 안 함" };
@@ -43,6 +46,8 @@ function lifecycleBrokerState(entry, broker, receipts, now = Date.now()) {
     : { status: "EXPIRED", reason: "BUY 승인 유효시간 종료" };
   const inbox = receipts.state.inbox[record.requestId];
   if (inbox && !inbox.completed.includes(broker.id) && inbox.expiresAt <= now) return { status: "EXPIRED", reason: "계좌 확인 유효시간 종료" };
+  if (inbox && !inbox.completed.includes(broker.id) && progress.status === "DEFER_REQUIRED") return {
+    ...progress, next: "기존 실행기에서 유효기간 내 재검토 · 복구 후 매수 조건 재확인", expiresAt: inbox.expiresAt };
   return progress;
 }
 

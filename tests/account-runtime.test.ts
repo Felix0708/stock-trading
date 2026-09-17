@@ -98,7 +98,56 @@ function message(r) { return { id: r.requestId, channelId: "signal", author: { i
   routeOutage.brokers[0].state.failBalance = true;
   await routeOutage.runtime.processMessage(message(record("route-outage")));
   assert.equal(routeOutage.brokers.reduce((n, b) => n + b.state.requests.length, 0), 0);
-  assert.ok(routeOutage.receipts.listDeferred().length);
+  assert.ok(routeOutage.receipts.state.inbox['route-outage']);
+  assert.equal(routeOutage.receipts.listDeferred().length, 0);
+  // An unresolved unrelated order is a temporary wait, not a consumed BUY signal.
+  const waiting = fixture(["KIS"], "mock", false, true);
+  waiting.brokers[0].state.orders.push({ orderNo: "old", symbol: "OTHER", market: "NASDAQ", side: "BUY", status: "ACCEPTED", reconciliationRequired: true });
+  const waitSignal = record("verification-wait");
+  await waiting.runtime.processMessage(message(waitSignal));
+  assert.ok(waiting.receipts.state.inbox[waitSignal.requestId]);
+  assert.equal(waiting.brokers[0].state.requests.length, 0);
+  assert.equal(waiting.receipts.state.signals[waitSignal.requestId].progress.KIS.status, "DEFER_REQUIRED");
+  const originalDeadline = waiting.receipts.state.inbox[waitSignal.requestId].expiresAt;
+  waiting.brokers[0].state.orders.length = 0; // Test-only: broker evidence fixture has resolved the old order.
+  await waiting.runtime.retryInbox();
+  await waiting.runtime.retryInbox();
+  assert.equal(waiting.brokers[0].state.requests.length, 1);
+  assert.equal(waiting.receipts.state.inbox[waitSignal.requestId], undefined);
+  const expiredWait = fixture(["KIS"], "mock", false, true);
+  expiredWait.brokers[0].state.orders.push({ orderNo: "old", symbol: "OTHER", market: "NASDAQ", status: "UNKNOWN" });
+  await expiredWait.runtime.processMessage(message(record("expired-wait")));
+  const expiredClock = clock;
+  clock = originalDeadline + 1;
+  expiredWait.brokers[0].state.orders.length = 0;
+  await expiredWait.runtime.retryInbox();
+  assert.equal(expiredWait.brokers[0].state.requests.length, 0);
+  assert.equal(expiredWait.receipts.state.signals['expired-wait'].progress.KIS.status, "EXPIRED");
+  clock = expiredClock;
+  const approvalWait = fixture(["KIS"], "mock", false, true);
+  approvalWait.receipts.setAutoTrading(false);
+  approvalWait.brokers[0].state.orders.push({ orderNo: "old", symbol: "OTHER", market: "NASDAQ", status: "UNKNOWN" });
+  await approvalWait.runtime.processMessage(message(record("approval-wait")));
+  assert.ok(approvalWait.receipts.state.inbox['approval-wait']);
+  assert.equal(Object.keys(approvalWait.receipts.state.pending).length, 0);
+  approvalWait.brokers[0].state.orders.length = 0;
+  await approvalWait.runtime.retryInbox();
+  assert.equal(Object.keys(approvalWait.receipts.state.pending).length, 1);
+  assert.equal(approvalWait.brokers[0].state.requests.length, 0);
+  // Waiting survives restart without extending the original deadline.
+  const restoredWait = fixture(["KIS"], "mock", false, true);
+  restoredWait.receipts.state = JSON.parse(JSON.stringify(routeOutage.receipts.state));
+  const restoredDeadline = restoredWait.receipts.state.inbox['route-outage'].expiresAt;
+  await restoredWait.runtime.retryInbox();
+  assert.equal(restoredWait.brokers[0].state.requests.length, 1);
+  assert.equal(restoredDeadline, routeOutage.receipts.state.inbox['route-outage'].expiresAt);
+  const boundedWait = fixture(["KIS"], "mock", false, true);
+  boundedWait.brokers[0].state.orders.push({ orderNo: "old", symbol: "OTHER", market: "NASDAQ", side: "BUY", environment: "mock",
+    status: "ACCEPTED", reconciliationRequired: true, orderQuantity: 4, filledQuantity: 0, remainingQuantity: 4,
+    limitPrice: 100, stopPrice: 90, plannedInvestment: 400, plannedRisk: 40, marketFallbackAllowed: false });
+  await boundedWait.runtime.processMessage(message(record("bounded-other-symbol")));
+  assert.equal(boundedWait.brokers[0].state.requests.length, 1);
+  assert.equal(boundedWait.brokers[0].state.orders.find(o => o.orderNo === "old").status, "ACCEPTED");
   const approvalRoute = fixture(["KIWOOM", "KIS"], "mock", false, true);
   approvalRoute.receipts.setAutoTrading(false);
   await approvalRoute.runtime.processMessage(message(record("route-approval")));
@@ -108,6 +157,11 @@ function message(r) { return { id: r.requestId, channelId: "signal", author: { i
   assert.equal(approvalRoute.brokers.reduce((n, b) => n + b.state.requests.length, 0), 1);
   const beforeRouteClock = clock;
   clock = new RealDate("2026-09-08T22:00:00Z").getTime();
+  const closedWait = fixture(["KIS"], "mock", false, true);
+  closedWait.brokers[0].state.orders.push({ orderNo: "old", symbol: "OTHER", market: "NASDAQ", status: "UNKNOWN" });
+  await closedWait.runtime.processMessage(message(record("closed-verification")));
+  assert.ok(closedWait.receipts.state.inbox['closed-verification']);
+  assert.equal(closedWait.receipts.listDeferred().length, 0); // Not promoted to a multi-day market reservation.
   const reserved = fixture(["KIWOOM", "KIS"], "mock", false, true);
   await reserved.runtime.processMessage(message(record("route-closed")));
   assert.equal(reserved.receipts.listDeferred().length, 1);

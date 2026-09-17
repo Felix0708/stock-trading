@@ -42,3 +42,33 @@ orders.pop(); a.account.usHoldings[0].quantity = 11;
 assert.match(allocationRisk(record, snapshots, receipts).reason, /수량/);
 assert.equal(allocationRisk(record, [snapshot("single")], receipts).equity, 10000);
 console.log("entry-allocation tests OK");
+
+// Bounded stale limit BUYs reserve their full remaining commitment; never invent expiry.
+const reserveAccount = snapshot("R", 1000);
+const stale = { orderNo: "r1", market: "NASDAQ", exchange: "ND", symbol: "OTHER", side: "BUY", environment: "mock",
+  status: "ACCEPTED", reconciliationRequired: true, orderQuantity: 4, filledQuantity: 0, remainingQuantity: 4,
+  limitPrice: 100, stopPrice: 90, plannedInvestment: 400, plannedRisk: 40, marketFallbackAllowed: false };
+reserveAccount.broker.tracker.list().push(stale);
+const reservedTotals = allocationRisk(record, [reserveAccount], receipts);
+assert.equal(reservedTotals.blocked, false);
+assert.equal(reservedTotals.reservedCash.R, 400);
+assert.equal(reservedTotals.reservedPositions.R, 1);
+assert.equal(reservedTotals.risk, 40);
+assert.equal(capAllocatedPreview(reserveAccount.preview, reservedTotals, { cash: 400, availableCash: 1000 }).quantity, 6);
+assert.equal(capAllocatedPreview(reserveAccount.preview, reservedTotals, { cash: 400, availableCash: 300 }).retryable, true);
+for (const change of [{ status: "UNKNOWN" }, { orderNo: "" }, { limitPrice: null }, { stopPrice: 101 }, { activeOrderNo: "r2" }, { remainingQuantity: -1 }, { filledQuantity: 1 }, { environment: "live" }, { side: "SELL" }, { market: "KRX" }, { marketFallbackAllowed: true }]) {
+  reserveAccount.broker.tracker.list()[0] = { ...stale, ...change };
+  assert.equal(allocationRisk(record, [reserveAccount], receipts).retryable, true, JSON.stringify(change));
+}
+reserveAccount.broker.tracker.list()[0] = { ...stale, symbol: "X" };
+assert.equal(allocationRisk(record, [reserveAccount], receipts).retryable, true);
+reserveAccount.broker.tracker.list()[0] = stale;
+reserveAccount.account.usHoldings.push({ code: "OTHER", quantity: 1, evaluationAmount: 100 });
+assert.equal(allocationRisk(record, [reserveAccount], receipts).retryable, true); // Unrecorded fill cannot be counted twice or guessed.
+reserveAccount.account.usHoldings.length = 0;
+Object.assign(stale, { status: "PARTIALLY_FILLED", filledQuantity: 1, remainingQuantity: 3, fillPrice: 100, entryType: "PAPER_ENTRY", timeframe: "240", createdAt: new Date(now - 20000000).toISOString() });
+reserveAccount.account.usHoldings.push({ code: "OTHER", quantity: 1, evaluationAmount: 100 });
+const partialReserve = allocationRisk(record, [reserveAccount], receipts);
+assert.equal(partialReserve.reservedCash.R, 300);
+assert.equal(partialReserve.reservedPositions.R, 0);
+assert.equal(partialReserve.risk, 40); // 10 held risk + 30 unresolved risk, not 50.

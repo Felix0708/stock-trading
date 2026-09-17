@@ -378,9 +378,29 @@ assert.equal(enforceOpenRiskLimit(exitRiskPreview).blocked, true); // 손절위�
   await reconcilePendingBrokerOrders(oldBroker);
   assert.equal(historyReads, 1, "historical query must be throttled");
   savedOrder.historyCheckedAt = "2000-01-01T00:00:00Z";
+  (savedOrder as any).orderCheck.lastAttemptAt = savedOrder.historyCheckedAt;
   Object.assign(historyRow, { filledQuantity: 30, remainingQuantity: 0, fillPrice: 31 });
   const restored = await reconcilePendingBrokerOrders(oldBroker);
   assert.equal(restored[0].current.status, "FILLED");
   assert.equal(savedOrder.reconciliationRequired, false);
+  assert.equal((savedOrder as any).orderCheck.reasonCode, "TERMINAL_CONFIRMED");
+  const isolated = [
+    { ...savedOrder, orderNo: "failed", status: "ACCEPTED", orderCheck: null, historyCheckedAt: "", filledQuantity: 0, remainingQuantity: 30 },
+    { ...savedOrder, orderNo: "resolved", status: "ACCEPTED", orderCheck: null, historyCheckedAt: "", filledQuantity: 0, remainingQuantity: 30 },
+  ];
+  const separated = await reconcilePendingBrokerOrders({ ...oldBroker,
+    tracker: { pending: () => isolated, record: o => { Object.assign(isolated.find(x => x.orderNo === o.orderNo), o); return o; } },
+    overseasClient: { getUsHistoricalExecutions: async () => {
+      if (!(isolated[0] as any).orderCheck) throw Error("first order query failed");
+      return [{ ...historyRow, orderNo: "resolved" }];
+    } },
+  });
+  assert.equal((separated as any).failures.length, 1);
+  assert.equal((isolated[0] as any).orderCheck.reasonCode, "QUERY_FAILED");
+  assert.equal(isolated[0].status, "ACCEPTED");
+  assert.equal(isolated[1].status, "FILLED");
+  const deadlineRecord = { ...heldSell, executionDeadline: Date.now() + 60000, requestId: "verification-deadline" };
+  const verification = store.putDeferred("KIS", deadlineRecord, 5 * 86400000, { kind: "VERIFY" });
+  assert.equal(verification.expiresAt, deadlineRecord.executionDeadline);
   console.log("account-executor test OK");
 })().catch((error) => { console.error(error); process.exitCode = 1; });

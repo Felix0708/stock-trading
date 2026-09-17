@@ -22,7 +22,9 @@ async function currentExecution(order: Order, options: TrackingOptions): Promise
 async function refreshPaperOrder(order: Order, options: TrackingOptions): Promise<Order> {
   if (order.status === "UNKNOWN") return order; // 재주문 응답 유실은 자동 추정하지 않습니다.
   const current = await currentExecution(order, options);
-  if (!current) return order;
+  const at = new Date().toISOString();
+  const check = { lastAttemptAt: at, lastSuccessAt: at, reasonCode: current ? "MATCHED" : "NOT_FOUND" };
+  if (!current) return options.tracker.record({ ...order, orderCheck: check });
   if (order.activeOrderNo) {
     const activeQuantity = Math.min(order.activeOrderQuantity || 0, Math.max(0, Number(current.filledQuantity) || 0));
     const filledQuantity = (order.priorFilledQuantity || 0) + activeQuantity;
@@ -32,9 +34,8 @@ async function refreshPaperOrder(order: Order, options: TrackingOptions): Promis
     current.fillPrice = filledQuantity ? filledValue / filledQuantity : 0;
     if (current.remainingQuantity === 0) current.status = "FILLED";
   }
-  const changed = ["status", "filledQuantity", "remainingQuantity", "fillPrice"]
-    .some((key) => current[key] !== undefined && current[key] !== order[key]);
-  return changed ? options.tracker.record({ ...order, ...current, orderQuantity: order.orderQuantity, orderNo: order.orderNo }) : order;
+  return options.tracker.record({ ...order, ...current, orderQuantity: order.orderQuantity, orderNo: order.orderNo,
+    reconciliationRequired: false, orderCheck: check });
 }
 
 async function trackOrdinaryOrder(order: Order, options: TrackingOptions): Promise<Order> {

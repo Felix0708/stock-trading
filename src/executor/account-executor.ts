@@ -262,7 +262,8 @@ class SignalReceiptStore {
     if (existing) return existing;
     const key = `${brokerId}:${record.requestId}`;
     this.state.deferred[key] = {
-      key, brokerId, record, kind, queuedAt: now, expiresAt: now + ttlMs,
+      key, brokerId, record, kind, queuedAt: now,
+      expiresAt: kind === "VERIFY" && Number.isFinite(record.executionDeadline) ? Math.min(now + ttlMs, record.executionDeadline) : now + ttlMs,
       lastAttemptMarketDate: "", verificationAttempts: 0,
       orderRetryAttempts: 0, orderRetrySessionKey: "", nextAttemptAt: now,
     };
@@ -810,21 +811,33 @@ function applyPyramidSizing(record, preview, orders) {
 
 async function reconcilePendingBrokerOrders(broker) {
   const changes = [];
+  const failures = [];
+  Object.defineProperty(changes, "failures", { value: failures });
   for (const previous of broker.tracker.pending()) {
     if (brokerStop(previous)) continue; // Native protection has stricter identity/trigger verification.
     let current;
-    const date = koreanDate(previous.createdAt, "America/New_York");
-    if (previous.status !== "UNKNOWN" && previous.market !== "KRX" && date
-      && date < koreanDate(new Date(), "America/New_York")
-      && broker.overseasClient.getUsHistoricalExecutions) {
-      if (Date.now() - Date.parse(previous.historyCheckedAt || "") < 300000) continue;
-      const rows = await broker.overseasClient.getUsHistoricalExecutions({ date, symbol: previous.symbol, exchange: previous.exchange });
-      const plan = reconciliationPlan([previous], rows, broker.environment);
-      current = broker.tracker.record(plan.updates.length === 1 ? { ...plan.updates[0], reconciliationRequired: !["FILLED", "CANCELLED", "REJECTED", "EXPIRED"].includes(plan.updates[0].status), historyCheckedAt: new Date().toISOString() }
-        : { ...previous, historyCheckedAt: new Date().toISOString(), reconciliationRequired: true });
-      // An empty current-day list or an old "accepted" row does not prove expiry.
-      // Keep the original order blocking a duplicate until final broker evidence arrives.
-    } else current = await refreshPaperOrder(previous, broker);
+    try {
+      const date = koreanDate(previous.createdAt, "America/New_York");
+      if (previous.status !== "UNKNOWN" && previous.market !== "KRX" && date
+        && date < koreanDate(new Date(), "America/New_York")
+        && broker.overseasClient.getUsHistoricalExecutions) {
+        if (Date.now() - Date.parse(previous.orderCheck?.lastAttemptAt || previous.historyCheckedAt || "") < 300000) continue;
+        const rows = await broker.overseasClient.getUsHistoricalExecutions({ date, symbol: previous.symbol, exchange: previous.exchange });
+        const plan = reconciliationPlan([previous], rows, broker.environment);
+        const at = new Date().toISOString();
+        const orderCheck = { lastAttemptAt: at, lastSuccessAt: at,
+          reasonCode: plan.updates.length === 1 ? "TERMINAL_CONFIRMED" : rows.length ? "HISTORY_UNRESOLVED" : "NOT_FOUND" };
+        current = broker.tracker.record(plan.updates.length === 1 ? { ...plan.updates[0], reconciliationRequired: !["FILLED", "CANCELLED", "REJECTED", "EXPIRED"].includes(plan.updates[0].status), historyCheckedAt: at, orderCheck }
+          : { ...previous, historyCheckedAt: at, reconciliationRequired: true, orderCheck });
+        // An empty current-day list or an old "accepted" row does not prove expiry.
+        // Keep the original order blocking a duplicate until final broker evidence arrives.
+      } else current = await refreshPaperOrder(previous, broker);
+    } catch (error) {
+      broker.tracker.record({ ...previous, reconciliationRequired: true, orderCheck: {
+        lastAttemptAt: new Date().toISOString(), lastSuccessAt: previous.orderCheck?.lastSuccessAt || null, reasonCode: "QUERY_FAILED" } });
+      failures.push({ symbol: previous.symbol, error });
+      continue;
+    }
     if (["status", "filledQuantity", "remainingQuantity", "fillPrice"].some((key) => current[key] !== previous[key])) {
       changes.push({ previous, current });
     }
@@ -1248,9 +1261,19 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
       } catch (error) { throw Object.assign(error, { accountVerificationFailed: true }); }
       const totals = allocationRisk(record, snapshots, receipts);
       if (totals.blocked) return { label: broker.label, preview: totals };
-      for (const s of snapshots) s.preview = capAllocatedPreview(s.preview, totals);
+      for (const s of snapshots) {
+        const reservation = totals.reservedCash?.[s.broker.id] || 0;
+        s.preview = capAllocatedPreview(s.preview, totals, { cash: reservation, availableCash: s.account.availableCash });
+        if (reservation && s.account.openPositions + totals.reservedPositions[s.broker.id] >= s.account.maxOpenPositions) {
+          s.preview = { ...s.preview, blocked: true, retryable: true, quantity: 0,
+            reasonCode: "ORDER_VERIFICATION_PENDING", reason: "미확인 주문의 보유 종목 자리 확보 · 신규매수 대기" };
+        }
+      }
       if (!saved) {
         const choice = chooseAccount(record, snapshots, routes);
+        if (!choice.brokerId && snapshots.some(s => s.preview?.retryable)) {
+          return { label: broker.label, preview: snapshots.find(s => s.preview?.retryable).preview };
+        }
         routes[record.requestId] = { ...choice, requestId: record.requestId, symbol: symbolKey(record.payload),
           at: Date.parse(record.receivedAt), timeframe: record.payload.timeframe };
         receipts.write(); // Persist before approvals, reservations or broker HTTP.
@@ -1415,7 +1438,8 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
     await settlePendingBuys(broker, record, manual);
     record.positionPreview = (await previewFor(broker, record)).preview;
     record.accountVerified = true;
-    if (record.positionPreview?.retryable) return { status: "DEFER_REQUIRED", verificationPending: true };
+    if (record.positionPreview?.retryable) return { status: "DEFER_REQUIRED", verificationPending: true,
+      reason: record.positionPreview.reason, reasonCode: record.positionPreview.reasonCode };
     if (record.positionPreview?.skipStatus) {
       console.log(`${record.positionPreview.skipStatus}: ${record.payload.ticker} · ${record.positionPreview.reason}`);
       return { status: record.positionPreview.skipStatus, reason: record.positionPreview.reason };
@@ -1490,18 +1514,21 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
       if (!emergencyExit(record) && !sameTimeframe(previous.timeframe, record.payload.timeframe)) continue;
       const current = await refreshPaperOrder(previous, broker);
       if (!PENDING_ORDER_STATUSES.has(current.status)) continue;
-      if (current.status === "UNKNOWN" || current.cancelSubmitted) continue;
+      if (current.status === "UNKNOWN" || current.cancelSubmitted || current.cancellation?.status === "REJECTED") continue;
       const api = current.market === "KRX" ? broker.domesticClient : broker.overseasClient;
       const cancel = current.market === "KRX" ? api.cancelDomesticOrder : api.cancelUsOrder;
       if (!cancel) continue;
       if (!manual && !receipts.autoTrading()) return;
-      broker.tracker.record({ ...current, cancelSubmitted: true });
+      broker.tracker.record({ ...current, cancelSubmitted: true,
+        cancellation: { status: "SUBMITTING", requestedAt: new Date().toISOString() } });
       try {
         const result = await cancel.call(api, { orderNo: current.activeOrderNo || current.orderNo,
           symbol: accountSymbol(current.symbol), exchange: signalExchange(current.market), quantity: current.remainingQuantity });
-        broker.tracker.record({ ...current, ...result, orderNo: current.orderNo, status: "CANCEL_REQUESTED", cancelSubmitted: true });
+        broker.tracker.record({ ...current, ...result, orderNo: current.orderNo, status: "CANCEL_REQUESTED", cancelSubmitted: true,
+          cancellation: { status: "REQUESTED", requestedAt: new Date().toISOString() } });
       } catch (error) {
-        broker.tracker.record({ ...current, cancelSubmitted: orderStatusUnknown(error) });
+        broker.tracker.record({ ...current, cancelSubmitted: orderStatusUnknown(error), cancellation: {
+          status: orderStatusUnknown(error) ? "UNKNOWN" : "REJECTED", requestedAt: new Date().toISOString() } });
         await reportError(`${broker.label} 매수 잔량 취소 확인 대기`, error, record);
       }
     }
@@ -1520,6 +1547,9 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
       for (const { current } of changes) {
         receipts.reconcileTradeStage(broker.id, current);
         if (orderNeedsPortfolioSync(current)) portfolioChanged = true;
+      }
+      for (const failure of (changes as any).failures || []) {
+        await reportError(`${broker.label} ${failure.symbol} 미완료 주문 조회 실패`, failure.error);
       }
       for (const order of broker.tracker.list()) {
         const intent = receipts.state.attempts[`${broker.id}:${order.requestId}`];
@@ -1540,8 +1570,22 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
     return portfolioChanged;
   }
 
-  async function executeOrDefer(broker, record, { retry = false, manual = false } = {}) {
+  async function executeOrDefer(broker, record, { retry = false, manual = false, fromInbox = false } = {}) {
     if (!readOnlySignalAllowed(record, readOnly)) return null;
+    function waitForVerification(reason = "계좌·주문 확인 대기", reasonCode = "ORDER_VERIFICATION_PENDING") {
+      if (Number.isFinite(record.executionDeadline) && Date.now() >= record.executionDeadline) {
+        const result = { status: "EXPIRED", reason: "확인 대기 중 신호 유효시간 종료" };
+        progress(broker, record, result);
+        return result;
+      }
+      if (!fromInbox) {
+        const deferred = receipts.putDeferred(broker.id, record, deferredTtlMs, { kind: "VERIFY" });
+        receipts.markVerificationFailure(deferred.key, new Error(reason));
+      }
+      const result = { status: "DEFER_REQUIRED", verificationPending: true, reason, reasonCode };
+      progress(broker, record, result);
+      return result;
+    }
     if (!retry && receipts.findDeferredEntry(broker.id, record)) {
       progress(broker, record, { status: "NO_ACTION", reason: "이전 진입 예약이 이미 대기 중 · 중복 예약 안 함" });
       return null;
@@ -1550,6 +1594,7 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
       if (!retry && !requiresExistingPosition(record) && shouldDelayOrder(record, new Date(), broker)) {
         if (allocated(broker, record)) {
           const { preview } = await previewFor(broker, record);
+          if (preview.retryable) return waitForVerification(preview.reason, preview.reasonCode);
           if (preview.blocked) {
             const result = { status: preview.skipStatus || "BLOCKED", reason: preview.reason };
             progress(broker, record, result);
@@ -1562,8 +1607,8 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
       }
       const result = await execute(broker, record, { manual });
       if (result?.status === "DEFER_REQUIRED") {
-        const deferred = receipts.putDeferred(broker.id, record, deferredTtlMs, { kind: result.verificationPending ? "VERIFY" : "ORDER" });
-        if (result.verificationPending) receipts.markVerificationFailure(deferred.key, new Error("이전 주문 종료 확인 대기"));
+        if (result.verificationPending) return waitForVerification(result.reason, result.reasonCode);
+        receipts.putDeferred(broker.id, record, deferredTtlMs);
         progress(broker, record, { status: "DEFER_REQUIRED" });
         return null;
       }
@@ -1589,10 +1634,7 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
         return { status: "UNKNOWN", orderStatusUnknown: true };
       }
       if (error?.accountVerificationFailed === true) {
-        const deferred = receipts.putDeferred(broker.id, record, deferredTtlMs, { kind: "VERIFY" });
-        receipts.markVerificationFailure(deferred.key, error);
-        progress(broker, record, { status: "DEFER_REQUIRED" });
-        return null;
+        return waitForVerification("계좌 조회 실패 · 신호 유효기간 내 재확인", "ACCOUNT_QUERY_FAILED");
       }
       if (shouldDeferOrder(record, error)) {
         if (!retry) {
@@ -1986,7 +2028,10 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
       const entry = (pendingApproval || ["PAPER_ENTRY", "PAPER_ADD"].includes(record.risk?.verdict)) && record.payload.action === "BUY";
       if (pendingApproval || (entry && buyApprovalRequiredForBroker(broker, record, receipts.autoTrading()))) {
         const result = await previewFor(broker, structuredClone(record));
-        if (result.preview?.retryable) return;
+        if (result.preview?.retryable) {
+          progress(broker, record, { status: "DEFER_REQUIRED", reason: result.preview.reason, reasonCode: result.preview.reasonCode });
+          return;
+        }
         if (receipts.supersededEntry(broker.id, record) || receipts.state.signals[record.requestId]?.approvalClosed) {
           progress(broker, record, { status: "CANCELLED", reason: "계좌 확인 중 청산 신호 수신 또는 승인 결정 완료" });
           receipts.completeBroker(item, broker.id);
@@ -2005,7 +2050,8 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
           progress(broker, record, { status: "APPROVAL" });
         }
       } else {
-        await executeOrDefer(broker, structuredClone(record));
+        const result = await executeOrDefer(broker, structuredClone(record), { fromInbox: true });
+        if (result?.verificationPending) return;
       }
       receipts.completeBroker(item, broker.id);
     } catch (error) {
