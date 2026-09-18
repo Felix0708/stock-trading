@@ -41,13 +41,37 @@ function assetReaderBrokers(env = process.env) {
     }
     brokers.push({id,environment,domesticClient,overseasClient,selectedCurrencies:true});
   }
+  if (env.ISA_BROKER) {
+    if (!["KIS", "KIWOOM"].includes(env.ISA_BROKER)) throw Error("ISA_BROKER는 KIS 또는 KIWOOM 한 곳만 지정하세요.");
+    const id = env.ISA_BROKER;
+    const appKey = env[`${id}_ISA_APP_KEY`], appSecret = env[`${id}_ISA_${id === "KIS" ? "APP_SECRET" : "SECRET_KEY"}`];
+    if (!appKey || !appSecret || (id === "KIS" && !/^\d{8}-\d{2}$/.test(env.KIS_ISA_ACCOUNT_NO || ""))) throw Error("ISA 전용 키·계좌 설정 누락");
+    if (id === "KIS" ? env.KIS_ISA_ACCOUNT_NO === env.KIS_LIVE_ACCOUNT_NO : [env.KIWOOM_LIVE_APP_KEY,env.KIWOOM_LIVE_DOMESTIC_APP_KEY].includes(appKey)) throw Error("일반계좌와 ISA를 중복 연결할 수 없습니다.");
+    const client = id === "KIS"
+      ? new KisClient({ appKey, appSecret, accountNo: env.KIS_ISA_ACCOUNT_NO, environment:"live", timeoutMs:30000 })
+      : new KiwoomClient({ appKey, secretKey:appSecret, environment:"live", timeoutMs:15000 });
+    if (id === "KIS") {
+      const request = client.request.bind(client);
+      client.request = (path, options) => {
+        if (path !== "/uapi/domestic-stock/v1/trading/inquire-balance" || (options.method && options.method !== "GET")) throw Error("ISA 잔고 조회 전용 · 다른 API 차단");
+        return request(path,options);
+      };
+    } else {
+      const post = client.post.bind(client);
+      client.post = (path,options) => {
+        if (path !== "/api/dostk/acnt" || !["ka00001","kt00001","kt00018"].includes(options.apiId)) throw Error("ISA 잔고 조회 전용 · 다른 API 차단");
+        return post(path,options);
+      };
+    }
+    brokers.push({id,environment:"live",accountKind:"isa",domesticClient:client,overseasClient:client,selectedCurrencies:false});
+  }
   return brokers;
 }
 
 async function refreshAssetReader(brokers, file, send = false, force = false) {
   const outcomes = [];
   for (const broker of brokers) {
-    try { const changed = await refreshAccountEquity(broker,file,new Date(),force); outcomes.push({broker:broker.id,environment:broker.environment,changed}); }
+    try { const changed = await refreshAccountEquity(broker,file,new Date(),force); outcomes.push({broker:broker.id,environment:broker.environment,accountKind:broker.accountKind || "general",changed}); }
     catch (error) { outcomes.push({broker:broker.id,environment:broker.environment,error:error instanceof Error && /8050/.test(error.message) ? "접속 IP 등록 필요" : "잔고 조회 실패"}); }
   }
   if (send) {

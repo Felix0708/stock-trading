@@ -172,3 +172,13 @@ closed-market skips are not recovery. Order/safety alerts keep their existing po
   [Official response labels](https://github.com/koreainvestment/open-trading-api/blob/main/examples_llm/overseas_stock/inquire_present_balance/chk_inquire_present_balance.py).
 - Cash-flow statements must explicitly carry the current `cashFlowCoverage.accountRef`;
   legacy statements cannot prove which account a deposit belongs to.
+# ISA 전용 자동 수집
+
+`.env.account`의 `ISA_BROKER`에 `KIS` 또는 `KIWOOM` 한 곳만 지정합니다. ISA 앱 등록을 완료한 전용 키를 사용하며 일반계좌 키·계좌번호를 ISA 슬롯에 복사하지 않습니다.
+
+- 한투: `KIS_ISA_APP_KEY`, `KIS_ISA_APP_SECRET`, `KIS_ISA_ACCOUNT_NO` (8자리-2자리).
+- 키움: `KIWOOM_ISA_APP_KEY`, `KIWOOM_ISA_SECRET_KEY`. 키움 API 등록 계좌가 ISA여야 하며 등록 IP에서 조회합니다.
+- `start-asset-reader.sh`를 재시작하면 일반·모의계좌와 별도로 ISA를 수집합니다. 실행 중인 컴퓨터에서 기존 시간별 수집 일정을 따릅니다. 주문 실행기·실주문 허용값은 변경하지 않습니다.
+- ISA는 국내 잔고 API만 허용합니다. 총자산, D+2 예수금, 보유종목 평가액 합계를 검증하며 일부 페이지·누락 금액·불일치는 전체 잔고로 전송하지 않습니다.
+- 전송되는 `account_kind: "isa"`와 `isa_holdings`에는 계좌번호·키가 포함되지 않습니다. Stock-Briefing 실계좌 화면의 ISA 카드에서 잔고와 종목을 표시하며, 모의 화면·일반 해외주식 세금에는 넣지 않습니다.
+- 직접 등록한 종목은 삭제·변경하지 않습니다. ISA 카드 안 종목은 위 총자산의 구성내역이며 등록 보유종목을 총자산에 다시 더하지 않습니다.

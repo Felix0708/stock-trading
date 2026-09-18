@@ -21,6 +21,32 @@ const { assetReaderBrokers } = require("../src/executor/asset-reader");
     KIS_LIVE_APP_KEY:"test",KIS_LIVE_APP_SECRET:"test",KIS_LIVE_ACCOUNT_NO:"12345678-01"});
   assert.equal(clients.length,2); assert.ok(clients.every(b=>b.environment==="live"&&b.selectedCurrencies));
   assert.equal(assetReaderBrokers({KIWOOM_DOMESTIC_APP_KEY:"legacy",KOREA_INVESTMENT_APP_KEY:"legacy"}).length,0);
+  const {collectIsaEquity}=require('../src/brokers/isa-equity');
+  const {accountEquitySeries}=require('../src/integrations/account-equity');
+  const {recordAccountEquity,readEvidence}=require('../src/executor/account-evidence');
+  for(const id of ['KIS','KIWOOM']) {
+    const config={ISA_BROKER:id,KIS_ISA_APP_KEY:'isa-key',KIS_ISA_APP_SECRET:'isa-secret',KIS_ISA_ACCOUNT_NO:'12345678-01',KIWOOM_ISA_APP_KEY:'isa-key',KIWOOM_ISA_SECRET_KEY:'isa-secret'};
+    const isa=assetReaderBrokers(config)[0];assert.equal(isa.accountKind,'isa');assert.equal(isa.environment,'live');
+    if(id==='KIS') {
+      assert.throws(()=>isa.domesticClient.request('/uapi/domestic-stock/v1/trading/order',{method:'POST'}),/차단/);
+      isa.domesticClient.request=async()=>({output2:[{nass_amt:'1000',scts_evlu_amt:'600',prvs_rcdl_excc_amt:'400',dnca_tot_amt:'99999',tot_loan_amt:'0'}],output1:[{pdno:'005930',prdt_name:'삼성전자',hldg_qty:'2',evlu_amt:'600'}]});
+    } else {
+      assert.throws(()=>isa.domesticClient.post('/api/dostk/ordr',{apiId:'kt10000'}),/차단/);
+      assert.throws(()=>isa.domesticClient.post('/api/us/acnt',{apiId:'ust21120'}),/차단/);
+      isa.domesticClient.post=async(_p,o)=>o.apiId==='kt00001'?{d2_entra:'400'}:{prsm_dpst_aset_amt:'1000',tot_evlt_amt:'600',tot_loan_amt:'0',tot_crd_loan_amt:'0',tot_crd_ls_amt:'0',acnt_evlt_remn_indv_tot:[{stk_cd:'A005930',stk_nm:'삼성전자',rmnd_qty:'2',evlt_amt:'600'}]};
+    }
+    const point=await collectIsaEquity(isa);assert.equal(point.equity,1000);assert.equal(point.cash,400);assert.equal(point.isa_holdings.length,1);
+    const state=readEvidence('/nonexistent-isa-fixture');recordAccountEquity(state,isa,[point],new Date().toISOString());
+    const series=accountEquitySeries(state)[0];assert.equal(series.account_kind,'isa');assert.equal(series.account_type,'live');assert.equal(series.points[0].isa_holdings[0].code,'005930');
+    await assert.rejects(collectIsaEquity({...isa,environment:'mock'}));
+    if(id==='KIS') {
+      isa.domesticClient.request=async()=>({continuation:true,output2:[{}],output1:[]});
+      await assert.rejects(collectIsaEquity(isa),/確認|확인/);
+      assert.throws(()=>assetReaderBrokers({...config,KIS_LIVE_ACCOUNT_NO:'12345678-01'}),/중복/);
+    }
+  }
+  assert.throws(()=>assetReaderBrokers({ISA_BROKER:'BOTH'}),/한 곳/);
+  assert.throws(()=>assetReaderBrokers({ISA_BROKER:'KIS'}),/누락/);
   assert.throws(()=>clients[0].overseasClient.post("/api/us/ordr",{apiId:"ust10000"}),/차단/);
   assert.throws(()=>clients[1].overseasClient.request("/uapi/overseas-stock/v1/trading/order",{method:"POST"}),/차단/);
   assert.throws(()=>clients[1].overseasClient.request("/uapi/overseas-stock/v1/trading/inquire-balance",{method:"POST"}),/차단/);

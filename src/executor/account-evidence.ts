@@ -64,10 +64,12 @@ function equityGroupRef(state, broker) {
 }
 
 function equityScopes(broker) {
+  if (broker.accountKind === "isa") return ["account-total-assets"];
   return broker.id === "KIWOOM" ? [...(broker.domesticClient ? ["domestic"] : []), "overseas"] : ["account-total-assets"];
 }
 
 async function collectAccountEquity(broker, scope = broker.id === "KIWOOM" ? "overseas" : "account-total-assets") {
+  if (broker.accountKind === "isa") return [await require("../brokers/isa-equity").collectIsaEquity(broker)];
   const points = [await (scope === "domestic" ? broker.domesticClient.getDomesticEquity({ includeProof: true, selectedCurrencies: !!broker.selectedCurrencies })
     : broker.overseasClient.getAccountEquity({ includeProof: !!broker.domesticClient, includeBreakdown: true, selectedCurrencies: !!broker.selectedCurrencies }))];
   if (points.some(row => !row || row.scope !== scope || row.currency !== (scope === "overseas" ? "USD" : "KRW")
@@ -137,7 +139,7 @@ async function refreshAccountEquity(broker, file, now = new Date(), force = fals
       failures.push(message);
     }
   }
-  if (broker.id === "KIWOOM" && broker.domesticClient && attemptedCollection) {
+  if (broker.id === "KIWOOM" && broker.accountKind !== "isa" && broker.domesticClient && attemptedCollection) {
     try {
       const total = await collectKiwoomTotal(broker, freshPoints);
       const state = readEvidence(file);

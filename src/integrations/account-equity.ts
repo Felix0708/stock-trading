@@ -47,7 +47,8 @@ function accountEquitySeries(state, calculatedAt = new Date().toISOString()) {
       || !["KIWOOM", "KIS"].includes(row.brokerId) || !["mock", "live"].includes(row.environment)
       || !["KIWOOM:domestic:KRW", "KIWOOM:overseas:USD", "KIWOOM:account-total-assets:KRW", "KIS:account-total-assets:KRW"].includes(`${row.brokerId}:${row.scope}:${row.currency}`)
       || (row.accountGroupRef != null && !/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(row.accountGroupRef))
-      || (row.brokerId === "KIWOOM" && row.scope === "account-total-assets" && ((!row.breakdown && !row.currency_breakdown) || !row.accountGroupRef || row.source !== "KIWOOM:linked-accounts:v1"))
+      || (row.accountKind === "isa" && (row.environment !== "live" || row.scope !== "account-total-assets" || row.currency !== "KRW" || row.source !== `${row.brokerId}:isa:domestic`))
+      || (row.brokerId === "KIWOOM" && row.scope === "account-total-assets" && row.accountKind !== "isa" && ((!row.breakdown && !row.currency_breakdown) || !row.accountGroupRef || row.source !== "KIWOOM:linked-accounts:v1"))
       || !Number.isFinite(Date.parse(row.at)) || Date.parse(row.at) > Date.parse(calculatedAt)) throw Error("자산 전송 계좌·범위·시각 오류");
     const key = [row.accountRef, row.brokerId, row.environment, row.currency, row.scope].join(":");
     if (!groups.has(key)) groups.set(key, []);
@@ -68,6 +69,7 @@ function accountEquitySeries(state, calculatedAt = new Date().toISOString()) {
     return {
       account_ref: first.accountRef, broker: first.brokerId, account_type: first.environment === "mock" ? "paper" : "live",
       currency: first.currency, scope: first.scope, date_timezone: "Asia/Seoul",
+      ...(first.accountKind === "isa" ? { account_kind: "isa" } : {}),
       ...(groupRefs.length === 1 ? { account_group_ref: groupRefs[0] } : {}), // A changed linked account never relabels the old history.
       return_method: curve.size ? "daily-sampled-linked-modified-dietz" : null,
       return_base_at: curve.size ? samples[0].at : null,
@@ -77,6 +79,7 @@ function accountEquitySeries(state, calculatedAt = new Date().toISOString()) {
         equity: decimal(row.equity), cash: decimal(row.cash, true), stock_value: decimal(row.stockValue),
         return_index: curve.has(row.at) ? decimal(curve.get(row.at)) : null,
         return_status: curve.has(row.at) ? "verified" : performance.status,
+        ...(row.accountKind === "isa" ? { isa_holdings: row.isa_holdings } : {}),
         source: row.brokerId === "KIS" ? "KIS_ACCOUNT_EQUITY" : row.scope === "domestic" ? "KIWOOM_KR_EQUITY"
           : row.scope === "overseas" ? "KIWOOM_US_EQUITY" : "KIWOOM_ACCOUNT_EQUITY",
         ...serializeBreakdown(row),
