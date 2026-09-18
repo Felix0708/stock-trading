@@ -7,6 +7,7 @@
 | 문서 | 역할 |
 |---|---|
 | [설치 안내](../README.md) | 설정·실행·선택 기능 |
+| [공개 개발 기록](CHANGELOG.md) | 개인 운영 내역을 제외한 기술 변경과 지원 한계 |
 | [합성 JSON](webhook.example.json) | 현재 수신 필드의 테스트 예시. 실제 시세·매매 신호가 아님 |
 | [AI 대화 기준 예시](shared-trading-context.example.md) | 개인 설정 없이 사용하는 공통 사실 확인 원칙 |
 | [계좌 실행기](account-executor.md) | 계좌별 승인·실행·복구 |
