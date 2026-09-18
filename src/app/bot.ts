@@ -2172,15 +2172,20 @@ async function notifyTunnelStartup() {
   } catch { return false; }
 }
 
-function startTunnelStartupNotifier(remaining = 15) {
-  void notifyTunnelStartup().then((notified) => {
-    if (notified) return;
-    if (remaining <= 1) {
-      console.warn("ngrok 터널 시작 알림 실패: 로컬 터널을 확인하지 못했습니다.");
-      return;
-    }
-    setTimeout(() => startTunnelStartupNotifier(remaining - 1), 2_000).unref();
-  });
+async function startTunnelStartupNotifier(
+  attempt = 0, notify = notifyTunnelStartup,
+  schedule: (callback: () => Promise<void>, delay: number) => void = (callback, delay) => { setTimeout(callback, delay).unref(); },
+  log: Pick<Console, "info" | "warn"> = console,
+) {
+  let notified = false;
+  try { notified = await notify(); } catch { /* Retry transient lookup or Discord failures. */ }
+  if (notified) {
+    log.info(attempt >= 15 ? "ngrok 터널 연결 확인·시작 알림 복구 완료" : "ngrok 터널 연결 확인·시작 알림 완료");
+    return;
+  }
+  if (attempt === 14) log.warn("ngrok 터널 연결·시작 알림 확인 대기: 30초 간격으로 재확인합니다.");
+  // Keep one startup retry chain; stop as soon as delivery succeeds.
+  schedule(() => startTunnelStartupNotifier(attempt + 1, notify, schedule, log), attempt < 14 ? 2_000 : 30_000);
 }
 
 async function runSignalReviewBatch(records) {
@@ -2831,14 +2836,28 @@ async function main() {
   startScheduledPaperExitScheduler();
   startSignalReviewBatcher();
   await notifySignalServerStartup();
-  startTunnelStartupNotifier();
+  if (WEBHOOK_ENABLED) void startTunnelStartupNotifier();
   startTelegramScheduler();
   startInvestorPortfolioScheduler();
   startBriefingScheduler();
   if (MANUAL_BRIEFING_TIME) await checkScheduledBriefing(new Date(), MANUAL_BRIEFING_TIME);
 }
 
-function selfTest() {
+async function selfTest() {
+  const assert = require("node:assert/strict");
+  const retries = [], notices = [];
+  let tunnelChecks = 0;
+  const notify = async () => { tunnelChecks++; if (tunnelChecks === 1) throw Error("temporary"); return tunnelChecks > 16; };
+  const log = { info: text => notices.push(text), warn: text => notices.push(text) };
+  await startTunnelStartupNotifier(0, notify, (callback, delay) => retries.push({ callback, delay }), log);
+  while (retries.length) {
+    const retry = retries.shift();
+    assert.equal(retry.delay, tunnelChecks < 15 ? 2_000 : 30_000);
+    await retry.callback();
+  }
+  assert.equal(tunnelChecks, 17, "Late tunnel startup must recover after the old retry limit");
+  assert.equal(notices.length, 2, "Log pending once and recovered once, then stop polling");
+  assert.match(notices[1], /복구 완료/);
   if (JSON.stringify(codexModelArgs()) !== JSON.stringify(["--model", CODEX_MODEL, "--config", `model_reasoning_effort="${CODEX_REASONING_EFFORT}"`])) throw Error("일반 대화 모델 설정 실패");
   if (JSON.stringify(codexModelArgs({ model: "gpt-5.6-sol", effort: "high" })) !== JSON.stringify(["--model", "gpt-5.6-sol", "--config", 'model_reasoning_effort="high"'])) throw Error("브리핑 모델 설정 실패");
   const scheduleClock = { date: "2026-09-10", time: "18:30" }, times = ["08:30", "15:40", "22:00"];
@@ -3016,7 +3035,7 @@ function selfTest() {
   console.log("self-test OK");
 }
 
-if (process.argv.includes("--self-test")) selfTest();
+if (process.argv.includes("--self-test")) selfTest().catch(error => { console.error(error); process.exitCode = 1; });
 else if (process.argv.includes("--refresh-investor-portfolios")) {
   const persona = PERSONAS[0];
   const client = new Client({ intents: [GatewayIntentBits.Guilds] });

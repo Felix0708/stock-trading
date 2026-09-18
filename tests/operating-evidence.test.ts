@@ -110,6 +110,17 @@ const { probe, monitor, marker } = require("../scripts/monitor-health.cjs");
   assert.equal(alertEvidenceSummary(items, alertEvidence, now).verified, 1); // Receipt does not prove currently active.
   applyAlertSnapshot(alertEvidence, items, { capturedAt: now.toISOString(), source: "TradingView alert manager visible UI", rows: [{ ticker: "NVDA", timeframe: "1D", status: "Active" }] }, now);
   assert.equal(alertEvidenceSummary(items, alertEvidence, now).verified, 2);
+  const snapshot = { capturedAt: now.toISOString(), source: "TradingView alert manager visible UI", rows: [{ ticker: "NVDA", timeframe: "1D", status: "Active" }] };
+  const beforeEvidence = structuredClone(alertEvidence);
+  assert.equal(applyAlertSnapshot(alertEvidence, items, snapshot, new Date("2026-09-15T00:00:00Z")), 0);
+  assert.deepEqual(alertEvidence, beforeEvidence, "Stale evidence must not advance verification timestamps");
+  assert.equal(alertEvidenceSummary(items, alertEvidence, new Date("2026-09-15T00:00:00Z")).verified, 0);
+  for (const capturedAt of ["invalid", "2026-09-08T00:00:00Z"]) assert.throws(() => applyAlertSnapshot({}, items, { ...snapshot, capturedAt }, now), /시각/);
+  assert.throws(() => applyAlertSnapshot({}, items, { ...snapshot, rows: null }, now), /형식/);
+  assert.throws(() => applyAlertSnapshot({}, items, { ...snapshot, source: "unverified" }, now), /출처/);
+  const stoppedEvidence = {};
+  applyAlertSnapshot(stoppedEvidence, items, { ...snapshot, rows: [null, { ticker: "NVDA", timeframe: "1D", status: "Stopped" }] }, now);
+  assert.equal(alertEvidenceSummary(items, stoppedEvidence, now).rows[1].status, "중단 확인·재확인 필요");
   const hash = policyFingerprint({}); assert.equal(hash.length, 64); assert.throws(() => assertLivePolicy({ KIS: "live" }, false, hash, {}));
   assert.notEqual(hash, policyFingerprint({ KIS_LIVE_AFTER_MARKET_EXTENDED: "true" }));
   assert.notEqual(hash, policyFingerprint({ ACCOUNT_SIGNAL_MAX_AGE_MINUTES: "60" }));
