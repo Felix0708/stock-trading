@@ -263,6 +263,7 @@ async function submitPaperOrder(record: SignalRecord, options: ExecutorOptions) 
   let limitPrice;
   let referencePrice;
   let marketFallbackAllowed = false;
+  let orderRequestedAt: string;
   if (exchange === "KRX") {
     client = options.domesticClient;
     if (!/^\d{6}$/.test(payload.ticker)) return blocked("국내주식 종목코드는 6자리여야 함");
@@ -281,6 +282,7 @@ async function submitPaperOrder(record: SignalRecord, options: ExecutorOptions) 
       ? `최유리 IOC 최대 2회${marketFallbackAllowed ? " 후 급락 손절 잔량만 시장가" : " · 시장가 전환 없음"}`
       : ({ PRE: "장전 시간외 종가", AFTER_CLOSE: "장후 시간외 종가", AFTER_SINGLE: "시간외 단일가 지정가", CLOSED: "장 종료" } as Record<string, string>)[session];
     if (!canSubmit()) return blocked("자동매매 OFF · 주문 송신 중지");
+    orderRequestedAt = new Date().toISOString();
     order = await client.placeDomesticMarketOrder({
       side, symbol: payload.ticker, quantity, price: payload.price,
       session, orderStyle,
@@ -312,6 +314,7 @@ async function submitPaperOrder(record: SignalRecord, options: ExecutorOptions) 
       orderStrategy = record.originalSignalPrice !== undefined ? "주문 직전 현재가 지정가" : "신호가 지정가";
     }
     if (!canSubmit()) return blocked("자동매매 OFF · 주문 송신 중지");
+    orderRequestedAt = new Date().toISOString();
     order = await client.placeUsLimitOrder({
       side, exchange: kiwoomExchange, symbol: payload.ticker,
       quantity, price: limitPrice,
@@ -320,6 +323,8 @@ async function submitPaperOrder(record: SignalRecord, options: ExecutorOptions) 
     order.exchange = kiwoomExchange;
   }
   const trackedOrder = {
+    signalReceivedAt: record.receivedAt || null,
+    orderRequestedAt, orderAcceptedAt: new Date().toISOString(),
     ...(record.executorReportable ? { executorReportable: true } : {}),
     ...order, orderQuantity: quantity, filledQuantity: 0, remainingQuantity: quantity,
     orderStyle, orderStrategy, marketFallbackAllowed, limitPrice, referencePrice,

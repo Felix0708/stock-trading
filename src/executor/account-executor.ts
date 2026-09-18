@@ -1334,7 +1334,7 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
       receipts.write();
     }
     const channel = await targetChannel(channels.portfolio);
-    const result = await syncAccountPortfolio(channel, brokers);
+    const result = await syncAccountPortfolio(channel, brokers, new Date().toISOString(), receipts.state.signals);
     const recent = await channel.messages.fetch({ limit: 100 });
     const existing = [...recent.values()].find((message: any) => message.author?.id === client.user?.id
       && message.embeds?.some(embed => embed.title === "자동매매 전략 비교"));

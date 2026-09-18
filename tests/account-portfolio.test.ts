@@ -2,6 +2,7 @@
 
 const assert = require("node:assert/strict");
 const { calculateTradingPerformance, harmonizePortfolioNames, syncAccountPortfolio, tradingPerformanceSnapshot, strategyComparison, formatStrategyComparisonMessage, sigmaBand } = require("../src/executor/account-portfolio");
+const { evaluateExecution } = require("../src/executor/trade-evaluation");
 
 const emptyBroker = (id, label): any => ({
   id, label, environment: id === "KIS" ? "live" : "mock",
@@ -64,7 +65,10 @@ const emptyBroker = (id, label): any => ({
       timeframe: "4H", signalCode: "ENTRY_STANDARD", sizingContext: { sigmaZ: 2.5 }, policyVersion: "test-v1", executionCosts: cost(10), createdAt: "2026-09-01T00:00:00Z" },
     { environment: "mock", side: "SELL", market: "NASDAQ", symbol: "TEST", status: "CANCELLED", filledQuantity: 2, fillPrice: 120, signalPrice: 118, executionCosts: cost(2), createdAt: "2026-09-02T00:00:00Z" },
     { environment: "mock", side: "SELL", market: "NASDAQ", symbol: "TEST", status: "FILLED", filledQuantity: 8, fillPrice: 90, signalPrice: 95, executionCosts: cost(8), createdAt: "2026-09-03T00:00:00Z" },
-  ];
+  ].map((order, index) => ({ ...order, policyHash: "a".repeat(64),
+    createdAt: `2026-09-0${index + 1}T14:00:01Z`, signalReceivedAt: `2026-09-0${index + 1}T14:00:00Z`,
+    orderRequestedAt: `2026-09-0${index + 1}T14:00:01Z`, orderAcceptedAt: `2026-09-0${index + 1}T14:00:02Z`,
+    lastFillAt: `2026-09-0${index + 1}T14:00:03Z` }));
   const comparisonBroker = { ...emptyBroker("KIWOOM", "키움"), tracker: { list: () => strategyOrders } };
   const comparison = strategyComparison(comparisonBroker, { blocked: { record: { payload: { timeframe: "D", sb_z_score: 3.6 }, outcome: { signal: { signalCode: "ENTRY_MOMENTUM" } } }, progress: { KIWOOM: { status: "BLOCKED", reason: "Sigma 과열" } } } });
   assert.equal(comparison.groups.length, 4);
@@ -75,7 +79,7 @@ const emptyBroker = (id, label): any => ({
   assert.equal(comparison.groups[0].realizedDrawdown, 40);
   assert.equal(comparison.blocked[0].count, 1);
   assert.equal(comparison.groups[0].count, 1); // blocked signals are never fictional trades
-  const cohorts = ["policy-a", "policy-b"].flatMap(policyHash => strategyOrders.map(order => ({ ...order,
+  const cohorts = ["a".repeat(64), "b".repeat(64)].flatMap(policyHash => strategyOrders.map(order => ({ ...order,
     symbol: policyHash, policyHash })));
   const cohortBroker = { ...comparisonBroker, tracker: { list: () => cohorts } };
   const cohortGroups = strategyComparison(cohortBroker).groups.filter(group => group.dimension === "timeframe");
@@ -91,8 +95,8 @@ const emptyBroker = (id, label): any => ({
   const comparisonCard = formatStrategyComparisonMessage([comparisonBroker, comparisonBroker]);
   assert(JSON.stringify(comparisonCard).length < 6000);
   assert.match(JSON.stringify(comparisonCard), /비용 미확인을 0원으로 보지 않음/);
-  assert.match(comparisonCard.embeds[0].fields[0].value, /^4시간봉/);
-  assert.match(comparisonCard.embeds[0].fields[1].value, /^정석 진입/);
+  assert.match(comparisonCard.embeds[0].fields[1].value, /^4시간봉/);
+  assert.match(comparisonCard.embeds[0].fields[2].value, /^정석 진입/);
   const incidentOrders = strategyOrders.map(order => ({ ...order, evaluationIssues: ["운영 장애 증빙 test-incident"] }));
   const incidentBroker = { ...comparisonBroker, tracker: { list: () => incidentOrders } };
   assert.equal(calculateTradingPerformance(incidentOrders).all.count, 1, "actual outcomes remain in total performance");
@@ -102,7 +106,48 @@ const emptyBroker = (id, label): any => ({
   assert.equal(separated.operational.length, 1);
   assert.deepEqual(separated.operational[0].evaluationIssues, ["운영 장애 증빙 test-incident"]);
   assert.match(JSON.stringify(formatStrategyComparisonMessage([incidentBroker])), /실제 손익·전체 승률에는 포함/);
-  assert.match(comparisonCard.embeds[0].fields[0].value, /실현손익 낙폭 \$40/);
+  assert.match(comparisonCard.embeds[0].fields[1].value, /실현손익 낙폭 \$40/);
+  assert.equal(comparison.evaluation.eligible_count, 1);
+  assert.equal(comparison.evaluation.cohorts[0].win_rate, 0);
+  assert.equal(comparison.evaluation.cohorts[0].net_profit_loss, -43);
+  const beforeAudit = JSON.stringify(strategyOrders);
+  const delayedOrders = strategyOrders.map((order, index) => index ? order : ({ ...order,
+    signalReceivedAt: "2026-08-31T20:00:00Z", orderRequestedAt: "2026-09-01T13:30:00Z",
+    orderAcceptedAt: "2026-09-01T13:30:01Z", lastFillAt: "2026-09-01T13:30:03Z" }));
+  const delayed = calculateTradingPerformance(delayedOrders);
+  assert.equal(delayed.all.currencies.USD.profitLoss, -40, "classification never adjusts actual P/L");
+  assert.deepEqual(delayed.completed[0].evaluationCategories, ["MOCK_SESSION_LIMIT"]);
+  assert.equal(delayed.evaluation.excluded_count, 1);
+  assert.equal(delayed.evaluation.reason_counts.MOCK_SESSION_LIMIT, 1);
+  assert.equal(delayed.completed[0].executions[0].signalToRequestMs, 17.5 * 3600_000);
+  assert.equal(delayed.completed[0].executions[0].fillTimeSource, "LOCAL_OBSERVATION");
+  const favorable = calculateTradingPerformance(delayedOrders.map(o => ({ ...o, fillPrice: o.side === "BUY" ? 80 : 120 })));
+  assert.equal(favorable.all.wins, 1);
+  assert.equal(favorable.evaluation.eligible_count, 0, "favorable delayed trades are excluded equally");
+  const legacy = calculateTradingPerformance(strategyOrders.map(o => ({ ...o, policyHash: null, orderRequestedAt: null })));
+  assert.equal(legacy.all.count, 1);
+  assert.equal(legacy.evaluation.reason_counts.DATA_INSUFFICIENT, 1, "count trades, not partial fills");
+  const noFillTime = evaluateExecution({ ...strategyOrders[0], lastFillAt: null, updatedAt: "2026-09-01T14:00:03Z" });
+  assert(noFillTime.categories.includes("DATA_INSUFFICIENT"));
+  assert.equal(noFillTime.timing.fillObservedAt, null, "updatedAt is not fill evidence");
+  const fillWait = evaluateExecution({ ...strategyOrders[0], lastFillAt: "2026-09-01T15:00:00Z" });
+  assert.deepEqual(fillWait.categories, ["EXECUTION_DELAY_UNATTRIBUTED"]);
+  assert.equal(fillWait.timing.signalToRequestMs, 1000);
+  assert(fillWait.timing.acceptanceToFillMs > 300000);
+  const korea = evaluateExecution({ ...strategyOrders[0], market: "KRX", symbol: "005930" });
+  assert(!korea.categories.includes("MOCK_SESSION_LIMIT"), "do not impose US sessions on domestic orders");
+  const live = evaluateExecution({ ...delayedOrders[0], environment: "live" });
+  assert(!live.categories.includes("MOCK_SESSION_LIMIT"));
+  const incident = evaluateExecution(strategyOrders[0], { record: { receivedAt: strategyOrders[0].signalReceivedAt,
+    payload: { ticker: "TEST", action: "BUY" } }, progressHistory: [
+      { brokerId: "KIWOOM", updatedAt: Date.parse(strategyOrders[0].orderRequestedAt), reason: "계좌 조회 실패", status: "DEFER_REQUIRED" },
+      { brokerId: "KIS", updatedAt: Date.parse(strategyOrders[0].orderRequestedAt), reason: "승인", status: "APPROVAL" },
+    ] }, { id: "KIWOOM" });
+  assert.deepEqual(incident.categories, ["SYSTEM_INCIDENT"]);
+  assert.equal(JSON.stringify(strategyOrders), beforeAudit, "read-only audit never modifies order history");
+  const evaluationSnapshot = tradingPerformanceSnapshot([{ ...comparisonBroker, tracker: { list: () => delayedOrders } }])[0];
+  assert.equal(evaluationSnapshot.evaluation.total_count, evaluationSnapshot.all.count);
+  assert.equal(evaluationSnapshot.evaluation.cohorts.length, 0);
   const snapshot = tradingPerformanceSnapshot([{ ...emptyBroker("KIWOOM", "키움"), tracker: { list: () => [
     { environment: "mock", revision: 1, status: "FILLED", side: "SELL", fullExit: true, market: "KRX", symbol: "005930", filledQuantity: 1, fillPrice: 80_000, preTradeAverageEntryPrice: 70_000, updatedAt: "2026-08-04T00:00:00.000Z" },
   ] } }], "2026-08-10T00:00:00.000Z");

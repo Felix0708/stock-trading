@@ -91,12 +91,16 @@ async function responseJson(response, maxLength = 1_000_000) {
 
 async function syncStockBriefingHoldings(accounts, {
   performance = [],
+  evaluationEnabled = process.env.STOCK_BRIEFING_PERFORMANCE_EVALUATION_ENABLED === "true",
   token = process.env.STOCK_BRIEFING_TOKEN,
   apiUrl = process.env.STOCK_BRIEFING_URL,
   fetchImpl = fetch,
 } = {}) {
   if (!TOKEN_PATTERN.test(String(token || ""))) throw new Error("STOCK_BRIEFING_TOKEN 형식이 올바르지 않습니다.");
   const holdings = stockBriefingSnapshot(accounts);
+  // Rolling deployment: legacy receivers must keep syncing holdings until DB + web are ready.
+  performance = performance.map(({ evaluation, ...rest }) => evaluationEnabled && evaluation?.cohorts?.length <= 100
+    ? { ...rest, evaluation } : rest);
   let response;
   try {
     response = await fetchImpl(`${baseUrl(apiUrl, DEFAULT_API_URL)}/api/sync/holdings`, {

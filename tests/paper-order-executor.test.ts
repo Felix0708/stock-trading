@@ -154,8 +154,9 @@ const record = {
   assert.equal((await trackPaperTestOrder(accepted, { ...options, attempts: 1, delayMs: 0 })).status, "FILLED");
 
   const autoTracker = new OrderTracker(path.join(directory, "auto-orders.json"));
-  autoTracker.record({ orderNo: "entry-aapl", market: "NASDAQ", symbol: "AAPL", side: "BUY", entryType: "PAPER_ENTRY", timeframe: "D", environment: "mock", status: "FILLED", filledQuantity: 8, fillPrice: 230 });
+  autoTracker.record({ orderNo: "entry-aapl", market: "NASDAQ", symbol: "AAPL", side: "BUY", entryType: "PAPER_ENTRY", timeframe: "D", environment: "mock", status: "FILLED", filledQuantity: 8, fillPrice: 230, createdAt: "2026-09-07T14:00:00Z" });
   const autoRecord = {
+    receivedAt: "2026-09-08T14:00:00Z",
     payload: { ticker: "AAPL", exchange: "NASDAQ", timeframe: "D", action: "BUY", price: 250 },
     risk: { verdict: "PAPER_ADD" },
     positionPreview: {
@@ -188,6 +189,9 @@ const record = {
     now: new Date("2026-09-08T14:00:00Z"),
   });
   assert.equal(auto.orderQuantity, 4);
+  assert.equal(auto.signalReceivedAt, autoRecord.receivedAt || null);
+  assert(Number.isFinite(Date.parse(auto.orderRequestedAt)));
+  assert(Date.parse(auto.orderAcceptedAt) >= Date.parse(auto.orderRequestedAt));
   assert.equal(auto.exchange, "ND");
   assert.equal(auto.plannedInvestment, 1000);
   assert.equal(auto.projectedPositionRatio, 12.5);

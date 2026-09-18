@@ -94,6 +94,23 @@ assert.throws(() => stockBriefingSnapshot([{
   assert.equal(JSON.parse(request.init.body).holdings.length, 6);
   assert.equal(JSON.parse(request.init.body).performance[0].all.count, 1);
   assert.deepEqual(new Set(JSON.parse(request.init.body).holdings.map((holding) => holding.broker)), new Set(["KIWOOM", "KIS"]));
+  const evaluated = [{ broker: "KIWOOM", account_type: "paper", all: { count: 0 },
+    evaluation: { version: 1, total_count: 0, eligible_count: 0, excluded_count: 0, reason_counts: {}, cohorts: [] } }];
+  for (const enabled of [false, true]) {
+    await syncStockBriefingHoldings(accounts, { token, performance: evaluated, evaluationEnabled: enabled,
+      apiUrl: "https://briefing.example", fetchImpl: async (_url, init) => {
+        const sent = JSON.parse(init.body).performance[0];
+        assert.equal("evaluation" in sent, enabled, "receiver rollout gate must not interrupt holdings sync");
+        assert.equal(sent.all.count, 0);
+        return Response.json({ ok: true, synced: 6 });
+      } });
+  }
+  assert.equal(evaluated[0].evaluation.version, 1, "transport does not mutate report");
+  await syncStockBriefingHoldings(accounts, { token, performance: [{ ...evaluated[0], evaluation: { cohorts: Array(101).fill({}) } }],
+    evaluationEnabled: true, apiUrl: "https://briefing.example", fetchImpl: async (_url, init) => {
+      assert.equal("evaluation" in JSON.parse(init.body).performance[0], false);
+      return Response.json({ ok: true, synced: 6 });
+    } });
 
   let calls = 0;
   await assert.rejects(() => syncStockBriefingHoldings(accounts, {

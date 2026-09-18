@@ -5,6 +5,7 @@ const { formatMyPortfolioMessage } = require("../research/investor-portfolio");
 const { orderTime, normalizedSymbol, normalizedTimeframe } = require("../trading/position-ownership");
 const { timeframeLabel } = require("../discord/webhook-discord");
 const { SIGNAL_RULES } = require("../signals/signal-normalizer");
+const { evaluateExecution, evaluationSummary, EVALUATION_REASONS } = require("./trade-evaluation");
 
 function positiveNumber(value) {
   const number = Number(value);
@@ -60,7 +61,7 @@ function addExecutionCosts(position, order) {
   } else position.signalPriceKnown = false;
 }
 
-function calculateTradingPerformance(orders, now = new Date()) {
+function calculateTradingPerformance(orders, now = new Date(), context: any = {}) {
   const positions = new Map();
   const completed = [];
   let excludedFullExits = 0;
@@ -69,6 +70,7 @@ function calculateTradingPerformance(orders, now = new Date()) {
     .sort((a, b) => orderTime(a) - orderTime(b));
 
   for (const order of filled) {
+    const evaluation = evaluateExecution(order, context.signals?.[order.requestId], context);
     const key = positionKey(order);
     const quantity = positiveNumber(order.filledQuantity);
     const price = positiveNumber(order.fillPrice);
@@ -79,7 +81,7 @@ function calculateTradingPerformance(orders, now = new Date()) {
         costs: 0, costsKnown: true, signalPriceDifference: 0, signalPriceKnown: true,
         timeframe: normalizedTimeframe(order.timeframe) || "미확인", signalCode: order.signalCode || "미확인",
         sigmaBand: sigmaBand(order.sizingContext?.sigmaZ), policyVersion: order.policyVersion || "legacy", entryRequestId: order.requestId,
-        policyHash: order.policyHash || "legacy", evaluationIssues: [],
+        policyHash: order.policyHash || "legacy", evaluationIssues: [], evaluationCategories: [], executions: [],
       });
       const position = positions.get(key);
       if (position && ["PAPER_ENTRY", "PAPER_ADD"].includes(order.entryType)) {
@@ -88,6 +90,8 @@ function calculateTradingPerformance(orders, now = new Date()) {
         if (!price) position.reliable = false;
         addExecutionCosts(position, order);
         position.evaluationIssues.push(...(order.evaluationIssues || []));
+        position.evaluationCategories.push(...evaluation.categories);
+        position.executions.push({ side: order.side, quantity, ...evaluation.timing });
         if (normalizedTimeframe(order.timeframe) !== position.timeframe) position.timeframe = "혼합·미확인";
         if ((order.policyVersion || "legacy") !== position.policyVersion) position.policyVersion = "혼합";
         if ((order.policyHash || "legacy") !== position.policyHash) position.evaluationIssues.push("보유 중 정책 변경·설정 미확인");
@@ -102,7 +106,7 @@ function calculateTradingPerformance(orders, now = new Date()) {
       const held = positiveNumber(order.preTradePositionQuantity) || positiveNumber(order.orderQuantity) || quantity;
       position = { quantity: held, cost: held * brokerAverage, realizedBasis: 0, profitLoss: 0, reliable: true,
         costs: 0, costsKnown: false, signalPriceDifference: 0, signalPriceKnown: false,
-        timeframe: "미확인", signalCode: "미확인", sigmaBand: "미확인", policyVersion: "legacy", policyHash: "legacy", evaluationIssues: [] };
+        timeframe: "미확인", signalCode: "미확인", sigmaBand: "미확인", policyVersion: "legacy", policyHash: "legacy", evaluationIssues: [], evaluationCategories: ["DATA_INSUFFICIENT"], executions: [] };
       positions.set(key, position);
     }
     if (!position) {
@@ -111,6 +115,8 @@ function calculateTradingPerformance(orders, now = new Date()) {
     }
     addExecutionCosts(position, order);
     position.evaluationIssues.push(...(order.evaluationIssues || []));
+    position.evaluationCategories.push(...evaluation.categories);
+    position.executions.push({ side: order.side, quantity, ...evaluation.timing });
     if ((order.policyHash || "legacy") !== position.policyHash) position.evaluationIssues.push("보유 중 정책 변경·설정 미확인");
 
     // Reconstructed strategy cost takes precedence over an account average that may include manual holdings.
@@ -130,6 +136,8 @@ function calculateTradingPerformance(orders, now = new Date()) {
 
     // A full-exit intent or FILLED order does not mean the entire position has closed.
     if (position.quantity === 0) {
+      if (position.evaluationIssues.some(issue => /정책 변경/.test(issue))) position.evaluationCategories.push("POLICY_CHANGE");
+      if (position.timeframe === "미확인" || position.timeframe === "혼합·미확인" || position.signalCode === "미확인") position.evaluationCategories.push("DATA_INSUFFICIENT");
       if (position.reliable && position.realizedBasis > 0) completed.push({
         completedAt: order.reconciliationEvidence ? order.evidenceFilledAt : order.lastFillAt || order.resultAt || order.createdAt || order.updatedAt,
         currency: marketCurrency(order),
@@ -141,6 +149,7 @@ function calculateTradingPerformance(orders, now = new Date()) {
         timeframe: position.timeframe, signalCode: position.signalCode, sigmaBand: position.sigmaBand,
         policyVersion: position.policyVersion, policyHash: position.policyHash, entryRequestId: position.entryRequestId,
         symbol: normalizedSymbol(order.symbol), evaluationIssues: [...new Set(position.evaluationIssues)],
+        evaluationCategories: [...new Set(position.evaluationCategories)], executions: position.executions,
       });
       else excludedFullExits += 1;
       positions.delete(key);
@@ -153,13 +162,15 @@ function calculateTradingPerformance(orders, now = new Date()) {
     month: summarizeCompletedTrades(completed.filter((trade) => monthKey(trade.completedAt) === currentMonth)),
     excludedFullExits,
     completed,
+    evaluation: evaluationSummary(completed),
   };
 }
 
 function strategyComparison(broker, signals = {}) {
-  const performance = calculateTradingPerformance(brokerOrders(broker));
-  const operational = performance.completed.filter(trade => trade.evaluationIssues.length);
-  const eligible = performance.completed.filter(trade => !trade.evaluationIssues.length);
+  const orders = brokerOrders(broker);
+  const performance = calculateTradingPerformance(orders, new Date(), { id: broker.id, environment: broker.environment, signals });
+  const operational = performance.completed.filter(trade => trade.evaluationCategories.length);
+  const eligible = performance.completed.filter(trade => !trade.evaluationCategories.length);
   const dimensions = ["timeframe", "signalCode", "sigmaBand", "policyVersion"];
   const groups = [];
   for (const dimension of dimensions) {
@@ -196,7 +207,11 @@ function strategyComparison(broker, signals = {}) {
       sigmaBand(entry.record.payload?.sb_z_score), entry.record.policyVersion || "legacy", progress.reason || "사유 미확인"].join(" · ");
     blocked.set(key, (blocked.get(key) || 0) + 1);
   }
-  return { groups, operational, blocked: [...blocked].map(([label, count]) => ({ label, count })), excludedFullExits: performance.excludedFullExits };
+  return { groups, operational, eligible, evaluation: performance.evaluation, all: performance.all,
+    executionAudit: orders.map(order => ({ symbol: normalizedSymbol(order.symbol), side: order.side,
+      status: order.status, filledQuantity: order.filledQuantity || 0,
+      ...evaluateExecution(order, signals[order.requestId], broker) })),
+    blocked: [...blocked].map(([label, count]) => ({ label, count })), excludedFullExits: performance.excludedFullExits };
 }
 
 function formatStrategyComparisonMessage(brokers, signals = {}) {
@@ -208,11 +223,12 @@ function formatStrategyComparisonMessage(brokers, signals = {}) {
         `${dimension === "timeframe" ? timeframeLabel(group.label) : dimension === "signalCode" ? SIGNAL_RULES.find(([, code]) => code === group.label)?.[0] || group.label : group.label === "legacy" ? "과거 정책 미확인" : group.label} · ${group.currency} · ${group.count}건 · 승률 ${percentage(group.winRate)}\n손익 ${money(group.profitLoss, group.currency)} (${percentage(group.returnRate)}) · 실현손익 낙폭 ${group.realizedDrawdown === null ? "시각 미확인" : money(group.realizedDrawdown, group.currency).replace(/^\+/, "")}\n비용 차감 ${group.netProfitLoss === null ? `미확인 ${group.unknownCosts}건` : `${money(group.netProfitLoss, group.currency)} (${percentage(group.netReturnRate)})`}`
       ).map((text, index) => `${text}\n설정 ${comparison.groups.filter(group => group.dimension === dimension)[index].policyHash.slice(0, 8)}`).join("\n") || "비교할 최종청산 표본 없음" }));
     fields.push({ name: "차단 신호 (가상 수익에 합산하지 않음)", value: comparison.blocked.map(row => `${row.label}: ${row.count}건`).join("\n") || "계좌별 차단 기록 없음" });
-    if (comparison.operational.length) fields.push({ name: "운영 장애·보유 중 정책 변경 (전략 비교만 제외)",
-      value: comparison.operational.map(trade => `${trade.symbol} · ${money(trade.profitLoss, trade.currency)} · ${trade.evaluationIssues.join(" / ")}`).join("\n")
+    fields.unshift({ name: "전체 실제 성과 / 전략 비교용 표본", value: `최종청산 ${comparison.evaluation.total_count}건 · 비교 가능 ${comparison.evaluation.eligible_count}건 · 제외 ${comparison.evaluation.excluded_count}건\n${evaluationReasonText(comparison.evaluation)}` });
+    if (comparison.operational.length) fields.push({ name: "실행 영향·자료 부족 (전략 비교만 제외)",
+      value: comparison.operational.map(trade => `${trade.symbol} · ${money(trade.profitLoss, trade.currency)} · ${trade.evaluationCategories.map(code => EVALUATION_REASONS[code]).join(" / ")}`).join("\n")
         + "\n실제 손익·전체 승률에는 포함. 장애가 없었을 때의 수익을 가정하지 않습니다." });
     return { title: "자동매매 전략 비교", description: `${broker.label} ${broker.environment === "live" ? "실계좌" : "모의계좌"} · 최초 진입 기준 분류 · 승률·수익률은 비용 전`,
-      color: 0x5865f2, fields: fields.map(field => ({ ...field, value: field.value.length > 480 ? `${field.value.slice(0, 400)}\n…전체: !account performance` : field.value })),
+      color: 0x5865f2, fields: fields.map(field => ({ ...field, value: field.value.length > 360 ? `${field.value.slice(0, 300)}\n…전체: !account performance` : field.value })),
       footer: { text: "실현손익 낙폭 ≠ 계좌 MDD · 비용 미확인을 0원으로 보지 않음 · 실제 체결가 사용" } };
   }), allowedMentions: { parse: [] } };
 }
@@ -250,9 +266,9 @@ function harmonizePortfolioNames(accounts) {
   }));
 }
 
-function tradingPerformanceSnapshot(brokers, updatedAt = new Date().toISOString()) {
+function tradingPerformanceSnapshot(brokers, updatedAt = new Date().toISOString(), signals = {}) {
   return brokers.map((broker) => {
-    const performance = calculateTradingPerformance(brokerOrders(broker), new Date(updatedAt));
+    const performance = calculateTradingPerformance(brokerOrders(broker), new Date(updatedAt), { id: broker.id, environment: broker.environment, signals });
     const summary = ({ count, wins, losses, draws, winRate }) => ({ count, wins, losses, draws, win_rate: winRate });
     const realized = Object.fromEntries(["KRW", "USD"].map((currency) => {
       const result = performance.all.currencies[currency];
@@ -264,6 +280,7 @@ function tradingPerformanceSnapshot(brokers, updatedAt = new Date().toISOString(
       all: summary(performance.all),
       month: summary(performance.month),
       realized,
+      evaluation: performance.evaluation,
       excluded_full_exits: performance.excludedFullExits,
       updated_at: updatedAt,
     };
@@ -310,10 +327,14 @@ function summaryLine(label, summary) {
   return `**${label}** 완료 ${summary.count}건 · ${summary.wins}승 ${summary.losses}패${summary.draws ? ` ${summary.draws}보합` : ""} · 승률 ${percentage(summary.winRate)}`;
 }
 
-function formatTradingPerformanceMessage(brokers, updatedAt) {
+function evaluationReasonText(evaluation) {
+  return Object.entries(evaluation.reason_counts).map(([code, count]) => `${EVALUATION_REASONS[code]} ${count}건`).join(" · ") || "실행 영향 사유 없음 (자료가 있는 완료 거래 기준)";
+}
+
+function formatTradingPerformanceMessage(brokers, updatedAt, signals = {}) {
   const description = brokers.flatMap((broker, index) => {
     const accountKind = broker.environment === "live" ? "실계좌" : "모의계좌";
-    const performance = calculateTradingPerformance(brokerOrders(broker));
+    const performance = calculateTradingPerformance(brokerOrders(broker), new Date(updatedAt || Date.now()), { id: broker.id, environment: broker.environment, signals });
     const results = ["KRW", "USD"].flatMap((currency) => {
       const result = performance.all.currencies[currency];
       if (!result.count) return [];
@@ -325,6 +346,8 @@ function formatTradingPerformanceMessage(brokers, updatedAt) {
       summaryLine("역대", performance.all),
       summaryLine("이번 달", performance.month),
       ...results,
+      `전략 비교용 ${performance.evaluation.eligible_count}건 · 제외 ${performance.evaluation.excluded_count}건 (전체 실제 손익에는 포함)`,
+      evaluationReasonText(performance.evaluation),
       ...(performance.excludedFullExits ? [`과거 원가 미확인 청산 ${performance.excludedFullExits}건 제외`] : []),
     ];
   }).join("\n");
@@ -374,7 +397,7 @@ async function brokerPortfolio(broker) {
   };
 }
 
-async function syncAccountPortfolio(channel, brokers, updatedAt = new Date().toISOString()) {
+async function syncAccountPortfolio(channel, brokers, updatedAt = new Date().toISOString(), signals = {}) {
   const settled = await Promise.allSettled(brokers.map(brokerPortfolio));
   const accounts = harmonizePortfolioNames(settled.filter((result) => result.status === "fulfilled").map((result) => result.value));
   const failures = settled.flatMap((result, index) => result.status === "rejected"
@@ -389,14 +412,14 @@ async function syncAccountPortfolio(channel, brokers, updatedAt = new Date().toI
   const recent = await channel.messages.fetch({ limit: 100 });
   const existing = [...recent.values()].find((message) => message.embeds?.some((embed) => embed.title === "나의 포트폴리오"));
   const message = existing ? await existing.edit(payload) : await channel.send(payload);
-  const performancePayload = formatTradingPerformanceMessage(brokers, updatedAt);
+  const performancePayload = formatTradingPerformanceMessage(brokers, updatedAt, signals);
   const existingPerformance = [...recent.values()].find((candidate) => candidate.embeds?.some((embed) => embed.title === "자동매매 누적 성과"));
   const performanceMessage = existingPerformance ? await existingPerformance.edit(performancePayload) : await channel.send(performancePayload);
   return {
     message,
     performanceMessage,
     accounts,
-    performance: tradingPerformanceSnapshot(brokers, updatedAt),
+    performance: tradingPerformanceSnapshot(brokers, updatedAt, signals),
     taxEstimates: recordedTaxSnapshot(brokers, updatedAt),
     succeededBrokerIds: new Set(accounts.map((account) => account.id)),
     failures,
