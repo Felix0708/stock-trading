@@ -16,7 +16,7 @@ const { decodeSignalEmbed } = require("../discord/discord-signal-envelope");
 const { KiwoomClient, kiwoomCredentials } = require("../brokers/kiwoom-client");
 const { KisClient, kisCredentials } = require("../brokers/kis-client");
 const { enrichInstrumentNames, formatInstrumentLabel } = require("../research/instrument-names");
-const { stockBriefingSyncReady, syncStockBriefingHoldings, syncStockBriefingEquity, syncStockBriefingAccountStatus } = require("../integrations/stock-briefing");
+const { stockBriefingSyncReady, syncStockBriefingHoldings, syncStockBriefingEquity, syncStockBriefingAccountStatus, syncStockBriefingTax } = require("../integrations/stock-briefing");
 const { OrderTracker } = require("../trading/order-tracker");
 const { normalizedSymbol, normalizedTimeframe, sameTimeframe, emergencyExit, managedPosition, scopePositionPreview, restoreOrderSignalMetadata, orderTime } = require("../trading/position-ownership");
 
@@ -1298,6 +1298,8 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
     if (process.env.STOCK_BRIEFING_TOKEN && stockBriefingSyncReady(result, brokers.length)) {
       const synced = await syncStockBriefingHoldings(result.accounts, { performance: result.performance });
       console.log(`Stock-Briefing 보유종목 동기화: ${synced.synced}종목`);
+      try { await syncStockBriefingTax(result.taxEstimates); }
+      catch { console.error("Stock-Briefing 실계좌 매도 집계 전송 실패 · 다음 포트폴리오 동기화에서 재시도"); }
     }
     return result;
   }

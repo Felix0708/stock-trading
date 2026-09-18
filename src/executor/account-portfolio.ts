@@ -270,6 +270,30 @@ function tradingPerformanceSnapshot(brokers, updatedAt = new Date().toISOString(
   });
 }
 
+// Separate from strategy performance: include partial sells, never paper or open gains.
+function recordedTaxSnapshot(brokers, updatedAt = new Date().toISOString()) {
+  const year=Number(monthKey(updatedAt,"Asia/Seoul").slice(0,4));
+  return brokers.filter(broker=>broker.environment==="live").map(broker=>{
+    const row={broker:broker.id,account_type:"live",year,market:"US",sell_count:0,missing_count:0,profit_loss:0,updated_at:updatedAt};
+    for(const order of brokerOrders(broker)) {
+      if(order.side!=="SELL"||marketCurrency(order)!=="USD"||!positiveNumber(order.filledQuantity)) continue;
+      // Cumulative fills can span years; without per-fill timestamps that year cannot be reconstructed.
+      const at=order.reconciliationEvidence?order.evidenceFilledAt:order.lastFillAt;
+      if(typeof at!=="string"||!Number.isFinite(Date.parse(at))) {row.missing_count++;continue;}
+      const filledYear=Number(monthKey(at,"Asia/Seoul").slice(0,4));
+      const createdYear=Number(monthKey(order.createdAt,"Asia/Seoul").slice(0,4));
+      if(!filledYear) {row.missing_count++;continue;}
+      if(filledYear!==year) continue;
+      const price=positiveNumber(order.fillPrice),average=positiveNumber(order.preTradeAverageEntryPrice);
+      if(!price||!average||createdYear!==filledYear) {row.missing_count++;continue;}
+      row.sell_count++;
+      row.profit_loss+=(price-average)*order.filledQuantity;
+    }
+    row.profit_loss=Math.round(row.profit_loss*1e8)/1e8;
+    return row;
+  });
+}
+
 function percentage(value) {
   return Number.isFinite(value) ? `${value.toFixed(1)}%` : "-";
 }
@@ -373,6 +397,7 @@ async function syncAccountPortfolio(channel, brokers, updatedAt = new Date().toI
     performanceMessage,
     accounts,
     performance: tradingPerformanceSnapshot(brokers, updatedAt),
+    taxEstimates: recordedTaxSnapshot(brokers, updatedAt),
     succeededBrokerIds: new Set(accounts.map((account) => account.id)),
     failures,
   };
@@ -385,6 +410,7 @@ module.exports = {
   harmonizePortfolioNames,
   syncAccountPortfolio,
   tradingPerformanceSnapshot,
+  recordedTaxSnapshot,
   strategyComparison,
   formatStrategyComparisonMessage,
   sigmaBand,

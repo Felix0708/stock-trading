@@ -117,6 +117,21 @@ async function syncStockBriefingHoldings(accounts, {
   return { synced: Number(payload.synced) || 0, holdings, performance };
 }
 
+async function syncStockBriefingTax(records, {
+  token=process.env.STOCK_BRIEFING_TOKEN, apiUrl=process.env.STOCK_BRIEFING_URL, fetchImpl=fetch,
+} = {}) {
+  if(!TOKEN_PATTERN.test(String(token||""))) throw new Error("Stock-Briefing 연동 토큰 형식 오류");
+  if(!Array.isArray(records)||records.length>4||records.some(row=>row.account_type!=="live")) throw new Error("실계좌 매도 집계만 전송할 수 있습니다.");
+  if(!records.length) return 0;
+  const response=await fetchImpl(`${baseUrl(apiUrl,DEFAULT_API_URL)}/api/sync/tax-estimate`,{
+    method:"PUT",headers:{"Content-Type":"application/json",Authorization:`Bearer ${token}`},
+    body:JSON.stringify({version:1,records}),signal:AbortSignal.timeout(40000),
+  });
+  const payload=await responseJson(response,20000);
+  if(!response.ok||payload.ok!==true||!Number.isInteger(payload.synced)||payload.synced<0||payload.synced>records.length) throw new Error("Stock-Briefing 실계좌 매도 집계 전송 실패");
+  return payload.synced;
+}
+
 async function syncStockBriefingEquity(state, {
   token = process.env.STOCK_BRIEFING_TOKEN, apiUrl = process.env.STOCK_BRIEFING_URL, fetchImpl = fetch,
   checkpoint = {} as any, saveCheckpoint = () => {},
@@ -259,6 +274,7 @@ function formatStockBriefingContext(briefing) {
 }
 
 module.exports = {
+  syncStockBriefingTax,
   formatStockBriefingContext,
   loadStockBriefingImportantFilings,
   stockBriefingSnapshot,
