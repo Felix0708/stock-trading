@@ -1042,17 +1042,19 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
       }, "equity")));
       // Local evidence and outage recovery must not depend on optional website linking.
       if (!process.env.STOCK_BRIEFING_TOKEN) return;
-      try {
+      const statusJob = (async () => { try {
         await syncStockBriefingAccountStatus(readEvidence(file));
         await reportDataStatus("briefing-account-status", "Stock-Briefing 수집 진단 동기화");
       } catch (error) {
         await reportDataStatus("briefing-account-status", "Stock-Briefing 수집 진단 동기화", error);
-      }
-      const synced = await syncStockBriefingEquity(readEvidence(file), {
-        checkpoint: receipts.state.briefingEquitySync ||= {}, saveCheckpoint: () => receipts.write(),
-      });
-      if (synced.sent) console.log(`Stock-Briefing 계좌 자산 동기화: ${synced.series}계좌 범위 · ${synced.synced}일별 관측`);
-      if (synced.sent || synced.skipped) await reportDataStatus("briefing-equity-sync", "Stock-Briefing 계좌 자산 동기화");
+      } })().catch(() => console.error("수집 진단 알림 저장/전송 실패 · 자산 이력 동기화와 별개"));
+      try {
+        const synced = await syncStockBriefingEquity(readEvidence(file), {
+          checkpoint: receipts.state.briefingEquitySync ||= {}, saveCheckpoint: () => receipts.write(),
+        });
+        if (synced.sent) console.log(`Stock-Briefing 계좌 자산 동기화: ${synced.series}계좌 범위 · ${synced.synced}일별 관측`);
+        if (synced.sent || synced.skipped) await reportDataStatus("briefing-equity-sync", "Stock-Briefing 계좌 자산 동기화");
+      } finally { await statusJob; }
     })().catch(error => reportDataStatus("briefing-equity-sync", "Stock-Briefing 계좌 자산 동기화", error))
       .catch(error => console.error("자산 동기화 상태 알림 저장/전송 실패:", error.message))
       .finally(() => { equitySyncJob = null; });

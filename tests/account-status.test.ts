@@ -15,6 +15,8 @@ const { collectKiwoomTotal } = require("../src/brokers/account-equity");
   assert.equal(statuses[0].code,"other_currency_assets");
   assert.doesNotMatch(JSON.stringify(statuses),/private|equity|123|456/);
   assert.equal(accountCollectionStatuses({...state,equityTotalFailures:{[ref]:{at:"2026-09-17T00:00:00Z",code:"other_currency_assets"}}})[0].code,"total_verified");
+  assert.equal(accountCollectionStatuses({...state,equityTotalFailures:{[ref]:{at,code:"other_currency_assets"}}})[0].code,"other_currency_assets");
+  assert.equal(accountCollectionStatuses({equityAccounts:{"KIS:mock:identity":ref},equity:[],equityFailures:{[ref]:"private failure"},equityAttemptedAt:{[ref]:at}})[0].code,"collection_failed");
   const token="sb_sync_"+"a".repeat(43);
   await syncStockBriefingAccountStatus(state,{token,fetchImpl:async(url,options)=>{
     assert.match(url,/\/api\/sync\/account-status$/);assert.equal(options.redirect,"error");

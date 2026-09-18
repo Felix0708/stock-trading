@@ -93,7 +93,10 @@ function accountCollectionStatuses(state) {
     for (const accountRef of new Set([ref,...observations.map(row => row.accountRef)])) if (state.equityFailures?.[String(accountRef)] && state.equityAttemptedAt?.[String(accountRef)]) {
       candidates.push({checked_at:state.equityAttemptedAt[String(accountRef)],code:"collection_failed"});
     }
-    const current = candidates.filter(row => Number.isFinite(Date.parse(row.checked_at))).sort((a,b) => Date.parse(b.checked_at)-Date.parse(a.checked_at))[0];
+    // Equal-clock contradictory evidence must not announce a verified total.
+    const priority = {collection_failed:3,other_currency_assets:2,total_unverified:1,total_verified:0};
+    const current = candidates.filter(row => Number.isFinite(Date.parse(row.checked_at))).sort((a,b) => Date.parse(b.checked_at)-Date.parse(a.checked_at)
+      || priority[b.code]-priority[a.code])[0];
     if (current) statuses.push({account_ref:ref,broker,account_type:environment === "mock" ? "paper" : "live",...current});
   }
   if (statuses.length > 20) throw Error("수집 진단 계좌 수 초과");

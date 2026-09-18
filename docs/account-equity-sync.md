@@ -131,6 +131,12 @@ fingerprints, balances or raw broker error messages. Original observation/attemp
 timestamps are preserved; stale updates cannot replace newer status. A diagnostic
 failure does not prevent financial history sync. The website distinguishes manual
 holdings without total-asset integration from partial observations and failed totals.
+Diagnostic delivery runs alongside financial delivery; even a failed diagnostic incident
+notification cannot abort financial delivery. Equal-time contradictory local evidence
+prefers the non-verified state. The receiver rejects conflicting equal-time codes with
+409 (and duplicate account entries with 400), retaining the last accepted state atomically.
+The website labels a verified diagnostic as received only after a matching account total
+with the same or newer observation time has arrived; a newer total supersedes older failure text.
 The executor must load this version for automatic diagnostic delivery; pushing Git
 alone does not restart the locally running trading process.
 
