@@ -250,7 +250,8 @@ class KiwoomClient {
       authorization: true,
       body: { qry_tp: "1", dmst_stex_tp: "KRX" },
     });
-    const holdings = Array.isArray(data.acnt_evlt_remn_indv_tot) ? data.acnt_evlt_remn_indv_tot : [];
+    if(data.pagination?.more || !Array.isArray(data.acnt_evlt_remn_indv_tot)) throw new Error("국내 잔고 전체 조회 미완료");
+    const holdings = data.acnt_evlt_remn_indv_tot;
     return {
       estimatedAssets: toNumber(data.prsm_dpst_aset_amt, "추정예탁자산"),
       totalEvaluation: toNumber(data.tot_evlt_amt, "총평가금액"),
@@ -440,7 +441,8 @@ class KiwoomClient {
       authorization: true,
       body: { stex_tp: "", stk_cd: "" },
     });
-    const holdings = Array.isArray(data.result_list) ? data.result_list : [];
+    if(data.pagination?.more || !Array.isArray(data.result_list)) throw new Error("미국 잔고 전체 조회 미완료");
+    const holdings = data.result_list;
     return {
       currency: String(data.crnc_code || "USD"),
       totalEvaluation: toNumber(data.tot_evlt_amt, "미국주식 총평가금액"),

@@ -3,6 +3,17 @@ const assert = require("node:assert/strict");
 const { currencyTotal, collectKiwoomTotal } = require("../src/brokers/account-equity");
 const { assetReaderBrokers } = require("../src/executor/asset-reader");
 (async () => {
+  const {holdingSnapshot}=require('../src/executor/live-holdings');
+  const live={id:'KIS',environment:'live'};
+  const balance=[{holdings:[{code:'A005930',name:'삼성전자',quantity:10,purchaseAmount:500000}]}];
+  const orders=[{symbol:'005930',market:'KRX',environment:'live',side:'BUY',entryType:'PAPER_ENTRY',filledQuantity:3,fillPrice:50000}];
+  assert.equal(holdingSnapshot(live,'KR',balance,orders).holdings[0].automated_quantity,3);
+  assert.equal(holdingSnapshot(live,'KR',balance,null).holdings[0].automated_quantity,null);
+  assert.equal(holdingSnapshot(live,'KR',balance,[{...orders[0],filledQuantity:11}]).holdings[0].automated_quantity,null);
+  assert.equal(holdingSnapshot(live,'KR',[{holdings:[]}],orders).holdings.length,0);
+  assert.throws(()=>holdingSnapshot(live,'KR',[{holdings:[{...balance[0].holdings[0],purchaseAmount:undefined}]}],orders));
+  const {accountCollectionStatuses}=require('../src/integrations/account-equity');
+  assert.equal(accountCollectionStatuses({equityAccounts:{'group:KIWOOM:live:test':'id'},equity:[],equityTotalFailures:{id:{at:new Date().toISOString(),code:'ip_not_registered'}}})[0].code,'ip_not_registered');
   const at = new Date().toISOString();
   const d = { scope:"domestic",equity:1000,cash:600,stockValue:400,equityProof:{observedAt:at,d0Cash:600,clear:true} };
   const u = { scope:"overseas",equity:100,cash:90,stockValue:10,equityProof:{observedAt:at,wonCash:600,rate:1300,clear:true} };

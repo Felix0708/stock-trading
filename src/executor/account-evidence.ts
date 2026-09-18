@@ -150,7 +150,8 @@ async function refreshAccountEquity(broker, file, now = new Date(), force = fals
       const state = readEvidence(file);
       state.equityTotalFailures ||= {};
       state.equityTotalFailures[equityGroupRef(state, broker)] = { at: new Date().toISOString(), reason: error.message,
-        code: error.code === "other_currency_assets" ? "other_currency_assets" : "total_unverified" };
+        code: failures.some(message => /8050/.test(message)) ? "ip_not_registered" : failures.length ? "collection_failed"
+          : error.code === "other_currency_assets" ? "other_currency_assets" : "total_unverified" };
       writeEvidence(file, state); // Diagnostic only: never promote an incomplete total or spam market-closure alerts.
     }
   }

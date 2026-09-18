@@ -126,7 +126,7 @@ movements) for the account and period. More asset samples alone cannot verify it
 `PUT /api/sync/account-status` separately sends `{version:1,statuses:[...]}` using the
 same bearer token. Each status has only `account_ref`, `broker`, `account_type`,
 `checked_at` and `code`; at most 20. Codes: `total_verified`, `other_currency_assets`,
-`total_unverified`, `collection_failed`. Never send account numbers, credential
+`total_unverified`, `collection_failed`, `ip_not_registered`. Never send account numbers, credential
 fingerprints, balances or raw broker error messages. Original observation/attempt
 timestamps are preserved; stale updates cannot replace newer status. A diagnostic
 failure does not prevent financial history sync. The website distinguishes manual
@@ -182,3 +182,11 @@ closed-market skips are not recovery. Order/safety alerts keep their existing po
 - ISA는 국내 잔고 API만 허용합니다. 총자산, D+2 예수금, 보유종목 평가액 합계를 검증하며 일부 페이지·누락 금액·불일치는 전체 잔고로 전송하지 않습니다.
 - 전송되는 `account_kind: "isa"`와 `isa_holdings`에는 계좌번호·키가 포함되지 않습니다. Stock-Briefing 실계좌 화면의 ISA 카드에서 잔고와 종목을 표시하며, 모의 화면·일반 해외주식 세금에는 넣지 않습니다.
 - 직접 등록한 종목은 삭제·변경하지 않습니다. ISA 카드 안 종목은 위 총자산의 구성내역이며 등록 보유종목을 총자산에 다시 더하지 않습니다.
+
+## 실계좌 보유종목과 매수 주체
+
+읽기 전용 수집기는 일반 실계좌의 국내·미국 잔고와 ISA 국내 잔고를 `PUT /api/sync/broker-holdings`로 전송합니다. 모의 잔고·자동매매 성과를 교체하는 기존 경로와 분리되어 있습니다. 각 계좌·시장 조회가 완전하게 성공했을 때만 전송하며, 성공한 빈 잔고는 반영하고 실패한 잔고는 지우지 않습니다.
+
+일반 실계좌는 기존 주문 기록의 live 체결 보유량을 재사용해 `automated_quantity`를 보냅니다. 나머지는 직접투자 보유분입니다. 이력 누락·미확정 주문·실제 잔고보다 큰 자동 보유량은 `null`(확인 필요)로 표시합니다. ISA 수집기는 주문하지 않으므로 ISA는 직접투자입니다. 평단가는 증권사의 전체 종목 평단가이며 매수 주체별 취득원가를 임의 추정하지 않습니다.
+
+웹은 같은 계좌·시장의 수기/기존 자동 행 대신 조회 잔고를 표시하되 원본 수기 장부는 보존합니다. 최초 적용 때는 기존 수집기를 안전하게 재시작하면서 `sh start-asset-reader.sh --force`로 즉시 조회할 수 있습니다. 중복 실행 방지 잠금을 유지하며 주문 실행기는 재시작할 필요가 없습니다. IP 미등록(8050)은 구체적인 상태로 표시하고 다음 수집에 재시도합니다.

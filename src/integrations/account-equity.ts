@@ -102,12 +102,12 @@ function accountCollectionStatuses(state) {
     const failure = state.equityTotalFailures?.[String(ref)];
     const candidates = [];
     if (latest) candidates.push({checked_at:latest.at,code:latest.scope === "account-total-assets" ? "total_verified" : "total_unverified"});
-    if (failure) candidates.push({checked_at:failure.at,code:failure.code === "other_currency_assets" ? "other_currency_assets" : "total_unverified"});
+    if (failure) candidates.push({checked_at:failure.at,code:["other_currency_assets","ip_not_registered","collection_failed"].includes(failure.code) ? failure.code : "total_unverified"});
     for (const accountRef of new Set([ref,...observations.map(row => row.accountRef)])) if (state.equityFailures?.[String(accountRef)] && state.equityAttemptedAt?.[String(accountRef)]) {
-      candidates.push({checked_at:state.equityAttemptedAt[String(accountRef)],code:"collection_failed"});
+      candidates.push({checked_at:state.equityAttemptedAt[String(accountRef)],code:/8050/.test(state.equityFailures[String(accountRef)]) ? "ip_not_registered" : "collection_failed"});
     }
     // Equal-clock contradictory evidence must not announce a verified total.
-    const priority = {collection_failed:3,other_currency_assets:2,total_unverified:1,total_verified:0};
+    const priority = {ip_not_registered:4,collection_failed:3,other_currency_assets:2,total_unverified:1,total_verified:0};
     const current = candidates.filter(row => Number.isFinite(Date.parse(row.checked_at))).sort((a,b) => Date.parse(b.checked_at)-Date.parse(a.checked_at)
       || priority[b.code]-priority[a.code])[0];
     if (current) statuses.push({account_ref:ref,broker,account_type:environment === "mock" ? "paper" : "live",...current});

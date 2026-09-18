@@ -288,6 +288,7 @@ class KisClient {
         CTX_AREA_FK100: "", CTX_AREA_NK100: "",
       }),
     });
+    if(result.continuation || !Array.isArray(result.output1)) throw new Error("국내 잔고 전체 조회 미완료");
     const summary = Array.isArray(result.output2) ? result.output2[0] || {} : result.output2 || {};
     return {
       estimatedAssets: number(summary.nass_amt || summary.tot_evlu_amt),
@@ -363,6 +364,7 @@ class KisClient {
       trId: this.trId("VTTS3012R", "TTTS3012R"),
       params: this.accountParams({ OVRS_EXCG_CD: market, TR_CRCY_CD: "USD", CTX_AREA_FK200: "", CTX_AREA_NK200: "" }),
     });
+    if(result.continuation || !Array.isArray(result.output1)) throw new Error("미국 잔고 전체 조회 미완료");
     return {
       exchange: market,
       holdings: (result.output1 || []).filter((item: any) => number(item.ovrs_cblc_qty) > 0).map((item: any) => ({

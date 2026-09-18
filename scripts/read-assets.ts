@@ -17,6 +17,6 @@ async function run(force = false) {
   catch { console.error("잔고 수신/웹 전송 실패 · 기존 기록 유지"); if (!watch) process.exitCode = 1; }
 }
 (async () => {
-  await run(!watch);
+  await run(!watch || process.argv.includes("--force"));
   if (watch) setInterval(() => void run(), 60 * 60_000);
 })();

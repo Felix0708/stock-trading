@@ -132,6 +132,19 @@ async function syncStockBriefingTax(records, {
   return payload.synced;
 }
 
+async function syncBrokerHoldings(snapshots, {
+  token = process.env.STOCK_BRIEFING_TOKEN, apiUrl = process.env.STOCK_BRIEFING_URL, fetchImpl = fetch,
+} = {}) {
+  if(!snapshots.length) return 0;
+  if(!TOKEN_PATTERN.test(String(token || ""))) throw Error("STOCK_BRIEFING_TOKEN 형식이 올바르지 않습니다.");
+  const response=await fetchImpl(`${baseUrl(apiUrl,DEFAULT_API_URL)}/api/sync/broker-holdings`,{
+    method:"PUT",headers:{Authorization:`Bearer ${token}`,"Content-Type":"application/json"},
+    body:JSON.stringify({version:1,snapshots}),redirect:"error",signal:AbortSignal.timeout(40000)});
+  const result=await responseJson(response,20000);
+  if(!response.ok || result?.ok!==true || !Number.isInteger(result.synced) || result.synced<0 || result.synced>snapshots.length) throw Error("실계좌 보유종목 웹 수신 미확인");
+  return result.synced;
+}
+
 async function syncStockBriefingEquity(state, {
   token = process.env.STOCK_BRIEFING_TOKEN, apiUrl = process.env.STOCK_BRIEFING_URL, fetchImpl = fetch,
   checkpoint = {} as any, saveCheckpoint = () => {},
@@ -274,6 +287,7 @@ function formatStockBriefingContext(briefing) {
 }
 
 module.exports = {
+  syncBrokerHoldings,
   syncStockBriefingTax,
   formatStockBriefingContext,
   loadStockBriefingImportantFilings,

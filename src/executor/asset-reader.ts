@@ -3,8 +3,9 @@
 // Deliberately separate from the order runtime: no Discord, signals, or order tracker.
 const { KiwoomClient, kiwoomCredentials } = require("../brokers/kiwoom-client");
 const { KisClient, kisCredentials } = require("../brokers/kis-client");
-const { refreshAccountEquity, readEvidence } = require("./account-evidence");
-const { syncStockBriefingEquity, syncStockBriefingAccountStatus } = require("../integrations/stock-briefing");
+const { refreshAccountEquity, readEvidence, equityCollectionOpen } = require("./account-evidence");
+const { syncStockBriefingEquity, syncStockBriefingAccountStatus, syncBrokerHoldings } = require("../integrations/stock-briefing");
+const { collectLiveHoldings } = require("./live-holdings");
 
 function assetReaderBrokers(env = process.env) {
   const brokers = [];
@@ -21,6 +22,7 @@ function assetReaderBrokers(env = process.env) {
         const client = new KiwoomClient({ ...credentials, environment, timeoutMs: 15000 });
         const post = client.post.bind(client);
         client.post = (path, options) => {
+          if (path === "/oauth2/token" && !options.apiId) return post(path,options);
           if (!(["ka00001", "kt00001", "kt00018"].includes(options.apiId) && path === "/api/dostk/acnt")
             && !(["ust21070", "ust21120", "ust21160"].includes(options.apiId) && path === "/api/us/acnt")) throw Error("잔고 조회 전용 · 다른 API 차단");
           return post(path,options);
@@ -59,6 +61,7 @@ function assetReaderBrokers(env = process.env) {
     } else {
       const post = client.post.bind(client);
       client.post = (path,options) => {
+        if (path === "/oauth2/token" && !options.apiId) return post(path,options);
         if (path !== "/api/dostk/acnt" || !["ka00001","kt00001","kt00018"].includes(options.apiId)) throw Error("ISA 잔고 조회 전용 · 다른 API 차단");
         return post(path,options);
       };
@@ -70,14 +73,16 @@ function assetReaderBrokers(env = process.env) {
 
 async function refreshAssetReader(brokers, file, send = false, force = false) {
   const outcomes = [];
+  const snapshots = [];
   for (const broker of brokers) {
     try { const changed = await refreshAccountEquity(broker,file,new Date(),force); outcomes.push({broker:broker.id,environment:broker.environment,accountKind:broker.accountKind || "general",changed}); }
     catch (error) { outcomes.push({broker:broker.id,environment:broker.environment,error:error instanceof Error && /8050/.test(error.message) ? "접속 IP 등록 필요" : "잔고 조회 실패"}); }
+    if (send && broker.environment === "live" && (force || equityCollectionOpen(broker,new Date()))) snapshots.push(...await collectLiveHoldings(broker));
   }
   if (send) {
     const state = readEvidence(file);
-    await syncStockBriefingEquity(state);
-    await syncStockBriefingAccountStatus(state);
+    const sent=await Promise.allSettled([syncStockBriefingEquity(state),syncStockBriefingAccountStatus(state),syncBrokerHoldings(snapshots)]);
+    if(sent.some(r=>r.status==="rejected")) throw Error("잔고·자산·상태 중 일부 웹 수신 미확인 · 기존 기록 유지");
   }
   return outcomes;
 }
