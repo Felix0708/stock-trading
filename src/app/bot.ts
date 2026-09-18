@@ -2097,8 +2097,8 @@ async function handleBuyApprovalCommand(message, content) {
 
 async function startOrderStatusWatcher() {
   if (ACCOUNT_NEUTRAL_SIGNAL_SERVER) return;
-  const expired = orderTracker.expirePreviousDayOrders();
-  if (expired.length) console.log(`거래일이 지난 미완료 주문 ${expired.length}건을 만료 처리했습니다.`);
+  const unresolved = orderTracker.markPreviousDayOrdersForReconciliation();
+  if (unresolved.length) console.log(`과거 미완료 주문 ${unresolved.length}건은 증권사 종료 증빙 확인이 필요합니다. 기록을 유지합니다.`);
   let revision = orderTracker.snapshot().revision;
   const pending = orderTracker.unnotifiedPending();
   if (pending.length) {

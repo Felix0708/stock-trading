@@ -31,6 +31,12 @@ function toOptionalNumber(value: unknown, field: string, absolute = false) {
   return absolute ? Math.abs(number) : number;
 }
 
+function toExecutionNumber(value: unknown, field: string) {
+  const parsed = toOptionalNumber(value, field);
+  if (parsed === null || parsed < 0) throw new Error(`키움 ${field} 증빙 누락·형식 오류`);
+  return parsed;
+}
+
 function proofNumber(value: unknown) {
   try { return toOptionalNumber(value, "합산 증빙"); }
   catch { return null; } // Optional aggregation proof must not discard valid standalone assets.
@@ -387,7 +393,9 @@ class KiwoomClient {
     return { status: "ACCEPTED", orderNo: String(data.ord_no), side, symbol, orderQuantity: quantity };
   }
 
-  async getDomesticOrderExecutions({ side = "ALL", symbol = "" }: any = {}) {
+  async getDomesticOrderExecutions({ side = "ALL", symbol = "", date = "" }: any = {}) {
+    const today = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Seoul", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date()).replaceAll("-", "");
+    if (date && date !== today) throw new Error("키움 국내 당일 체결 API로 과거 주문 확인 불가 · 명세서 증빙 필요");
     side = String(side).toUpperCase();
     symbol = String(symbol || "");
     if (!["ALL", "BUY", "SELL"].includes(side)) throw new Error("주문조회 side는 ALL, BUY, SELL 중 하나여야 합니다.");
@@ -398,14 +406,16 @@ class KiwoomClient {
       authorization: true,
       body: { stk_cd: symbol, qry_tp: symbol ? "1" : "0", sell_tp: ({ ALL: "0", SELL: "1", BUY: "2" } as Record<string, string>)[side], ord_no: "", stex_tp: "1" },
     });
-    const rows = Array.isArray(data.cntr) ? data.cntr : [];
+    if (!Array.isArray(data.cntr) || data.pagination?.more) throw new Error("키움 국내 체결 목록 불완전 · 증빙 확인 필요");
+    const rows = data.cntr;
     return rows.map((item: any) => {
-      const filledQuantity = toNumber(item.cntr_qty, "국내주식 체결수량");
-      const remainingQuantity = toNumber(item.oso_qty, "국내주식 미체결수량");
+      const filledQuantity = toExecutionNumber(item.cntr_qty, "국내주식 체결수량");
+      const remainingQuantity = toExecutionNumber(item.oso_qty, "국내주식 미체결수량");
       const rawStatus = String(item.ord_stt || "");
       let status = "ACCEPTED";
       if (rawStatus.includes("거부")) status = "REJECTED";
-      else if (rawStatus.includes("취소") || (remainingQuantity === 0 && filledQuantity < toNumber(item.ord_qty, "주문수량"))) status = "CANCELLED";
+      else if (rawStatus.includes("취소") && Number(remainingQuantity) > 0) status = "CANCEL_REQUESTED";
+      else if (remainingQuantity === 0 && filledQuantity < toNumber(item.ord_qty, "주문수량")) status = "CANCELLED";
       else if (filledQuantity > 0 && remainingQuantity === 0) status = "FILLED";
       else if (filledQuantity > 0) status = "PARTIALLY_FILLED";
       return {
@@ -415,7 +425,8 @@ class KiwoomClient {
         side: String(item.io_tp_nm || "").includes("매도") ? "SELL" : "BUY",
         status,
         rawStatus,
-        orderQuantity: toNumber(item.ord_qty, "국내주식 주문수량"),
+        date: today,
+        orderQuantity: toExecutionNumber(item.ord_qty, "국내주식 주문수량"),
         filledQuantity,
         remainingQuantity,
         fillPrice: toNumber(item.cntr_pric, "국내주식 체결가"),
@@ -588,13 +599,14 @@ class KiwoomClient {
       slby_tp: ({ ALL: "0", SELL: "1", BUY: "2" } as Record<string, string>)[side], stex_tp: exchange, stk_cd: symbol,
     });
     return rows.map((item: any) => {
-      const quantityNumber = String(item.frgn_trde_tp) === "35" ? toOptionalNumber : toNumber;
+      const quantityNumber = String(item.frgn_trde_tp) === "35" ? toOptionalNumber : toExecutionNumber;
       const filledQuantity = quantityNumber(item.cntr_qty, "미국주식 체결수량");
       const remainingQuantity = quantityNumber(item.ord_remnq, "미국주식 주문잔량");
       const rawStatus = String(item.ord_stat || "");
       let status = "ACCEPTED";
       if (rawStatus.includes("거부")) status = "REJECTED";
-      else if (rawStatus.includes("취소") || (remainingQuantity === 0 && filledQuantity !== null && filledQuantity < toNumber(item.ord_qty, "주문수량"))) status = "CANCELLED";
+      else if (rawStatus.includes("취소") && Number(remainingQuantity) > 0) status = "CANCEL_REQUESTED";
+      else if (remainingQuantity === 0 && filledQuantity !== null && filledQuantity < toNumber(item.ord_qty, "주문수량")) status = "CANCELLED";
       else if (filledQuantity !== null && filledQuantity > 0 && remainingQuantity === 0) status = "FILLED";
       else if (filledQuantity !== null && filledQuantity > 0) status = "PARTIALLY_FILLED";
       return {
@@ -615,7 +627,7 @@ class KiwoomClient {
   }
 
   async getUsAccountHistory(apiId: string, body: Record<string, string>) {
-    if (!["ust21510", "ust21150", "ust21100", "ust21132"].includes(apiId)) throw new Error("허용되지 않은 이력 조회입니다.");
+    if (!["ust21510", "ust21050", "ust21150", "ust21100", "ust21132"].includes(apiId)) throw new Error("허용되지 않은 이력 조회입니다.");
     const rows: any[] = [], seen = new Set<string>();
     let continuation = "";
     for (let page = 0; page < 100; page += 1) {
@@ -641,6 +653,14 @@ class KiwoomClient {
       date, orderTime: item.ord_time, brokerFillTime: item.cntr_time || null, filledAt: null,
       brokerOrderType: String(item.frgn_trde_tp || ""), brokerStopPrice: toOptionalNumber(item.stop_pric, "STOP가격"),
       rawStatus: item.ord_stat_nm, source: `KIWOOM:ust21150:${date}` }));
+  }
+
+  async getUsOpenOrders({ exchange = "" }: any = {}) {
+    if (exchange && !["ND", "NY", "NA"].includes(exchange)) throw new Error("미국주식 거래소 오류");
+    const rows = await this.getUsAccountHistory("ust21050", { ord_dt: "", slby_tp: "0", stex_tp: exchange, stk_cd: "" });
+    return rows.map(item => ({ orderNo: String(item.ord_no || ""), symbol: item.stk_cd,
+      side: item.slby_tp === "1" ? "SELL" : item.slby_tp === "2" ? "BUY" : "",
+      remainingQuantity: toOptionalNumber(item.ord_remnq, "현재 미체결 잔량"), source: "KIWOOM:ust21050" }));
   }
 
   async getUsTransactions({ startDate, endDate, symbol = "", exchange = "ND" }: any) {

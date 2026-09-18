@@ -58,6 +58,29 @@ async function fakeFetch(url, options) {
   assert.equal(executionCalls.length, 2);
   assert.equal(executionCalls[1].headers.tr_cont, "N");
   await assert.rejects(executionClient.getUsOrderExecutions({ date: "invalid" }), /날짜/);
+  const readCalls = [];
+  const datedClient = new KisClient({ appKey: "read", appSecret: "fake", accountNo: "12345678", requestIntervalMs: 0,
+    fetchImpl: async (url, options) => {
+      if (url.endsWith("tokenP")) return new Response(JSON.stringify({ access_token: "fake", expires_in: 86400 }));
+      const query = new URL(url).searchParams;
+      readCalls.push({ query, trId: options.headers.tr_id });
+      const domestic = url.includes("inquire-daily-ccld");
+      return new Response(JSON.stringify({ rt_cd: "0", [domestic ? "output1" : "output"]: domestic
+        ? [{ odno: "7", pdno: "005930", sll_buy_dvsn_cd: "02", ord_dt: "20260901", ord_qty: "3", tot_ccld_qty: "3", rmn_qty: "0", avg_prvs: "100" }]
+        : [] }));
+    } });
+  const datedRows = await datedClient.getDomesticOrderExecutions({ date: "20260901", symbol: "005930" });
+  assert.equal(datedRows[0].date, "20260901");
+  assert.equal(datedRows[0].side, "BUY");
+  assert.equal(readCalls[0].query.get("INQR_STRT_DT"), "20260901");
+  assert.equal(readCalls[0].query.get("INQR_END_DT"), "20260901");
+  assert.equal(readCalls[0].trId, "VTTC0081R");
+  assert.deepEqual(await datedClient.getUsOpenOrders({ exchange: "NY" }), []);
+  assert.equal(readCalls[1].trId, "VTTS3018R");
+  assert.equal(readCalls[1].query.get("OVRS_EXCG_CD"), "NYSE");
+  datedClient.getUsHistoryPages = async () => [{ odno: "7", pdno: "TEST", ord_qty: "3", tot_ccld_qty: "0" }];
+  await assert.rejects(datedClient.getUsOrderExecutions({ symbol: "TEST" }), /수량 증빙/);
+  await assert.rejects(datedClient.getUsHistoricalExecutions({ date: "20260901", symbol: "TEST" }), /수량 증빙/);
   const liveCalls = [];
   const liveClient = new KisClient({
     appKey: "a", appSecret: "b", accountNo: "12345678", environment: "live", requestIntervalMs: 0,

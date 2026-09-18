@@ -72,27 +72,25 @@ class OrderTracker {
     return this.list().filter((order) => PENDING_STATUSES.has(order.status));
   }
 
-  expirePreviousDayOrders(now = new Date()): TrackedOrder[] {
+  markPreviousDayOrdersForReconciliation(now = new Date()): TrackedOrder[] {
     const state = this.snapshot();
-    const expired: TrackedOrder[] = [];
+    const unresolved: TrackedOrder[] = [];
     for (const order of Object.values(state.orders)) {
-      const updatedAt = new Date(order.updatedAt || "");
-      if (order.orderStyle === "BROKER_STOP" || order.status === "UNKNOWN" || !PENDING_STATUSES.has(order.status) || Number.isNaN(updatedAt.getTime())) continue;
+      const updatedAt = new Date(String(order.createdAt || order.updatedAt || ""));
+      if (order.orderStyle === "BROKER_STOP" || order.reconciliationRequired || !PENDING_STATUSES.has(order.status) || Number.isNaN(updatedAt.getTime())) continue;
       if (tradingDate(updatedAt, order.market) >= tradingDate(now, order.market)) continue;
       state.revision += 1;
       const saved = {
         ...order,
-        status: "EXPIRED",
-        remainingQuantity: 0,
-        expirationReason: "거래일 종료",
+        reconciliationRequired: true,
         revision: state.revision,
         updatedAt: now.toISOString(),
       };
       state.orders[String(order.storageKey || order.orderNo)] = saved;
-      expired.push(saved);
+      unresolved.push(saved);
     }
-    if (expired.length) this.write(state);
-    return expired;
+    if (unresolved.length) this.write(state);
+    return unresolved;
   }
 
   unnotifiedPending() {

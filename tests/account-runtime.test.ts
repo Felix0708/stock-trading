@@ -55,7 +55,7 @@ function fixture(ids = ["KIS"], environment = "mock", readOnly = false, entryAll
   });
   const guild = { channels: { fetch: async () => new Map(["order", "execution", "system", "journal"]
     .map(id => [id, id === "order" ? channel : { ...channel, id, name: id }])) } };
-  const channels = { order: "order", execution: "execution", system: "system", journal: "journal" };
+  const channels: Record<string, string> = { order: "order", execution: "execution", system: "system", journal: "journal" };
   const runtime = createAccountRuntime({ brokers, receipts, client: { guilds: { fetch: async () => guild } },
     ownerId: "owner", targetGuildId: "guild", channels, readOnly, entryAllocation,
     trusted: { sourceChannelIds: new Set(["signal"]), sourceBotIds: new Set(["source"]) },
@@ -66,6 +66,61 @@ function fixture(ids = ["KIS"], environment = "mock", readOnly = false, entryAll
 function message(r) { return { id: r.requestId, channelId: "signal", author: { id: "source", bot: true }, embeds: [{ footer: { text: encodeSignalEnvelope(r) } }] }; }
 
 (async () => {
+  for (const allocation of [false, true]) {
+    const capped = fixture(["KIS"], "mock", false, allocation);
+    for (let i = 0; i < 6; i++) {
+      const candidate = record(`cap-${i}`);
+      candidate.payload.ticker = `T${i}`;
+      await capped.runtime.execute(capped.brokers[0], candidate);
+    }
+    assert.equal(capped.brokers[0].state.requests.length, 5, "accepted unfilled buys occupy the same account slots as holdings");
+    for (const order of capped.brokers[0].state.orders) Object.assign(order, { status: "FILLED", filledQuantity: order.orderQuantity, remainingQuantity: 0, fillPrice: 100 });
+    const balanceLag = record("balance-lag");
+    balanceLag.payload.ticker = "LAG";
+    await capped.runtime.execute(capped.brokers[0], balanceLag);
+    assert.equal(capped.brokers[0].state.requests.length, 5, "confirmed fills keep slots while broker balances lag");
+  }
+  const falling = fixture();
+  let quotes = 0;
+  falling.brokers[0].overseasClient.getUsQuote = async () => ({ currentPrice: ++quotes === 1 ? 100 : 80 });
+  const invalidated = await falling.runtime.execute(falling.brokers[0], record("final-quote-cross"));
+  assert.equal(quotes, 2);
+  assert.equal(invalidated.status, "BLOCKED");
+  assert.equal(falling.brokers[0].state.requests.length, 0, "final quote below stop must never place a buy");
+
+  const bounded = fixture();
+  const deadline = { ...record("hard-deadline"), executionDeadline: clock + 60000 };
+  const queued = bounded.receipts.putDeferred("KIS", deadline, 5 * 86400000);
+  assert.equal(queued.expiresAt, deadline.executionDeadline);
+  queued.expiresAt = clock + 5 * 86400000; // simulate an old persisted queue
+  clock += 120000;
+  await bounded.runtime.retryDeferred();
+  assert.equal(bounded.receipts.listDeferred().length, 0);
+  assert.equal(bounded.brokers[0].state.requests.length, 0);
+  const daytime = clock;
+  clock = new RealDate("2026-09-08T21:00:00Z").getTime();
+  const closed = fixture();
+  await closed.runtime.processMessage(message(record("next-session")));
+  const sessionPlan = closed.receipts.listDeferred()[0];
+  assert.equal(sessionPlan.record.executionDeadlineKind, "SESSION");
+  assert.equal(sessionPlan.expiresAt, clock + 5 * 86400000, "fresh closed-session signal retains its intended plan lifetime");
+  clock = daytime;
+
+  const portfolio = fixture();
+  portfolio.channels.portfolio = "order";
+  portfolio.brokers[0].state.failBalance = true;
+  await portfolio.runtime.requestPortfolioSync();
+  assert.equal(portfolio.receipts.state.portfolioRetry.nextAttemptAt, clock + 60000);
+  await portfolio.runtime.requestPortfolioSync();
+  assert.equal(portfolio.receipts.state.portfolioRetry.attempts, 1, "coalesced retry respects backoff");
+  const resumedPortfolio = fixture();
+  resumedPortfolio.channels.portfolio = "order";
+  resumedPortfolio.receipts.state = structuredClone(portfolio.receipts.state);
+  clock += 60000;
+  await resumedPortfolio.runtime.requestPortfolioSync();
+  assert.equal(resumedPortfolio.receipts.state.portfolioRetry, undefined, "persisted retry clears only after successful sync");
+  assert.equal(resumedPortfolio.receipts.state.equityOutages["portfolio-sync"], undefined);
+
   const allocated = fixture(["KIWOOM", "KIS"], "mock", false, true);
   const buy = record("allocated-one");
   await allocated.runtime.processMessage(message(buy));

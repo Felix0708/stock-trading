@@ -303,6 +303,10 @@ async function submitPaperOrder(record: SignalRecord, options: ExecutorOptions) 
       const quote = await client.getUsQuote({ exchange: kiwoomExchange, symbol: payload.ticker });
       referencePrice = quote.currentPrice;
       limitPrice = protectedUsBuyLimit(payload.price, referencePrice);
+      const stopPrice = positionPreview?.stopPrice ?? payload.sl;
+      if (Number.isFinite(stopPrice) && (referencePrice <= stopPrice || limitPrice <= stopPrice)) {
+        return blocked("주문 직전 현재가가 손절 기준 이탈 · 매수 무효");
+      }
       orderStrategy = "신호가·현재가 기준 상한 지정가";
     } else {
       orderStrategy = record.originalSignalPrice !== undefined ? "주문 직전 현재가 지정가" : "신호가 지정가";

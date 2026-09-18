@@ -185,6 +185,7 @@ async function fakeFetch(url, options) {
   });
   assert.deepEqual(await client.getDomesticOrderExecutions({ symbol: "005930" }), [{
     orderNo: "00024", originalOrderNo: "00000", symbol: "005930", side: "BUY",
+    date: new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Seoul", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date()).replaceAll("-", ""),
     status: "FILLED", rawStatus: "체결", orderQuantity: 1, filledQuantity: 1,
     remainingQuantity: 0, fillPrice: 100000,
   }]);
@@ -417,6 +418,22 @@ async function fakeFetch(url, options) {
   } finally {
     fs.rmSync(tokenDirectory, { recursive: true, force: true });
   }
+  const openClient = new KiwoomClient({ appKey: "open-test", secretKey: "fake", fetchImpl: async () => { throw Error("network forbidden"); } });
+  let reads = 0;
+  openClient.post = async (path, options) => {
+    assert.equal(path, "/api/us/acnt");
+    assert.equal(options.apiId, "ust21050");
+    assert.equal(options.body.ord_dt, "");
+    reads++;
+    return { result_list: reads === 1 ? [{ ord_no: "7", stk_cd: "TEST", slby_tp: "2", ord_remnq: "3" }] : [],
+      pagination: { more: reads === 1, next: reads === 1 ? "next" : "" } };
+  };
+  const open = await openClient.getUsOpenOrders({ exchange: "ND" });
+  assert.equal(reads, 2, "consume all outstanding-order pages");
+  assert.equal(open[0].remainingQuantity, 3);
+  assert.equal(open[0].side, "BUY");
+  await assert.rejects(openClient.getDomesticOrderExecutions({ date: "20000101" }), /過去|과거/);
+  assert.equal(reads, 2, "never query today's reused ID for an old domestic order");
   console.log("kiwoom-client test OK");
 })().catch((error) => {
   console.error(error);

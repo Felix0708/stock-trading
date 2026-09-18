@@ -23,6 +23,14 @@ function number(value: unknown) {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+function executionNumber(value: unknown) {
+  const parsed = Number(String(value ?? "").replaceAll(",", ""));
+  if (value == null || String(value).trim() === "" || !Number.isFinite(parsed) || parsed < 0) {
+    throw new Error("한투 체결 수량 증빙 누락·형식 오류");
+  }
+  return parsed;
+}
+
 function status(orderQuantity: number, filledQuantity: number, remainingQuantity: number) {
   if (orderQuantity > 0 && filledQuantity >= orderQuantity) return "FILLED";
   if (remainingQuantity <= 0) return "CANCELLED";
@@ -327,17 +335,19 @@ class KisClient {
     return { orderNo: String(orderNo), symbol, side, status: "ACCEPTED" };
   }
 
-  async getDomesticOrderExecutions({ symbol = "" } = {}) {
+  async getDomesticOrderExecutions({ symbol = "", date = "" } = {}) {
     const today = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Seoul", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date()).replaceAll("-", "");
-    const result = await this.request("/uapi/domestic-stock/v1/trading/inquire-daily-ccld", {
-      trId: this.trId("VTTC0081R", "TTTC0081R"),
-      params: this.accountParams({ INQR_STRT_DT: today, INQR_END_DT: today, SLL_BUY_DVSN_CD: "00", INQR_DVSN: "00", PDNO: symbol, CCLD_DVSN: "00", ORD_GNO_BRNO: "", ODNO: "", INQR_DVSN_3: "00", INQR_DVSN_1: "", CTX_AREA_FK100: "", CTX_AREA_NK100: "" }),
-    });
-    return (result.output1 || []).map((item: any) => {
-      const orderQuantity = number(item.ord_qty);
-      const filledQuantity = number(item.tot_ccld_qty);
-      const remainingQuantity = number(item.rmn_qty ?? orderQuantity - filledQuantity);
-      return { orderNo: String(item.odno), symbol: String(item.pdno || "").replace(/^A/, ""), orderQuantity, filledQuantity, remainingQuantity, fillPrice: number(item.avg_prvs || item.avg_pric), status: status(orderQuantity, filledQuantity, remainingQuantity) };
+    date ||= today;
+    if (!/^\d{8}$/.test(date) || date > today) throw new Error("국내 체결 조회 날짜 오류");
+    const rows = await this.getUsHistoryPages("/uapi/domestic-stock/v1/trading/inquire-daily-ccld", this.trId("VTTC0081R", "TTTC0081R"),
+      { INQR_STRT_DT: date, INQR_END_DT: date, SLL_BUY_DVSN_CD: "00", INQR_DVSN: "00", PDNO: symbol, CCLD_DVSN: "00", ORD_GNO_BRNO: "", ODNO: "", INQR_DVSN_3: "00", INQR_DVSN_1: "", CTX_AREA_FK100: "", CTX_AREA_NK100: "" }, 100);
+    return rows.map((item: any) => {
+      const orderQuantity = executionNumber(item.ord_qty);
+      const filledQuantity = executionNumber(item.tot_ccld_qty);
+      const remainingQuantity = executionNumber(item.rmn_qty);
+      return { orderNo: String(item.odno), symbol: String(item.pdno || "").replace(/^A/, ""), date: String(item.ord_dt || ""),
+        side: item.sll_buy_dvsn_cd === "01" ? "SELL" : item.sll_buy_dvsn_cd === "02" ? "BUY" : "",
+        orderQuantity, filledQuantity, remainingQuantity, fillPrice: number(item.avg_prvs || item.avg_pric), status: status(orderQuantity, filledQuantity, remainingQuantity) };
     });
   }
 
@@ -426,10 +436,12 @@ class KisClient {
       SLL_BUY_DVSN: "00", CCLD_NCCS_DVSN: "00", OVRS_EXCG_CD: this.environment === "mock" ? "" : this.kisExchange(exchange),
       SORT_SQN: "DS", ORD_DT: "", ORD_GNO_BRNO: "", ODNO: "", CTX_AREA_FK200: "", CTX_AREA_NK200: "" });
     return rows.filter((item: any) => !symbol || item.pdno === symbol).map((item: any) => {
-      const orderQuantity = number(item.ft_ord_qty || item.ord_qty);
-      const filledQuantity = number(item.ft_ccld_qty || item.tot_ccld_qty);
-      const remainingQuantity = number(item.nccs_qty ?? orderQuantity - filledQuantity);
-      return { orderNo: String(item.odno), symbol: item.pdno, orderQuantity, filledQuantity, remainingQuantity, fillPrice: number(item.ft_ccld_unpr3 || item.avg_pric), status: status(orderQuantity, filledQuantity, remainingQuantity) };
+      const orderQuantity = executionNumber(item.ft_ord_qty ?? item.ord_qty);
+      const filledQuantity = executionNumber(item.ft_ccld_qty ?? item.tot_ccld_qty);
+      const remainingQuantity = executionNumber(item.nccs_qty);
+      return { orderNo: String(item.odno), symbol: item.pdno, date: String(item.ord_dt || ""),
+        side: item.sll_buy_dvsn_cd === "01" ? "SELL" : item.sll_buy_dvsn_cd === "02" ? "BUY" : "",
+        orderQuantity, filledQuantity, remainingQuantity, fillPrice: number(item.ft_ccld_unpr3 || item.avg_pric), status: status(orderQuantity, filledQuantity, remainingQuantity) };
     });
   }
 
@@ -458,9 +470,17 @@ class KisClient {
       OVRS_EXCG_CD: this.environment === "mock" ? "" : "NASD", SORT_SQN: "DS", ORD_DT: "", ORD_GNO_BRNO: "", ODNO: "", CTX_AREA_FK200: "", CTX_AREA_NK200: "" });
     return rows.map(item => ({ orderNo: String(item.odno), symbol: item.pdno,
       side: item.sll_buy_dvsn_cd === "01" ? "SELL" : item.sll_buy_dvsn_cd === "02" ? "BUY" : "",
-      orderQuantity: number(item.ft_ord_qty || item.ord_qty), filledQuantity: number(item.ft_ccld_qty || item.tot_ccld_qty),
-      remainingQuantity: number(item.nccs_qty), fillPrice: number(item.ft_ccld_unpr3 || item.avg_pric), date: String(item.ord_dt || ""),
+      orderQuantity: executionNumber(item.ft_ord_qty ?? item.ord_qty), filledQuantity: executionNumber(item.ft_ccld_qty ?? item.tot_ccld_qty),
+      remainingQuantity: executionNumber(item.nccs_qty), fillPrice: number(item.ft_ccld_unpr3 || item.avg_pric), date: String(item.ord_dt || ""),
       filledAt: null, source: `KIS:inquire-ccnl:${date}` }));
+  }
+
+  async getUsOpenOrders({ exchange = "ND" }: any = {}) {
+    const rows = await this.getUsHistoryPages("/uapi/overseas-stock/v1/trading/inquire-nccs", this.trId("VTTS3018R", "TTTS3018R"), {
+      OVRS_EXCG_CD: this.kisExchange(exchange), SORT_SQN: "DS", CTX_AREA_FK200: "", CTX_AREA_NK200: "" });
+    return rows.map(item => ({ orderNo: String(item.odno || ""), symbol: item.pdno,
+      side: item.sll_buy_dvsn_cd === "01" ? "SELL" : item.sll_buy_dvsn_cd === "02" ? "BUY" : "",
+      date: String(item.ord_dt || ""), remainingQuantity: executionNumber(item.nccs_qty), source: "KIS:inquire-nccs" }));
   }
 
   async getUsTransactions({ startDate, endDate }: any) {

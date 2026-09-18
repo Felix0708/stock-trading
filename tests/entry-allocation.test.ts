@@ -52,7 +52,6 @@ reserveAccount.broker.tracker.list().push(stale);
 const reservedTotals = allocationRisk(record, [reserveAccount], receipts);
 assert.equal(reservedTotals.blocked, false);
 assert.equal(reservedTotals.reservedCash.R, 400);
-assert.equal(reservedTotals.reservedPositions.R, 1);
 assert.equal(reservedTotals.risk, 40);
 assert.equal(capAllocatedPreview(reserveAccount.preview, reservedTotals, { cash: 400, availableCash: 1000 }).quantity, 6);
 assert.equal(capAllocatedPreview(reserveAccount.preview, reservedTotals, { cash: 400, availableCash: 300 }).retryable, true);
@@ -70,5 +69,4 @@ Object.assign(stale, { status: "PARTIALLY_FILLED", filledQuantity: 1, remainingQ
 reserveAccount.account.usHoldings.push({ code: "OTHER", quantity: 1, evaluationAmount: 100 });
 const partialReserve = allocationRisk(record, [reserveAccount], receipts);
 assert.equal(partialReserve.reservedCash.R, 300);
-assert.equal(partialReserve.reservedPositions.R, 0);
 assert.equal(partialReserve.risk, 40); // 10 held risk + 30 unresolved risk, not 50.

@@ -36,7 +36,7 @@ function allocationRisk(record, snapshots, receipts) {
   const p = record.payload, at = Date.parse(record.receivedAt);
   if (!Number.isFinite(at) || !Number.isFinite(frameMs(p.timeframe))) return blocked("계좌 배정 기준 확인 필요");
   let equity = 0, exposure = 0, risk = 0;
-  const reservedCash = {}, reservedPositions = {};
+  const reservedCash = {};
   for (const { broker, account } of snapshots) {
     if (!(Number.isFinite(account.equity) && account.equity > 0)) return blocked("합산 계좌 자산 확인 필요");
     equity += account.equity;
@@ -53,7 +53,6 @@ function allocationRisk(record, snapshots, receipts) {
       reservedCash[broker.id] = (reservedCash[broker.id] || 0) + reserve.cash;
     }
     const holdings = market(p.exchange) === "KRX" ? account.domesticHoldings : account.usHoldings;
-    reservedPositions[broker.id] = new Set([...reserves.keys()].filter(o => !holdings.some(h => normalizedSymbol(h.code) === normalizedSymbol(o.symbol) && h.quantity > 0)).map(o => normalizedSymbol(o.symbol))).size;
     for (const ticker of new Set(orders.filter(o => market(o.market) === market(p.exchange)).map(o => normalizedSymbol(o.symbol)))) {
       const owned = managedPosition(orders, { exchange: p.exchange, ticker }, broker.environment);
       const quantity = holdings.filter(h => normalizedSymbol(h.code) === ticker).reduce((n, h) => n + h.quantity, 0);
@@ -89,7 +88,7 @@ function allocationRisk(record, snapshots, receipts) {
   const waiting = [...receipts.listDeferred(), ...Object.values(receipts.state.pending) as any[]];
   if (waiting.some(item => item.record?.requestId !== record.requestId && item.expiresAt > Date.now()
     && item.record?.payload?.action === "BUY" && symbolKey(item.record.payload) === symbolKey(p))) return blocked("동일 종목의 기존 예약·승인 대기 먼저 처리");
-  return { blocked: false, equity, exposure, risk, reservedCash, reservedPositions };
+  return { blocked: false, equity, exposure, risk, reservedCash };
 }
 
 function chooseAccount(record, snapshots, routes) {

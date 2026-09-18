@@ -4,6 +4,29 @@ const assert = require("node:assert/strict");
 const { refreshPaperOrder, trackPaperOrder } = require("../src/trading/order-tracking");
 
 (async () => {
+  const base = { orderNo: "77", symbol: "TEST", side: "BUY", market: "NASDAQ", status: "PARTIALLY_FILLED",
+    orderQuantity: 10, filledQuantity: 5, remainingQuantity: 5, fillPrice: 100 };
+  let writes = 0;
+  for (const changes of [
+    { filledQuantity: 1, remainingQuantity: 9 }, { symbol: "OTHER" }, { side: "SELL" },
+    { orderQuantity: 99 }, { filledQuantity: 11 }, { filledQuantity: 5.5 }, { fillPrice: 0 },
+    { status: "FILLED" }, { remainingQuantity: -1 }, { date: "19990101" },
+  ]) {
+    await assert.rejects(refreshPaperOrder(base, { tracker: { record: o => { writes++; return o; } },
+      overseasClient: { getUsOrderExecutions: async () => [{ ...base, ...changes }] } }), /증빙 충돌/);
+  }
+  await assert.rejects(refreshPaperOrder(base, { tracker: { record: o => { writes++; return o; } },
+    overseasClient: { getUsOrderExecutions: async () => [base, base] } }), /중복/);
+  assert.equal(writes, 0, "conflicting responses never overwrite the ledger");
+  const yesterday = { ...base, market: "KRX", symbol: "005930", createdAt: "2026-01-01T00:00:00Z" };
+  await assert.rejects(refreshPaperOrder(yesterday, { tracker: { record: o => o },
+    domesticClient: { getDomesticOrderExecutions: async () => [{ ...yesterday, status: "FILLED", filledQuantity: 10, remainingQuantity: 0 }] } }), /증빙 충돌/);
+  const dated = await refreshPaperOrder(yesterday, { tracker: { record: o => o }, domesticClient: {
+    getDomesticOrderExecutions: async ({ date }) => {
+      assert.equal(date, "20260101");
+      return [{ ...yesterday, date, status: "FILLED", filledQuantity: 10, remainingQuantity: 0 }];
+    } } });
+  assert.equal(dated.filledQuantity, 10);
   const placed = [];
   const executions = {
     "1001": { orderNo: "1001", orderQuantity: 8, filledQuantity: 3, remainingQuantity: 0, fillPrice: 100, status: "PARTIALLY_FILLED" },
@@ -13,7 +36,7 @@ const { refreshPaperOrder, trackPaperOrder } = require("../src/trading/order-tra
   const recorded = [];
   const tracker = { record: (order) => { recorded.push(order); return order; } };
   const domesticClient = {
-    getDomesticOrderExecutions: async () => Object.values(executions),
+    getDomesticOrderExecutions: async () => Object.values(executions).map(row => ({ ...row, symbol: "005930", side: row.orderNo.startsWith("400") ? "BUY" : "SELL" })),
     placeDomesticMarketOrder: async (request) => {
       placed.push(request);
       return { ...request, orderNo: String(1001 + placed.length), status: "ACCEPTED", orderQuantity: request.quantity };
@@ -106,7 +129,7 @@ const { refreshPaperOrder, trackPaperOrder } = require("../src/trading/order-tra
 
   let delayedRows = [{ orderNo: "5001", orderQuantity: 5, filledQuantity: 2, remainingQuantity: 0, fillPrice: 100, status: "CANCELLED" }];
   const delayedClient = {
-    getDomesticOrderExecutions: async () => delayedRows,
+    getDomesticOrderExecutions: async () => delayedRows.map(row => ({ ...row, symbol: "005930", side: "BUY" })),
     placeDomesticMarketOrder: async () => ({ orderNo: "5002", orderQuantity: 3, status: "ACCEPTED" }),
   };
   const delayed = await trackPaperOrder({ orderNo: "5001", symbol: "005930", side: "BUY", market: "KRX", orderQuantity: 5, status: "ACCEPTED", orderStyle: "PROTECTED" },

@@ -285,6 +285,22 @@ assert.equal(enforceOpenRiskLimit(exitRiskPreview).blocked, true); // 손절위�
   }, { payload: { exchange: "NYSE", ticker: "SE", price: 121.18 } }, 5);
   assert.equal(context.accountPositionRatio, 7625.52 / (92294.675 + 7625.52) * 100);
   assert.equal(context.autoCapital, null);
+  const counted = await accountContext({
+    getDomesticBalance: async () => ({ holdings: [{ code: "A005930", quantity: 1, evaluationAmount: 100 }] }),
+    getUsBalances: async () => [{ holdings: [{ code: "TEST", quantity: 2, evaluationAmount: 200 }, { code: "ZERO", quantity: 0, evaluationAmount: 0 }] }],
+    getUsCash: async () => ({ usd: 10000 }),
+  }, { payload: { exchange: "NASDAQ", ticker: "TEST", price: 100 } }, 5, { orders: [
+    { side: "BUY", market: "NASDAQ", symbol: "TEST", status: "PARTIALLY_FILLED" },
+    { side: "BUY", market: "KRX", symbol: "005930", status: "ACCEPTED" },
+    { side: "BUY", market: "NASDAQ", symbol: "005930", status: "ACCEPTED" },
+    { side: "BUY", market: "NASDAQ", symbol: "NEXT", status: "CANCEL_REQUESTED" },
+    { side: "BUY", market: "NASDAQ", symbol: "MISSING", status: "UNKNOWN" },
+    { side: "BUY", market: "NASDAQ", symbol: "CLOSED", status: "CANCELLED" },
+    { side: "SELL", market: "NASDAQ", symbol: "TEST", status: "ACCEPTED" },
+  ] });
+  assert.equal(counted.openPositions, 5, "partial fills/ADD deduplicate, markets remain separate, cancellation requests retain slots");
+  assert.equal(counted.hasExistingPosition, true);
+  assert.equal(calculateWebhookPositionPreview({ payload: { price: 100, sl: 90, conviction: "B" }, outcome: { decision: "ADD_CANDIDATE" } }, counted).blocked, false, "holding cap does not block an existing-position sizing path");
 
   const exitCalls: string[] = [];
   const exitContext = await accountContext({
@@ -366,10 +382,10 @@ assert.equal(enforceOpenRiskLimit(exitRiskPreview).blocked, true); // 손절위�
 
   const changes = await reconcilePendingBrokerOrders({
     tracker: {
-      pending: () => [{ orderNo: "1903", market: "NYSE", exchange: "NY", symbol: "SE", status: "ACCEPTED", filledQuantity: 0, remainingQuantity: 63 }],
+      pending: () => [{ orderNo: "1903", market: "NYSE", exchange: "NY", symbol: "SE", side: "BUY", orderQuantity: 63, status: "ACCEPTED", filledQuantity: 0, remainingQuantity: 63 }],
       record: (order) => order,
     },
-    overseasClient: { getUsOrderExecutions: async () => [{ orderNo: "1903", status: "FILLED", filledQuantity: 63, remainingQuantity: 0, fillPrice: 120.95 }] },
+    overseasClient: { getUsOrderExecutions: async () => [{ orderNo: "1903", symbol: "SE", side: "BUY", orderQuantity: 63, status: "FILLED", filledQuantity: 63, remainingQuantity: 0, fillPrice: 120.95 }] },
   });
   assert.equal(changes.length, 1);
   assert.equal(changes[0].current.status, "FILLED");
@@ -380,10 +396,13 @@ assert.equal(enforceOpenRiskLimit(exitRiskPreview).blocked, true); // 손절위�
   const oldBroker = { id: "KIS", environment: "mock", tracker: { pending: () => [savedOrder], record: o => savedOrder = o }, overseasClient: {
     getUsOrderExecutions: async () => { throw Error("old order must use dated history"); },
     getUsHistoricalExecutions: async ({ date }) => { assert.equal(date, "20260901", "US execution history uses exchange date, not next-day Korean date"); historyReads++; return [historyRow]; },
+    getUsOpenOrders: async () => [],
   } };
   await reconcilePendingBrokerOrders(oldBroker);
   assert.equal(savedOrder.status, "ACCEPTED");
   assert.equal(savedOrder.reconciliationRequired, true);
+  assert.equal((savedOrder as any).orderCheck.reasonCode, "HISTORY_ONLY_REQUIRES_REVIEW");
+  assert.equal((savedOrder as any).openOrderEvidence.matchingOrderNumbers, 0, "absence is evidence, not guessed expiry");
   await reconcilePendingBrokerOrders(oldBroker);
   assert.equal(historyReads, 1, "historical query must be throttled");
   savedOrder.historyCheckedAt = "2000-01-01T00:00:00Z";

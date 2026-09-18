@@ -73,7 +73,7 @@ function fixture() {
   assert.equal(unknownRow.state.cancels, 0);
   const stopOrder = currentProtection(unknownRow.broker, unknownRow.receipts, payload);
   unknownRow.broker.tracker.record({ ...stopOrder, updatedAt: "2026-01-01T00:00:00Z" });
-  assert.equal(unknownRow.broker.tracker.expirePreviousDayOrders().length, 0);
+  assert.equal(unknownRow.broker.tracker.markPreviousDayOrdersForReconciliation().length, 0);
 
   const concurrent = fixture(); await ensureProtection(concurrent.broker, concurrent.receipts, payload, () => true);
   concurrent.state.cancelFills = 2;

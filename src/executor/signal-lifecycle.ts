@@ -20,7 +20,9 @@ function lifecycleBrokerState(entry, broker, receipts, now = Date.now()) {
   if (order) return { ...progress, ...order, status: order.status,
     next: order.reconciliationRequired ? "기존 조회 주기로 원주문 대조 · 과거 내역은 5분 간격 · 중복 재주문 차단" : ["ACCEPTED", "PARTIALLY_FILLED", "CANCEL_REQUESTED"].includes(order.status) ? "30초 주기로 체결 확인" : "",
     reason: [order.reconciliationRequired ? "주문 최종 상태 증빙 미확인 · 접수 상태만으로 체결·만료를 추정하지 않습니다." : "",
-      ({ QUERY_FAILED: "최근 조회 실패", NOT_FOUND: "최근 조회에서 일치 주문 없음", HISTORY_UNRESOLVED: "과거 이력은 조회됐으나 종료 증빙 없음" })[order.orderCheck?.reasonCode] || "",
+      ({ QUERY_FAILED: "최근 조회 실패", NOT_FOUND: "최근 조회에서 일치 주문 없음", HISTORY_UNRESOLVED: "과거 이력은 조회됐으나 종료 증빙 없음",
+        HISTORY_ONLY_REQUIRES_REVIEW: "현재 미체결에는 없지만 과거 종료 증빙 부족 · 명세서 대조 필요 (자동 재주문 안 함)",
+        OPEN_ORDER_REQUIRES_REVIEW: "현재 미체결에도 같은 주문번호 존재 · 날짜·종목 대조 필요" })[order.orderCheck?.reasonCode] || "",
       ({ SUBMITTING: "취소 전송 기록 있음 · 결과 확인 필요", REQUESTED: "취소 접수 · 완료 확인 전", UNKNOWN: "취소 응답 미확인 · 자동 재전송 안 함", REJECTED: "취소 거절 · 사유 확인 전 재전송 안 함" })[order.cancellation?.status] || "",
     ].filter(Boolean).join("\n") };
   const attempt = receipts.state.attempts[`${broker.id}:${record.requestId}`];

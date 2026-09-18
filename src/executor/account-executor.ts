@@ -272,7 +272,7 @@ class SignalReceiptStore {
     const key = `${brokerId}:${record.requestId}`;
     this.state.deferred[key] = {
       key, brokerId, record, kind, queuedAt: now,
-      expiresAt: kind === "VERIFY" && Number.isFinite(record.executionDeadline) ? Math.min(now + ttlMs, record.executionDeadline) : now + ttlMs,
+      expiresAt: Number.isFinite(record.executionDeadline) ? Math.min(now + ttlMs, record.executionDeadline) : now + ttlMs,
       lastAttemptMarketDate: "", verificationAttempts: 0,
       orderRetryAttempts: 0, orderRetrySessionKey: "", nextAttemptAt: now,
     };
@@ -698,13 +698,27 @@ async function accountContext(clients, record, maxOpenPositions, options: any = 
   const weightedPurchasePrice = current.reduce(
     (sum, holding) => sum + (Number(holding.purchasePrice) || 0) * holding.quantity, 0,
   );
+  const ledger = options.orders || [];
+  const recordedPositions = new Map(ledger.map(o => [symbolKey({ exchange: o.market, ticker: o.symbol }), { exchange: o.market, ticker: o.symbol }]));
+  // ponytail: per-symbol ledger scans; index only if retained history makes previews slow.
+  const recordedHoldingKeys = [...recordedPositions].filter(([, payload]) =>
+    managedPosition(ledger, payload, clients.environment || "mock").quantity > 0).map(([key]) => key);
   return {
     equity, availableCash, currency: market === "KRX" ? "KRW" : "USD",
     totalAccountEquity, autoCapital, autoCapitalRatio: policy?.autoCapitalRatio,
     currentOpenRisk: policy ? portfolio.openRiskKrw / currencyFactor : null,
     maxOpenRisk: policy ? autoCapital * policy.maxOpenRiskRatio : null,
     maxOpenRiskRatio: policy?.maxOpenRiskRatio,
-    openPositions: domestic.holdings.length + usHoldings.length,
+    // A submitted buy occupies a slot before the balance endpoint reflects its fill.
+    // Partial fills and additional buys of a held symbol must not count twice.
+    openPositions: new Set([
+      ...domestic.holdings.filter(h => h.quantity > 0).map(h => `KRX:${accountSymbol(h.code)}`),
+      ...usHoldings.filter((h: any) => h.quantity > 0).map((h: any) => `US:${accountSymbol(h.code)}`),
+      ...recordedHoldingKeys, // Fill reporting may precede the broker's balance update.
+      ...(options.orders || []).filter(o => o.side === "BUY"
+        && ["ACCEPTED", "PARTIALLY_FILLED", "CANCEL_REQUESTED", "UNKNOWN"].includes(o.status))
+        .map(o => symbolKey({ exchange: o.market, ticker: o.symbol })),
+    ]).size,
     maxOpenPositions,
     currentPositionValue,
     accountPositionRatio: totalAccountEquity > 0 ? currentPositionValue / totalAccountEquity * 100 : 0,
@@ -826,18 +840,32 @@ async function reconcilePendingBrokerOrders(broker) {
     if (brokerStop(previous)) continue; // Native protection has stricter identity/trigger verification.
     let current;
     try {
-      const date = koreanDate(previous.createdAt, "America/New_York");
+      const zone = previous.market === "KRX" ? "Asia/Seoul" : "America/New_York";
+      const date = koreanDate(previous.createdAt, zone);
+      if (date && date < koreanDate(new Date(), zone)
+        && Date.now() - Date.parse(previous.orderCheck?.lastAttemptAt || previous.historyCheckedAt || "") < 300000) continue;
       if (previous.status !== "UNKNOWN" && previous.market !== "KRX" && date
         && date < koreanDate(new Date(), "America/New_York")
         && broker.overseasClient.getUsHistoricalExecutions) {
-        if (Date.now() - Date.parse(previous.orderCheck?.lastAttemptAt || previous.historyCheckedAt || "") < 300000) continue;
         const rows = await broker.overseasClient.getUsHistoricalExecutions({ date, symbol: previous.symbol, exchange: previous.exchange });
         const plan = reconciliationPlan([previous], rows, broker.environment);
         const at = new Date().toISOString();
+        let openOrderEvidence = null;
+        if (!plan.updates.length && broker.overseasClient.getUsOpenOrders) {
+          const open = await broker.overseasClient.getUsOpenOrders({ exchange: previous.exchange });
+          if (!Array.isArray(open) || open.some(o => !o.orderNo || !o.symbol
+            || !["BUY", "SELL"].includes(o.side) || !Number.isInteger(o.remainingQuantity) || o.remainingQuantity < 0)) {
+            throw new Error("현재 미체결 목록 형식 오류");
+          }
+          // A collision/missing identity is unresolved, not permission to cancel or expire.
+          const matches = open.filter(o => String(o.orderNo).replace(/^0+/, "") === String(previous.orderNo).replace(/^0+/, ""));
+          openOrderEvidence = { capturedAt: at, matchingOrderNumbers: matches.length,
+            reasonCode: matches.length ? "OPEN_ORDER_REQUIRES_REVIEW" : "HISTORY_ONLY_REQUIRES_REVIEW" };
+        }
         const orderCheck = { lastAttemptAt: at, lastSuccessAt: at,
-          reasonCode: plan.updates.length === 1 ? "TERMINAL_CONFIRMED" : rows.length ? "HISTORY_UNRESOLVED" : "NOT_FOUND" };
+          reasonCode: plan.updates.length === 1 ? "TERMINAL_CONFIRMED" : openOrderEvidence?.reasonCode || (rows.length ? "HISTORY_UNRESOLVED" : "NOT_FOUND") };
         current = broker.tracker.record(plan.updates.length === 1 ? { ...plan.updates[0], reconciliationRequired: !["FILLED", "CANCELLED", "REJECTED", "EXPIRED"].includes(plan.updates[0].status), historyCheckedAt: at, orderCheck }
-          : { ...previous, historyCheckedAt: at, reconciliationRequired: true, orderCheck });
+          : { ...previous, historyCheckedAt: at, reconciliationRequired: true, orderCheck, openOrderEvidence });
         // An empty current-day list or an old "accepted" row does not prove expiry.
         // Keep the original order blocking a duplicate until final broker evidence arrives.
       } else current = await refreshPaperOrder(previous, broker);
@@ -1076,6 +1104,7 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
   }
   let portfolioAgain = false;
   function requestPortfolioSync() {
+    if (readOnly || receipts.state.portfolioRetry?.nextAttemptAt > Date.now()) return portfolioJob;
     portfolioAgain = true;
     if (!portfolioJob) portfolioJob = (async () => {
       while (portfolioAgain) {
@@ -1090,7 +1119,18 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
             const current = latestOrder(broker, order);
             if (current) broker.tracker.record({ ...current, portfolioSyncedFilledQuantity: filledQuantity });
           }
-        } catch (error) { await reportError("포트폴리오 갱신 재시도 대기", error); }
+          if (result.failures.length) throw new Error("일부 계좌 포트폴리오 조회 미완료");
+          delete receipts.state.portfolioRetry;
+          receipts.write();
+          await reportDataStatus("portfolio-sync", "포트폴리오 갱신");
+        } catch (error) {
+          const attempts = (receipts.state.portfolioRetry?.attempts || 0) + 1;
+          receipts.state.portfolioRetry = { attempts, nextAttemptAt: Date.now() + verificationDelayMs(attempts) };
+          receipts.write();
+          portfolioAgain = false;
+          await reportDataStatus("portfolio-sync", "포트폴리오 갱신", error)
+            .catch(reportError => console.error("포트폴리오 장애 알림 재확인 필요:", reportError.message));
+        }
       }
     })().finally(() => { portfolioJob = null; });
     return portfolioJob;
@@ -1256,12 +1296,8 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
       await reportDataStatus(`portfolio:${broker.id}:${broker.environment}`, `${brokerAccountLabel(broker)} 포트폴리오 조회`, failure?.reason || null);
     }
     if (process.env.STOCK_BRIEFING_TOKEN && stockBriefingSyncReady(result, brokers.length)) {
-      try {
-        const synced = await syncStockBriefingHoldings(result.accounts, { performance: result.performance });
-        console.log(`Stock-Briefing 보유종목 동기화: ${synced.synced}종목`);
-      } catch (error) {
-        await reportError("Stock-Briefing 보유종목 동기화 실패", error);
-      }
+      const synced = await syncStockBriefingHoldings(result.accounts, { performance: result.performance });
+      console.log(`Stock-Briefing 보유종목 동기화: ${synced.synced}종목`);
     }
     return result;
   }
@@ -1285,10 +1321,6 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
       for (const s of snapshots) {
         const reservation = totals.reservedCash?.[s.broker.id] || 0;
         s.preview = capAllocatedPreview(s.preview, totals, { cash: reservation, availableCash: s.account.availableCash });
-        if (reservation && s.account.openPositions + totals.reservedPositions[s.broker.id] >= s.account.maxOpenPositions) {
-          s.preview = { ...s.preview, blocked: true, retryable: true, quantity: 0,
-            reasonCode: "ORDER_VERIFICATION_PENDING", reason: "미확인 주문의 보유 종목 자리 확보 · 신규매수 대기" };
-        }
       }
       if (!saved) {
         const choice = chooseAccount(record, snapshots, routes);
@@ -1595,6 +1627,15 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
 
   async function executeOrDefer(broker, record, { retry = false, manual = false, fromInbox = false } = {}) {
     if (!readOnlySignalAllowed(record, readOnly)) return null;
+    function queueSession(now = Date.now()) {
+      // Fresh intake and an already-authorized next-session plan are different
+      // deadlines. Assign the latter once, only for a confirmed market closure.
+      if (!retry && record.executionDeadlineKind === "INTAKE" && now < record.executionDeadline) {
+        record.executionDeadline = Date.parse(record.receivedAt) + deferredTtlMs;
+        record.executionDeadlineKind = "SESSION";
+      }
+      return receipts.putDeferred(broker.id, record, deferredTtlMs, { now });
+    }
     function waitForVerification(reason = "계좌·주문 확인 대기", reasonCode = "ORDER_VERIFICATION_PENDING") {
       if (Number.isFinite(record.executionDeadline) && Date.now() >= record.executionDeadline) {
         const result = { status: "EXPIRED", reason: "확인 대기 중 신호 유효시간 종료" };
@@ -1624,14 +1665,14 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
             return result;
           }
         }
-        receipts.putDeferred(broker.id, record, deferredTtlMs);
+        queueSession();
         progress(broker, record, { status: "DEFER_REQUIRED" });
         return null;
       }
       const result = await execute(broker, record, { manual });
       if (result?.status === "DEFER_REQUIRED") {
         if (result.verificationPending) return waitForVerification(result.reason, result.reasonCode);
-        receipts.putDeferred(broker.id, record, deferredTtlMs);
+        queueSession();
         progress(broker, record, { status: "DEFER_REQUIRED" });
         return null;
       }
@@ -1663,7 +1704,7 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
         if (!retry) {
           const now = new Date();
           const transitionRetry = shouldRetryMarketTransition(record, error, now, broker);
-          const deferred = receipts.putDeferred(broker.id, record, deferredTtlMs, { now: now.getTime() });
+          const deferred = queueSession(now.getTime());
           if (transitionRetry) receipts.markMarketTransitionFailure(deferred.key, orderAttemptKey(record, now), error, now.getTime());
           else receipts.markDeferredFailure(deferred.key, error);
           progress(broker, record, { status: "DEFER_REQUIRED" });
@@ -1688,6 +1729,10 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
   async function retryDeferred(now = new Date(), selected = brokers) {
     for (const deferred of receipts.listDeferred().filter(item => selected.some(broker => broker.id === item.brokerId))) {
       const action = deferred.record.payload.action === "SELL" ? "매도" : "매수";
+      // Also clamp queues written by older versions; a retry never renews permission.
+      if (Number.isFinite(deferred.record.executionDeadline)) {
+        deferred.expiresAt = Math.min(deferred.expiresAt, deferred.record.executionDeadline);
+      }
       if (deferred.expiresAt <= now.getTime()) {
         receipts.removeDeferred(deferred.key);
         receipts.signal(deferred.record, deferred.brokerId, { status: "EXPIRED", reason: "예약 유효시간 종료 · 새 신호 필요" });
@@ -1982,7 +2027,9 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
       return true;
     }
     const approved = structuredClone(pending.record);
-    approved.executionDeadline = pending.expiresAt;
+    approved.executionDeadline = approved.executionDeadlineKind === "EXPLICIT" && Number.isFinite(approved.executionDeadline)
+      ? Math.min(approved.executionDeadline, pending.expiresAt) : pending.expiresAt;
+    approved.executionDeadlineKind = "APPROVAL";
     if (approved.risk?.verdict === "BUY_PENDING_APPROVAL") approved.risk = { verdict: approvedEntryVerdict(approved), reason: "사용자 BUY 승인" };
     for (const broker of selected) receipts.putDeferred(broker.id, approved, deferredTtlMs);
     receipts.signal(pending.record).approvalClosed = true;
@@ -2027,7 +2074,8 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
   async function processInboxBroker(item, broker) {
     if (item.completed.includes(broker.id)) return;
     const record = structuredClone(item.record);
-    record.executionDeadline = item.expiresAt;
+    record.executionDeadlineKind = Number.isFinite(record.executionDeadline) ? "EXPLICIT" : "INTAKE";
+    record.executionDeadline = Number.isFinite(record.executionDeadline) ? Math.min(record.executionDeadline, item.expiresAt) : item.expiresAt;
     record.source = "DISCORD_SIGNAL";
     try {
       if (item.expiresAt <= Date.now() || receipts.state.signals[record.requestId]?.declined || receipts.state.signals[record.requestId]?.approvalClosed) {
@@ -2254,6 +2302,7 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
       }, 15_000).unref();
       if (!readOnly) {
         setInterval(() => {
+          if (receipts.state.portfolioRetry) void requestPortfolioSync();
           void retryInbox().catch(error => reportError("수신 신호 재확인 실패", error));
           for (const broker of brokers) void brokerWork(broker, () => retryDeferred(new Date(), [broker]), "deferred");
         }, 15_000).unref();
@@ -2268,7 +2317,7 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
     });
     await client.login(process.env.ACCOUNT_DISCORD_TOKEN || process.env.KIS_DISCORD_TOKEN || process.env.DISCORD_TOKEN_DRUCKENMILLER);
   }
-  return { listen, execute, executeOrDefer, retryDeferred, retryInbox, processMessage, processApproval, processOwnerCommand, reconcileOrders, checkManagedStops, refreshLifecycleCards, requestEquitySync, reportEquityStatus, reportDataStatus };
+  return { listen, execute, executeOrDefer, retryDeferred, retryInbox, processMessage, processApproval, processOwnerCommand, reconcileOrders, checkManagedStops, refreshLifecycleCards, requestPortfolioSync, requestEquitySync, reportEquityStatus, reportDataStatus };
 }
 
 if (require.main === module) start().catch(require("../../scripts/network-failure.cjs").fatal);

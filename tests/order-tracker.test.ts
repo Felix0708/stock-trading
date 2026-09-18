@@ -17,10 +17,12 @@ try {
   const staleState = JSON.parse(fs.readFileSync(file, "utf8"));
   staleState.orders["000000001"].market = "NASDAQ";
   staleState.orders["000000001"].updatedAt = "2026-08-17T17:30:00.000Z";
+  staleState.orders["000000001"].createdAt = "2026-08-17T17:30:00.000Z";
   fs.writeFileSync(file, `${JSON.stringify(staleState, null, 2)}\n`);
-  const expired = restarted.expirePreviousDayOrders(new Date("2026-08-19T07:00:00.000Z"));
-  assert.deepEqual(expired.map((order) => order.status), ["EXPIRED"]);
-  assert.equal(restarted.pending().length, 0);
+  const unresolved = restarted.markPreviousDayOrdersForReconciliation(new Date("2026-08-19T07:00:00.000Z"));
+  assert.deepEqual(unresolved.map((order) => order.status), ["ACCEPTED"]);
+  assert.equal(unresolved[0].reconciliationRequired, true);
+  assert.equal(restarted.pending().length, 1);
   assert.deepEqual(restarted.unnotifiedPending(), []);
   restarted.record({ orderNo: "000000002", symbol: "MSFT", status: "ACCEPTED" });
   const newlyRecovered = restarted.unnotifiedPending();
