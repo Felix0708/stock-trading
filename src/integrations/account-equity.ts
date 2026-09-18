@@ -76,4 +76,28 @@ function accountEquitySeries(state, calculatedAt = new Date().toISOString()) {
   });
 }
 
-module.exports = { accountEquitySeries };
+function accountCollectionStatuses(state) {
+  const statuses = [];
+  for (const [key, ref] of Object.entries(state.equityAccounts || {})) {
+    const match = /^(?:group:(KIWOOM)|(KIS)):(mock|live):/.exec(key);
+    if (!match) continue;
+    const broker = match[1] || match[2], environment = match[3];
+    const observations = (state.equity || []).filter(row => row.brokerId === broker && row.environment === environment
+      && (row.accountRef === ref || row.accountGroupRef === ref));
+    const latest = observations.sort((a,b) => Date.parse(b.at)-Date.parse(a.at)
+      || Number(b.scope === "account-total-assets")-Number(a.scope === "account-total-assets"))[0];
+    const failure = state.equityTotalFailures?.[String(ref)];
+    const candidates = [];
+    if (latest) candidates.push({checked_at:latest.at,code:latest.scope === "account-total-assets" ? "total_verified" : "total_unverified"});
+    if (failure) candidates.push({checked_at:failure.at,code:failure.code === "other_currency_assets" ? "other_currency_assets" : "total_unverified"});
+    for (const accountRef of new Set([ref,...observations.map(row => row.accountRef)])) if (state.equityFailures?.[String(accountRef)] && state.equityAttemptedAt?.[String(accountRef)]) {
+      candidates.push({checked_at:state.equityAttemptedAt[String(accountRef)],code:"collection_failed"});
+    }
+    const current = candidates.filter(row => Number.isFinite(Date.parse(row.checked_at))).sort((a,b) => Date.parse(b.checked_at)-Date.parse(a.checked_at))[0];
+    if (current) statuses.push({account_ref:ref,broker,account_type:environment === "mock" ? "paper" : "live",...current});
+  }
+  if (statuses.length > 20) throw Error("수집 진단 계좌 수 초과");
+  return statuses;
+}
+
+module.exports = { accountEquitySeries, accountCollectionStatuses };

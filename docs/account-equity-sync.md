@@ -118,6 +118,22 @@ New York time handles Korean Saturday mornings and DST; holidays and early close
 existing exchange calendar. No zero/stale sample is created while paused. Fill reconciliation,
 unknown-order recovery, and holdings checks are not disabled by this equity-only gate.
 No automated reconstruction of historical cash-flow coverage is performed.
+Cash-flow coverage must include all external movements (or explicit evidence of no
+movements) for the account and period. More asset samples alone cannot verify it.
+
+### Collection diagnostics
+
+`PUT /api/sync/account-status` separately sends `{version:1,statuses:[...]}` using the
+same bearer token. Each status has only `account_ref`, `broker`, `account_type`,
+`checked_at` and `code`; at most 20. Codes: `total_verified`, `other_currency_assets`,
+`total_unverified`, `collection_failed`. Never send account numbers, credential
+fingerprints, balances or raw broker error messages. Original observation/attempt
+timestamps are preserved; stale updates cannot replace newer status. A diagnostic
+failure does not prevent financial history sync. The website distinguishes manual
+holdings without total-asset integration from partial observations and failed totals.
+The executor must load this version for automatic diagnostic delivery; pushing Git
+alone does not restart the locally running trading process.
+
 Domestic/overseas KIWOOM reads are isolated: failure in one preserves its history without
 discarding fresh observations from the other. Repeated equity outages are persisted per
 broker/environment and notified once until a successful complete collection confirms recovery;

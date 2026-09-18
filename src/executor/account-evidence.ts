@@ -147,7 +147,8 @@ async function refreshAccountEquity(broker, file, now = new Date()) {
     } catch (error) {
       const state = readEvidence(file);
       state.equityTotalFailures ||= {};
-      state.equityTotalFailures[equityGroupRef(state, broker)] = { at: new Date().toISOString(), reason: error.message };
+      state.equityTotalFailures[equityGroupRef(state, broker)] = { at: new Date().toISOString(), reason: error.message,
+        code: error.code === "other_currency_assets" ? "other_currency_assets" : "total_unverified" };
       writeEvidence(file, state); // Diagnostic only: never promote an incomplete total or spam market-closure alerts.
     }
   }
@@ -277,14 +278,14 @@ async function collectBrokerEvidence(broker, now = new Date()) {
     try { equity.push(...await collectAccountEquity(broker, scope)); }
     catch (error) { equityError += `${scope}: ${error.message}; `; }
   }
-  let equityTotalError = "";
+  let equityTotalError = "", equityTotalCode = "";
   if (broker.id === "KIWOOM" && broker.domesticClient && equity.length) {
     try { equity.push(await collectKiwoomTotal(broker, equity)); }
-    catch (error) { equityTotalError = error.message; }
+    catch (error) { equityTotalError = error.message; equityTotalCode = error.code === "other_currency_assets" ? "other_currency_assets" : "total_unverified"; }
   }
   return { capturedAt: now.toISOString(), equityCapturedAt: new Date().toISOString(), brokerId: broker.id, environment: broker.environment,
     discrepancies, remainingDiscrepancies: holdingDiscrepancies(corrected, holdings, broker.environment),
-    executions, historyErrors, transactions, transactionError, reconciliation, costs, equity, equityError, equityTotalError };
+    executions, historyErrors, transactions, transactionError, reconciliation, costs, equity, equityError, equityTotalError, equityTotalCode };
 }
 
 function applyEvidence(broker, report, file) {
@@ -303,6 +304,13 @@ function applyEvidence(broker, report, file) {
   }
   state.brokers[`${broker.id}:${broker.environment}`] = report;
   recordAccountEquity(state, broker, report.equity || [], report.equityCapturedAt || report.capturedAt);
+  if (broker.id === "KIWOOM" && broker.domesticClient) {
+    const ref = equityGroupRef(state, broker);
+    state.equityTotalFailures ||= {};
+    if (report.equityTotalError) state.equityTotalFailures[ref] = {at:report.equityCapturedAt || report.capturedAt,
+      reason:report.equityTotalError,code:report.equityTotalCode === "other_currency_assets" ? "other_currency_assets" : "total_unverified"};
+    else if (report.equity?.some(row => row.scope === "account-total-assets")) delete state.equityTotalFailures[ref];
+  }
   writeEvidence(file, state);
   return updates.size;
 }

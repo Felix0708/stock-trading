@@ -1,7 +1,7 @@
 "use strict";
 
 const { formatInstrumentLabel } = require("../research/instrument-names");
-const { accountEquitySeries } = require("./account-equity");
+const { accountEquitySeries, accountCollectionStatuses } = require("./account-equity");
 const { createHash } = require("node:crypto");
 
 const DEFAULT_API_URL = "https://web-mu-inky-93.vercel.app";
@@ -177,6 +177,26 @@ async function syncStockBriefingEquity(state, {
   return { synced, series: series.length, sent, skipped };
 }
 
+async function syncStockBriefingAccountStatus(state, {
+  token = process.env.STOCK_BRIEFING_TOKEN, apiUrl = process.env.STOCK_BRIEFING_URL, fetchImpl = fetch,
+} = {}) {
+  if (!TOKEN_PATTERN.test(String(token || ""))) throw Error("STOCK_BRIEFING_TOKEN 형식이 올바르지 않습니다.");
+  const statuses = accountCollectionStatuses(state);
+  if (!statuses.length) return {synced:0};
+  let response;
+  try {
+    response = await fetchImpl(`${baseUrl(apiUrl, DEFAULT_API_URL)}/api/sync/account-status`, {
+      method:"PUT",headers:{"Content-Type":"application/json",Authorization:`Bearer ${token}`},
+      body:JSON.stringify({version:1,statuses}),redirect:"error",signal:AbortSignal.timeout(25_000),
+    });
+  } catch { throw Error("Stock-Briefing 수집 진단 전송 실패"); }
+  const payload = await responseJson(response,20_000);
+  if (!response.ok || payload?.ok !== true || !Number.isInteger(payload.synced) || payload.synced < 0 || payload.synced > statuses.length) {
+    throw Error(`Stock-Briefing 수집 진단 전송 실패 (${response.status})`);
+  }
+  return {synced:payload.synced};
+}
+
 function plainText(value, maxLength = 600) {
   return String(value || "").replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().slice(0, maxLength);
 }
@@ -245,4 +265,5 @@ module.exports = {
   stockBriefingSyncReady,
   syncStockBriefingHoldings,
   syncStockBriefingEquity,
+  syncStockBriefingAccountStatus,
 };

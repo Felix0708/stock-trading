@@ -36,8 +36,10 @@ async function collectKiwoomTotal(broker, points) {
   });
   if (currencies.pagination?.more || !Array.isArray(currencies.result_list)
     || currencies.result_list.filter(r => r.crnc_code === "USD").length !== 1
-    || currencies.result_list.some(r => !r.crnc_code || (r.crnc_code !== "USD"
-      && (equityNumber(r.fx_entr) !== 0 || equityNumber(r.evlt_amt) !== 0)))) throw Error("미국 외 통화·자산 범위 확인 전 합산 보류");
+    || currencies.result_list.some(r => !r.crnc_code)) throw Error("미국 외 통화·자산 범위 확인 전 합산 보류");
+  if (currencies.result_list.some(r => r.crnc_code !== "USD" && (equityNumber(r.fx_entr) !== 0 || equityNumber(r.evlt_amt) !== 0))) {
+    throw Object.assign(Error("USD 외 통화 잔액·자산이 있어 전체 총자산 합산 보류"), { code: "other_currency_assets" });
+  }
   const same = identities[0] === identities[1];
   if (!same && broker.environment !== "mock") throw Error("서로 다른 실계좌의 전체 자산 범위 확인 전 합산 보류");
   if (same && Math.abs(d.d0Cash - u.wonCash) > 2) throw Error("동일 계좌 원화예수금 대조 불일치");

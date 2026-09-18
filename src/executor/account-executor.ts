@@ -16,7 +16,7 @@ const { decodeSignalEmbed } = require("../discord/discord-signal-envelope");
 const { KiwoomClient, kiwoomCredentials } = require("../brokers/kiwoom-client");
 const { KisClient, kisCredentials } = require("../brokers/kis-client");
 const { enrichInstrumentNames, formatInstrumentLabel } = require("../research/instrument-names");
-const { stockBriefingSyncReady, syncStockBriefingHoldings, syncStockBriefingEquity } = require("../integrations/stock-briefing");
+const { stockBriefingSyncReady, syncStockBriefingHoldings, syncStockBriefingEquity, syncStockBriefingAccountStatus } = require("../integrations/stock-briefing");
 const { OrderTracker } = require("../trading/order-tracker");
 const { normalizedSymbol, normalizedTimeframe, sameTimeframe, emergencyExit, managedPosition, scopePositionPreview, restoreOrderSignalMetadata, orderTime } = require("../trading/position-ownership");
 
@@ -1042,6 +1042,12 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
       }, "equity")));
       // Local evidence and outage recovery must not depend on optional website linking.
       if (!process.env.STOCK_BRIEFING_TOKEN) return;
+      try {
+        await syncStockBriefingAccountStatus(readEvidence(file));
+        await reportDataStatus("briefing-account-status", "Stock-Briefing 수집 진단 동기화");
+      } catch (error) {
+        await reportDataStatus("briefing-account-status", "Stock-Briefing 수집 진단 동기화", error);
+      }
       const synced = await syncStockBriefingEquity(readEvidence(file), {
         checkpoint: receipts.state.briefingEquitySync ||= {}, saveCheckpoint: () => receipts.write(),
       });
