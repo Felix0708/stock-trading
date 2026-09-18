@@ -2,7 +2,16 @@
 
 const { equityPerformance } = require("../executor/equity-performance");
 const { koreanDate } = require("../executor/account-evidence");
-const { equityBreakdown } = require("../brokers/account-equity");
+const { equityBreakdown, currencyTotal } = require("../brokers/account-equity");
+
+function serializeCurrencies(row) {
+  if (!row.currency_breakdown) return {};
+  const total = currencyTotal(row.currency_breakdown);
+  if (row.scope !== "account-total-assets" || row.currency !== "KRW"
+    || ["equity", "cash", "stockValue"].some(k => typeof row[k] !== "number" || Math.abs(row[k] - total[k]) > 2)) throw Error("통화별 합계 대조 오류");
+  return { currency_breakdown: row.currency_breakdown.map(r => ({ currency: r.currency, cash: decimal(r.cash,true), stock_value: decimal(r.stock_value),
+    cash_krw: decimal(r.cash_krw,true), stock_value_krw: decimal(r.stock_value_krw) })) };
+}
 
 function serializeBreakdown(row) {
   const b = row.breakdown;
@@ -38,7 +47,7 @@ function accountEquitySeries(state, calculatedAt = new Date().toISOString()) {
       || !["KIWOOM", "KIS"].includes(row.brokerId) || !["mock", "live"].includes(row.environment)
       || !["KIWOOM:domestic:KRW", "KIWOOM:overseas:USD", "KIWOOM:account-total-assets:KRW", "KIS:account-total-assets:KRW"].includes(`${row.brokerId}:${row.scope}:${row.currency}`)
       || (row.accountGroupRef != null && !/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(row.accountGroupRef))
-      || (row.brokerId === "KIWOOM" && row.scope === "account-total-assets" && (!row.breakdown || !row.accountGroupRef || row.source !== "KIWOOM:linked-accounts:v1"))
+      || (row.brokerId === "KIWOOM" && row.scope === "account-total-assets" && ((!row.breakdown && !row.currency_breakdown) || !row.accountGroupRef || row.source !== "KIWOOM:linked-accounts:v1"))
       || !Number.isFinite(Date.parse(row.at)) || Date.parse(row.at) > Date.parse(calculatedAt)) throw Error("자산 전송 계좌·범위·시각 오류");
     const key = [row.accountRef, row.brokerId, row.environment, row.currency, row.scope].join(":");
     if (!groups.has(key)) groups.set(key, []);
@@ -71,6 +80,7 @@ function accountEquitySeries(state, calculatedAt = new Date().toISOString()) {
         source: row.brokerId === "KIS" ? "KIS_ACCOUNT_EQUITY" : row.scope === "domestic" ? "KIWOOM_KR_EQUITY"
           : row.scope === "overseas" ? "KIWOOM_US_EQUITY" : "KIWOOM_ACCOUNT_EQUITY",
         ...serializeBreakdown(row),
+        ...serializeCurrencies(row),
       })),
     };
   });

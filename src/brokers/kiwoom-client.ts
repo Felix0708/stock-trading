@@ -283,7 +283,7 @@ class KiwoomClient {
     };
   }
 
-  async getDomesticEquity({ includeProof = false } = {}) {
+  async getDomesticEquity({ includeProof = false, selectedCurrencies = false } = {}) {
     const data = await this.post("/api/dostk/acnt", {
       apiId: "kt00018", authorization: true, body: { qry_tp: "1", dmst_stex_tp: "KRX" },
     });
@@ -306,7 +306,7 @@ class KiwoomClient {
         clear: !cashData.pagination?.more && proofNumber(cashData.entr) !== null
           && ["fc_stk_krw_repl_set_amt", "ch_uncla_tot", "etc_loan_tot", "loan_sum", "ls_sum"].every(key => proofNumber(cashData[key]) === 0)
           && Array.isArray(cashData.stk_entr_prst) && cashData.stk_entr_prst.every((row: any) => row && proofNumber(row.fc_uncla) === 0
-            && (row.crnc_cd === "USD" || ["fx_entr", "d4_fx_entr"].every(key => proofNumber(row[key]) === 0))) } } : {}) };
+            && (selectedCurrencies || row.crnc_cd === "USD" || ["fx_entr", "d4_fx_entr"].every(key => proofNumber(row[key]) === 0))) } } : {}) };
   }
 
   async getDomesticQuote({ symbol }: any = {}) {

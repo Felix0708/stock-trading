@@ -68,8 +68,8 @@ function equityScopes(broker) {
 }
 
 async function collectAccountEquity(broker, scope = broker.id === "KIWOOM" ? "overseas" : "account-total-assets") {
-  const points = [await (scope === "domestic" ? broker.domesticClient.getDomesticEquity({ includeProof: true })
-    : broker.overseasClient.getAccountEquity({ includeProof: !!broker.domesticClient, includeBreakdown: true }))];
+  const points = [await (scope === "domestic" ? broker.domesticClient.getDomesticEquity({ includeProof: true, selectedCurrencies: !!broker.selectedCurrencies })
+    : broker.overseasClient.getAccountEquity({ includeProof: !!broker.domesticClient, includeBreakdown: true, selectedCurrencies: !!broker.selectedCurrencies }))];
   if (points.some(row => !row || row.scope !== scope || row.currency !== (scope === "overseas" ? "USD" : "KRW")
       || (scope === "domestic" && broker.id !== "KIWOOM")
       || !Number.isFinite(row.equity) || row.equity < 0
@@ -104,8 +104,8 @@ function equityCollectionOpen(broker, now = new Date()) {
   });
 }
 
-async function refreshAccountEquity(broker, file, now = new Date()) {
-  if (!equityCollectionOpen(broker, now)) return false;
+async function refreshAccountEquity(broker, file, now = new Date(), force = false) {
+  if (!force && !equityCollectionOpen(broker, now)) return false;
   let collected = false, attemptedCollection = false;
   const freshPoints = [];
   const failures = [];
@@ -114,7 +114,7 @@ async function refreshAccountEquity(broker, file, now = new Date()) {
     const latest = before.equity.filter(row => row.accountRef === accountRef).reduce((at, row) => Math.max(at, Date.parse(row.at) || 0), 0);
     before.equityAttemptedAt ||= {};
     const attempted = Date.parse(before.equityAttemptedAt[accountRef] || "") || 0;
-    if (now.getTime() - Math.max(latest, attempted) < 60 * 60_000) {
+    if (!force && now.getTime() - Math.max(latest, attempted) < 60 * 60_000) {
       if (before.equityFailures?.[accountRef]) failures.push(before.equityFailures[accountRef]);
       continue;
     }

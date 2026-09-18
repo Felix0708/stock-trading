@@ -7,6 +7,18 @@ function equityNumber(value) {
   return n;
 }
 
+// Exactly the requested currencies; other wallets are not part of this subtotal.
+function currencyTotal(rows) {
+  if (!Array.isArray(rows) || rows.length !== 3 || new Set(rows.map(r => r.currency)).size !== 3
+    || rows.some(r => !["KRW", "USD", "JPY"].includes(r.currency)
+      || ["cash", "stock_value", "cash_krw", "stock_value_krw"].some(k => typeof r[k] !== "number" || !Number.isFinite(r[k]) || Math.abs(r[k]) > Number.MAX_SAFE_INTEGER)
+      || r.stock_value < 0 || r.stock_value_krw < 0
+      || (r.currency === "KRW" && (r.cash !== r.cash_krw || r.stock_value !== r.stock_value_krw)))) throw Error("3개 통화 자산 형식 오류");
+  const cash = rows.reduce((s,r) => s + r.cash_krw, 0), stockValue = rows.reduce((s,r) => s + r.stock_value_krw, 0);
+  if (!Number.isFinite(cash + stockValue) || cash + stockValue < 0 || Math.abs(cash + stockValue) > Number.MAX_SAFE_INTEGER) throw Error("3개 통화 합계 오류");
+  return { currency: "KRW", scope: "account-total-assets", equity: cash + stockValue, cash, stockValue, currency_breakdown: rows };
+}
+
 function equityBreakdown({ equity, domestic, us, cash, rate, fxSource, source, cashScope, observedAt = new Date().toISOString() }) {
   if (![equity, domestic, us, cash, rate].every(n => typeof n === "number" && Number.isFinite(n) && Math.abs(n) <= Number.MAX_SAFE_INTEGER)
     || equity < 0 || domestic < 0 || us < 0 || rate <= 0 || Math.abs(us * rate) > Number.MAX_SAFE_INTEGER
@@ -37,13 +49,25 @@ async function collectKiwoomTotal(broker, points) {
   if (currencies.pagination?.more || !Array.isArray(currencies.result_list)
     || currencies.result_list.filter(r => r.crnc_code === "USD").length !== 1
     || currencies.result_list.some(r => !r.crnc_code)) throw Error("미국 외 통화·자산 범위 확인 전 합산 보류");
-  if (currencies.result_list.some(r => r.crnc_code !== "USD" && (equityNumber(r.fx_entr) !== 0 || equityNumber(r.evlt_amt) !== 0))) {
+  if (!broker.selectedCurrencies && currencies.result_list.some(r => r.crnc_code !== "USD" && (equityNumber(r.fx_entr) !== 0 || equityNumber(r.evlt_amt) !== 0))) {
     throw Object.assign(Error("USD 외 통화 잔액·자산이 있어 전체 총자산 합산 보류"), { code: "other_currency_assets" });
   }
   const same = identities[0] === identities[1];
   if (!same && broker.environment !== "mock") throw Error("서로 다른 실계좌의 전체 자산 범위 확인 전 합산 보류");
   if (same && Math.abs(d.d0Cash - u.wonCash) > 2) throw Error("동일 계좌 원화예수금 대조 불일치");
   const extraCash = same ? 0 : u.wonCash;
+  if (broker.selectedCurrencies) {
+    const yen = currencies.result_list.filter(r => r.crnc_code === "JPY");
+    if (yen.length > 1) throw Error("엔화 중복 응답");
+    const j = yen[0];
+    // Use the broker's converted JPY amounts, never assume a 1-yen vs 100-yen FX unit.
+    return { ...currencyTotal([
+      { currency: "KRW", cash: domestic.cash + extraCash, stock_value: domestic.stockValue, cash_krw: domestic.cash + extraCash, stock_value_krw: domestic.stockValue },
+      { currency: "USD", cash: us.cash, stock_value: us.stockValue, cash_krw: us.cash * u.rate, stock_value_krw: us.stockValue * u.rate },
+      { currency: "JPY", cash: j ? equityNumber(j.fx_entr) : 0, stock_value: j ? equityNumber(j.evlt_amt) : 0,
+        cash_krw: j ? equityNumber(j.chg_entr) : 0, stock_value_krw: j ? equityNumber(j.chg_evlt_amt) : 0 },
+    ]), source: "KIWOOM:linked-accounts:v1" };
+  }
   const cash = domestic.cash + extraCash + us.cash * u.rate;
   const equity = domestic.equity + extraCash + us.equity * u.rate;
   if ([d, u].some(p => Date.now() - Date.parse(p.observedAt) > 120_000)) throw Error("자산 상세 관측 시간 초과");
@@ -53,4 +77,4 @@ async function collectKiwoomTotal(broker, points) {
       fxSource: "KIWOOM_USD_SELL", source: "KIWOOM_LINKED_V1", cashScope: same ? "same-account" : "separate-accounts", observedAt: u.observedAt }) };
 }
 
-module.exports = { equityNumber, equityBreakdown, collectKiwoomTotal };
+module.exports = { equityNumber, equityBreakdown, collectKiwoomTotal, currencyTotal };

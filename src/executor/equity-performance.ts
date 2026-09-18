@@ -10,6 +10,7 @@ function equityPerformance(state, brokerId, environment, currency, selection: an
   const missing = (reason, status = "invalid_data") => ({ brokerId, environment, currency, samples: snapshots.length,
     returnRate: null, maxDrawdownRate: null, reason, status, curve: curve.length > 1 ? curve : [] });
   if (new Set(snapshots.map(row => `${row.accountRef || "legacy"}:${row.scope}`)).size > 1) return missing("계좌·평가 범위별 조회 필요", "scope_unverified");
+  if (new Set(snapshots.map(row => Boolean(row.currency_breakdown))).size > 1) return missing("전체 통화와 원·달러·엔 합계는 평가 범위가 다릅니다.", "scope_unverified");
   if (snapshots.length < 2) return missing("총자산 스냅샷 2개 이상 필요", "insufficient_samples");
   let index = 1, peak = 1, drawdown = 0;
   curve.push({ at: snapshots[0].at, index });

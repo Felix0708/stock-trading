@@ -15,6 +15,11 @@ lock_file=${TMPDIR:-/tmp}/$lock_name
 /usr/bin/shlock -f "$lock_file" -p "$$" || { printf '계좌 주문 실행기가 이미 실행 중입니다.\n'; exit 0; }
 
 . ./scripts/use-project-node.sh
+# Independent read-only balances for configured mock/live accounts. Does not change order environments.
+if [ "$env_file" = ".env.account" ]; then
+  mkdir -p .runtime
+  sh start-asset-reader.sh >>.runtime/asset-reader.log 2>&1 &
+fi
 chmod 600 "$env_file"
 signal_env=${SIGNAL_ENV_FILE:-.env.signal}
 if [ -f "$signal_env" ] && [ "$signal_env" != "$env_file" ]; then

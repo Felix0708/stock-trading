@@ -490,7 +490,7 @@ class KisClient {
       ERLM_STRT_DT: startDate, ERLM_END_DT: endDate, OVRS_EXCG_CD: "NASD", PDNO: "", SLL_BUY_DVSN_CD: "00", LOAN_DVSN_CD: "", CTX_AREA_FK100: "", CTX_AREA_NK100: "" }, 100);
   }
 
-  async getAccountEquity({ includeBreakdown = false } = {}) {
+  async getAccountEquity({ includeBreakdown = false, selectedCurrencies = false } = {}) {
     const result = await this.request("/uapi/overseas-stock/v1/trading/inquire-present-balance", { trId: this.trId("VTRP6504R", "CTRP6504R"),
       params: this.accountParams({ WCRC_FRCR_DVSN_CD: "02", NATN_CD: "000", TR_MKET_CD: "00", INQR_DVSN_CD: "00" }) });
     const summary = Array.isArray(result.output3) ? result.output3[0] : result.output3;
@@ -507,11 +507,67 @@ class KisClient {
       && Math.abs(cash + stocks - equity) <= 2;
     const point: any = { currency: "KRW", equity, cash: decomposed ? cash : null, stockValue: decomposed ? stocks : null,
       source: "KIS:inquire-present-balance:tot_asst_amt", scope: "account-total-assets" };
+    if (selectedCurrencies) {
+      try { return await this.getSelectedCurrencyEquity(result, summary); }
+      catch (error) {
+        // Preserve a valid broker total, but never publish contradictory currency cash as zero.
+        if (this.environment !== "mock") throw error;
+        point.breakdownError = error instanceof Error ? error.message : "통화별 상세 확인 실패";
+      }
+    }
     if (includeBreakdown && decomposed) {
       try { point.breakdown = await this.getAccountEquityBreakdown(result, point); }
       catch (error) { point.breakdownError = error instanceof Error ? error.message : "자산 상세 확인 실패"; } // Private diagnostic; the valid reported total survives.
     }
     return point;
+  }
+
+  async getSelectedCurrencyEquity(present: any, summary: any) {
+    const { equityNumber: n, currencyTotal } = require("./account-equity");
+    if (!Array.isArray(present.output2) || n(summary.cma_evlu_amt) !== 0) throw Error("통화별 현금·CMA 범위 확인 필요");
+    const domestic = await this.request("/uapi/domestic-stock/v1/trading/inquire-balance", {
+      trId: this.trId("VTTC8434R", "TTTC8434R"), params: this.accountParams({ AFHR_FLPR_YN: "N", OFL_YN: "", INQR_DVSN: "02", UNPR_DVSN: "01",
+        FUND_STTL_ICLD_YN: "N", FNCG_AMT_AUTO_RDPT_YN: "N", PRCS_DVSN: "01", CTX_AREA_FK100: "", CTX_AREA_NK100: "" }),
+    });
+    if (domestic.continuation || !Array.isArray(domestic.output1) || domestic.output2?.length !== 1) throw Error("국내 잔고 조회 미완료");
+    const krStock = n(domestic.output2[0].scts_evlu_amt), krCash = n(summary.tot_dncl_amt);
+    if (Math.abs(domestic.output1.reduce((s: number,r: any) => s+n(r.evlu_amt),0)-krStock)>2) throw Error("국내 평가액 대조 실패");
+    const rows = [{ currency: "KRW", cash: krCash, stock_value: krStock, cash_krw: krCash, stock_value_krw: krStock }];
+    for (const currency of ["USD", "JPY"]) {
+      const wallets = present.output2.filter((r: any) => r.crcy_cd === currency);
+      if (wallets.length > 1) throw Error("중복 통화 응답");
+      const wallet = wallets[0];
+      const positions = new Map<string,number>();
+      // Verify holdings too: an absent cash wallet alone does not prove zero assets.
+      for (const exchange of currency === "USD" ? ["NASD", "NYSE", "AMEX"] : ["TKSE"]) {
+        const result = await this.request("/uapi/overseas-stock/v1/trading/inquire-balance", {
+          trId: this.trId("VTTS3012R", "TTTS3012R"), params: this.accountParams({ OVRS_EXCG_CD: exchange, TR_CRCY_CD: currency, CTX_AREA_FK200: "", CTX_AREA_NK200: "" }),
+        });
+        if (result.continuation || !Array.isArray(result.output1)) throw Error("해외 잔고 조회 미완료");
+        for (const r of result.output1) {
+          const symbol = String(r.ovrs_pdno || ""), value = n(r.ovrs_stck_evlu_amt);
+          if (!symbol || value < 0 || (r.tr_crcy_cd && r.tr_crcy_cd !== currency) || (positions.has(symbol) && positions.get(symbol) !== value)) throw Error("해외 평가액 통화·중복 오류");
+          positions.set(symbol,value);
+        }
+      }
+      const stock = [...positions.values()].reduce((s,v) => s+v,0), cash = wallet ? n(wallet.frcr_dncl_amt_2) : 0;
+      if (!wallet && stock !== 0) throw Error("보유 통화의 예수금·환율 미확인");
+      let rate = wallet ? n(wallet.frst_bltn_exrt) : 1;
+      if (currency === "JPY" && wallet && (cash !== 0 || stock !== 0)) {
+        const native = n(wallet.frcr_drwg_psbl_amt_1), converted = n(wallet.frcr_evlu_amt2);
+        // Verify the quote unit against an explicit native/KRW pair; never assume yen is quoted per 100.
+        const matches = [rate,rate/100].filter(r => native !== 0 && Math.abs(native*r-converted) <= 2);
+        if (matches.length !== 1) throw Error("JPY 환율 단위 대조 필요");
+        rate = matches[0];
+      }
+      if (!(rate > 0)) throw Error("통화 환율 오류");
+      rows.push({currency,cash,stock_value:stock,cash_krw:cash*rate,stock_value_krw:stock*rate});
+    }
+    const total = currencyTotal(rows);
+    // When the account has only the three selected currencies, independently reconcile broker totals.
+    if (present.output2.every((r: any) => ["KRW","USD","JPY"].includes(r.crcy_cd) || n(r.frcr_dncl_amt_2) === 0)
+      && Math.abs(total.equity-n(summary.tot_asst_amt))>2) throw Error("3개 통화 합계와 증권사 총자산 대조 실패");
+    return { ...total, source: "KIS:inquire-present-balance:tot_asst_amt" };
   }
 
   async getAccountEquityBreakdown(present: any, point: any) {
