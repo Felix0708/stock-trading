@@ -2,7 +2,7 @@
 
 const assert = require("node:assert/strict");
 require("./entry-allocation.test");
-const { createAccountRuntime, SignalReceiptStore } = require("../src/executor/account-executor");
+const { createAccountRuntime, SignalReceiptStore, queueSignalRecheck } = require("../src/executor/account-executor");
 const { encodeSignalEnvelope } = require("../src/discord/discord-signal-envelope");
 
 // 네트워크·자격증명·실주문 없는 실행 경로 회귀검증.
@@ -106,6 +106,119 @@ function message(r) { return { id: r.requestId, channelId: "signal", author: { i
   assert.equal(sessionPlan.expiresAt, clock + 5 * 86400000, "fresh closed-session signal retains its intended plan lifetime");
   clock = daytime;
 
+  // Transient pre-order failures survive intake expiry without bypassing policy.
+  {
+    const startClock = clock;
+    const delayed = fixture();
+    delayed.brokers[0].state.failBalance = true;
+    await delayed.runtime.processMessage(message(record("review-buy")));
+    clock += 31 * 60_000;
+    await delayed.runtime.retryInbox();
+    const plan = delayed.receipts.listDeferred()[0];
+    assert.equal(plan.kind, "REVIEW");
+    assert.ok(plan.nextAttemptAt > clock);
+    const restart = fixture();
+    restart.receipts.state = structuredClone(delayed.receipts.state);
+    await restart.runtime.retryDeferred();
+    assert.equal(restart.brokers[0].state.requests.length, 0, "no pre-session submission after restart");
+    clock = plan.nextAttemptAt;
+    await restart.runtime.retryDeferred();
+    assert.equal(restart.brokers[0].state.requests.length, 1);
+    await restart.runtime.retryDeferred();
+    assert.equal(restart.brokers[0].state.requests.length, 1, "no duplicate submission");
+
+    clock = startClock;
+    const approvalReview = fixture();
+    const needsApproval = record("review-approval");
+    needsApproval.risk.verdict = "BUY_PENDING_APPROVAL";
+    approvalReview.brokers[0].state.failBalance = true;
+    await approvalReview.runtime.processMessage(message(needsApproval));
+    clock += 31 * 60_000;
+    await approvalReview.runtime.retryInbox();
+    clock = approvalReview.receipts.listDeferred()[0].nextAttemptAt;
+    approvalReview.brokers[0].state.failBalance = false;
+    await approvalReview.runtime.retryDeferred();
+    assert.equal(approvalReview.brokers[0].state.requests.length, 0, "review is not user BUY approval");
+    assert.equal(Object.keys(approvalReview.receipts.state.pending).length, 1);
+
+    clock = startClock;
+    for (const signalCode of ["EXIT_FINAL", "TAKE_PROFIT", "EXIT_PARTIAL_1"]) {
+      const sellReview = fixture(["KIWOOM", "KIS"]);
+      for (const b of sellReview.brokers) {
+        b.state.orders.push({ orderNo: `entry-${b.id}`, requestId: `position-${b.id}`, symbol: "TEST", market: "NASDAQ",
+          side: "BUY", entryType: "PAPER_ENTRY", timeframe: "240", status: "FILLED", orderQuantity: 10,
+          filledQuantity: 10, remainingQuantity: 0, fillPrice: 100, createdAt: new Date(clock - 60_000).toISOString() });
+        b.state.holdings = [{ code: "TEST", quantity: 10, evaluationAmount: 1200, purchaseAmount: 1000 }];
+        b.state.failBalance = true;
+        b.overseasClient.getUsBalances = async () => {
+          if (b.state.failBalance) throw new Error("balance unavailable");
+          return [{ holdings: b.state.holdings }];
+        };
+        b.overseasClient.getUsBalance = async () => (await b.overseasClient.getUsBalances())[0];
+      }
+      const sell = record(`review-${signalCode}`, "SELL");
+      sell.outcome.signal = { signalCode, tpLevel: 1 } as any;
+      sell.risk.verdict = signalCode === "EXIT_FINAL" ? "PAPER_EXIT" : "PAPER_PARTIAL_EXIT";
+      await sellReview.runtime.processMessage(message(sell));
+      clock += 31 * 60_000;
+      await sellReview.runtime.retryInbox();
+      assert.equal(sellReview.receipts.listDeferred().length, 2, signalCode);
+      assert.notEqual(sellReview.receipts.listDeferred()[0].record.reviewPositionEntryRequestId,
+        sellReview.receipts.listDeferred()[1].record.reviewPositionEntryRequestId);
+      clock = sellReview.receipts.listDeferred()[0].nextAttemptAt;
+      await sellReview.runtime.retryDeferred(); // Still failing: durable inbox transfer.
+      clock += 31 * 60_000;
+      await sellReview.runtime.retryInbox();
+      assert.equal(sellReview.receipts.listDeferred().length, 2, "failed sell review must remain queued");
+      for (const b of sellReview.brokers) b.state.failBalance = false;
+      // Replacement position in one account must not receive the old exit.
+      sellReview.brokers[0].state.orders[0].requestId = "replacement-position";
+      clock = sellReview.receipts.listDeferred()[0].nextAttemptAt;
+      await sellReview.runtime.retryDeferred();
+      assert.equal(sellReview.brokers[0].state.requests.length, 0);
+      assert.equal(sellReview.brokers[1].state.requests.length, 1);
+      assert.equal(sellReview.brokers[1].state.requests[0].side, "SELL");
+      clock = startClock;
+    }
+    const guarded = fixture();
+    const rejected = record("review-guard");
+    guarded.receipts.signal(rejected, "KIS", { status: "DEFER_REQUIRED" });
+    guarded.receipts.attempt("KIS", rejected, "UNKNOWN");
+    assert.equal(queueSignalRecheck(guarded.receipts, guarded.brokers[0], rejected), null);
+    delete guarded.receipts.state.attempts["KIS:review-guard"];
+    (rejected as any).executionDeadlineKind = "APPROVAL";
+    assert.equal(queueSignalRecheck(guarded.receipts, guarded.brokers[0], rejected), null);
+    delete (rejected as any).executionDeadlineKind;
+    guarded.receipts.signal(rejected).declined = true;
+    assert.equal(queueSignalRecheck(guarded.receipts, guarded.brokers[0], rejected), null);
+    guarded.receipts.signal(rejected).declined = false;
+    assert.equal(queueSignalRecheck(guarded.receipts, { ...guarded.brokers[0], environment: "live" }, rejected), null);
+    clock += 6 * 86400_000;
+    assert.equal(queueSignalRecheck(guarded.receipts, guarded.brokers[0], rejected), null, "old buys are not renewed indefinitely");
+    clock = startClock;
+
+    const priority = fixture();
+    const pb = priority.brokers[0];
+    pb.state.orders.push({ orderNo: "owned", requestId: "owned-position", symbol: "HOLD", market: "NASDAQ",
+      side: "BUY", entryType: "PAPER_ENTRY", timeframe: "240", status: "FILLED", orderQuantity: 10,
+      filledQuantity: 10, remainingQuantity: 0, fillPrice: 100, createdAt: new Date(clock - 60000).toISOString() });
+    pb.state.holdings = [{ code: "HOLD", quantity: 10, evaluationAmount: 1200, purchaseAmount: 1000 }];
+    const firstBuy = record("priority-buy"), laterSell = record("priority-sell", "SELL");
+    laterSell.payload.ticker = "HOLD";
+    for (const r of [firstBuy, laterSell]) {
+      priority.receipts.signal(r, "KIS", { status: "DEFER_REQUIRED" });
+      assert.ok(queueSignalRecheck(priority.receipts, pb, r));
+    }
+    const { lifecycleBrokerState: reviewCard } = require("../src/executor/signal-lifecycle");
+    const card = reviewCard(priority.receipts.state.signals[firstBuy.requestId], pb, priority.receipts);
+    assert.match(card.reason, /재검토/);
+    assert.match(card.next, /<t:/);
+    clock = priority.receipts.listDeferred()[0].nextAttemptAt;
+    await priority.runtime.retryInbox();
+    assert.deepEqual(pb.state.requests.map(r => r.side), ["SELL", "BUY"], "exit review precedes entry review");
+    clock = startClock;
+  }
+
   const portfolio = fixture();
   portfolio.channels.portfolio = "order";
   portfolio.brokers[0].state.failBalance = true;
@@ -177,7 +290,9 @@ function message(r) { return { id: r.requestId, channelId: "signal", author: { i
   expiredWait.brokers[0].state.orders.length = 0;
   await expiredWait.runtime.retryInbox();
   assert.equal(expiredWait.brokers[0].state.requests.length, 0);
-  assert.equal(expiredWait.receipts.state.signals['expired-wait'].progress.KIS.status, "EXPIRED");
+  assert.equal(expiredWait.receipts.state.signals['expired-wait'].progress.KIS.status, "DEFER_REQUIRED");
+  assert.equal(expiredWait.receipts.listDeferred()[0].kind, "REVIEW");
+  assert.ok(expiredWait.receipts.listDeferred()[0].nextAttemptAt > clock);
   clock = expiredClock;
   const approvalWait = fixture(["KIS"], "mock", false, true);
   approvalWait.receipts.setAutoTrading(false);
