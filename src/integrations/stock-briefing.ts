@@ -99,7 +99,7 @@ async function syncStockBriefingHoldings(accounts, {
   if (!TOKEN_PATTERN.test(String(token || ""))) throw new Error("STOCK_BRIEFING_TOKEN 형식이 올바르지 않습니다.");
   const holdings = stockBriefingSnapshot(accounts);
   // Rolling deployment: legacy receivers must keep syncing holdings until DB + web are ready.
-  performance = performance.map(({ evaluation, ...rest }) => evaluationEnabled && evaluation?.cohorts?.length <= 100
+  performance = performance.map(({ evaluation, ...rest }) => evaluationEnabled && rest.account_type === "paper" && evaluation?.cohorts?.length <= 100
     ? { ...rest, evaluation } : rest);
   let response;
   try {

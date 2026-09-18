@@ -106,6 +106,11 @@ assert.throws(() => stockBriefingSnapshot([{
       } });
   }
   assert.equal(evaluated[0].evaluation.version, 1, "transport does not mutate report");
+  await syncStockBriefingHoldings(accounts, { token, performance: [{ ...evaluated[0], account_type: "live" }],
+    evaluationEnabled: true, apiUrl: "https://briefing.example", fetchImpl: async (_url, init) => {
+      assert.equal("evaluation" in JSON.parse(init.body).performance[0], false, "web evaluation v1 accepts paper accounts only");
+      return Response.json({ ok: true, synced: 6 });
+    } });
   await syncStockBriefingHoldings(accounts, { token, performance: [{ ...evaluated[0], evaluation: { cohorts: Array(101).fill({}) } }],
     evaluationEnabled: true, apiUrl: "https://briefing.example", fetchImpl: async (_url, init) => {
       assert.equal("evaluation" in JSON.parse(init.body).performance[0], false);
