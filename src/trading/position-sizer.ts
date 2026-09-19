@@ -72,7 +72,7 @@ function calculatePositionSize(input: PositionSizeInput = {} as PositionSizeInpu
   const grade = String(conviction).toUpperCase();
   if (!(grade in CONVICTION_MULTIPLIER)) throw new Error("확신등급은 S, A, B, C, D 중 하나여야 합니다.");
   if (grade === "D") return { blocked: true, reason: "확신등급 D", quantity: 0 };
-  if (!hasExistingPosition && openPositions >= maxOpenPositions) {
+  if (environment === "live" && !hasExistingPosition && openPositions >= maxOpenPositions) {
     return { blocked: true, reason: `최대 ${maxOpenPositions}종목 한도 · 보유·매수 미체결 포함`, quantity: 0 };
   }
   if (atrDot || (typeof atrMultiple === "number" && Number.isFinite(atrMultiple) && atrMultiple > atrDotThreshold)) {

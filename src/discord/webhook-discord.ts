@@ -203,7 +203,7 @@ function formatWebhookRecord(record) {
       `**확신·점수**: ${display(payload.conviction)} / ${display(payload.score)}`,
       `**판정**: ${DECISION_LABELS[outcome.decision] || display(outcome.decision)}`,
       `**자동매매 게이트**: \`${display(risk.verdict)}\` — ${display(risk.reason)}`,
-      `**모의 보유**: ${display(risk.openCount)}/${display(risk.maxOpenPositions)}`,
+      `**모의 보유**: ${display(risk.openCount)} / ${risk.maxOpenPositions === null ? "종목 수 제한 없음" : display(risk.maxOpenPositions)}`,
       ...positionPreviewLines(record.positionPreview),
       orderLine,
       ...payloadLines(payload),

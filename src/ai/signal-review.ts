@@ -27,7 +27,7 @@ function compactSignal(record, index) {
     `conviction=${payload.conviction}, score=${payload.score}, status=${payload.status}, market=${payload.market}`,
     `daily_trend=${payload.daily_trend}, daily_rs=${payload.daily_rs}, setup=${payload.daily_setup_stage}, volume=${payload.daily_volume_trend}, above_200ma=${payload.daily_above_200ma}`,
     `atr_multiple=${payload.atr_multiple}, atr_dot=${payload.atr_dot}, z_score=${payload.sb_z_score}, rsi2=${payload.rsi2}, upper_wick_pct=${payload.upper_wick_pct}`,
-    `risk_gate=${record.risk?.verdict || "-"}, risk_reason=${record.risk?.reason || "-"}, positions=${record.risk?.openCount ?? "-"}/${record.risk?.maxOpenPositions ?? "-"}`,
+    `risk_gate=${record.risk?.verdict || "-"}, risk_reason=${record.risk?.reason || "-"}, positions=${record.risk?.openCount ?? "-"}/${record.risk?.maxOpenPositions === null ? "unlimited (paper only)" : record.risk?.maxOpenPositions ?? "-"}`,
   ].join("\n");
 }
 

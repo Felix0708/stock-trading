@@ -31,15 +31,14 @@ class TradeController {
   [key: string]: any;
 
   constructor(options: any = {}) {
-    this.maxOpenPositions = options.maxOpenPositions ?? 5;
+    // This controller only simulates positions or forwards account-neutral signals.
+    // Live-account position limits remain in the account executor's position sizer.
+    this.maxOpenPositions = null;
     this.buyApprovalRequired = Boolean(options.buyApprovalRequired);
     this.earlyEntryApprovalEnabled = Boolean(options.earlyEntryApprovalEnabled);
     this.accountNeutral = Boolean(options.accountNeutral);
     this.stateFile = options.stateFile || null;
     this.decisionLogFile = options.decisionLogFile || null;
-    if (!Number.isInteger(this.maxOpenPositions) || this.maxOpenPositions < 1) {
-      throw new Error("maxOpenPositions는 1 이상의 정수여야 합니다.");
-    }
     this.state = this.loadState(options.initialMode || "SHADOW");
   }
 
@@ -249,9 +248,6 @@ class TradeController {
         verdict: this.state.mode === "PAPER_AUTO" ? "PAPER_ADD" : "SHADOW_ADD",
         reason: "기존 보유 확인 — 한 종목 총 20% 한도 내 추가매수",
       };
-    }
-    if (Object.keys(this.state.positions).length >= this.maxOpenPositions) {
-      return { verdict: "BLOCKED_MAX_POSITIONS", reason: `동시 보유 종목 한도 ${this.maxOpenPositions}개 도달` };
     }
     if (approvalPending) return { verdict: "BUY_PENDING_APPROVAL", reason: "사용자 BUY 승인 대기" };
 

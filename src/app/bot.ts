@@ -1868,7 +1868,7 @@ function startTradingController() {
     decisionLogFile: path.resolve(ROOT, TRADING_DECISION_LOG_FILE),
   });
   const status = tradingController.status();
-  console.log(`자동매매 게이트: ${status.mode}, 최대 ${status.maxOpenPositions}종목, 실계좌 주문 차단`);
+  console.log(`자동매매 게이트: ${status.mode}, 모의 종목 수 제한 없음, 실계좌 주문 차단`);
   console.log(`공통 신호 서버: ${ACCOUNT_NEUTRAL_SIGNAL_SERVER ? "계좌 중립 · 주문 실행기 분리" : "키움 계좌 결합"}`);
   if (!ACCOUNT_NEUTRAL_SIGNAL_SERVER) {
     console.log(`키움 국내·미국 모의 자동주문: ${KIWOOM_ENABLED && KIWOOM_ENV === "mock" && status.mode === "PAPER_AUTO" ? "활성" : "비활성"}`);
@@ -1898,7 +1898,7 @@ function tradingStatusText() {
     "🛡️ **자동매매 상태**",
     `모드: \`${status.mode}\``,
     `신규 진입: ${status.halted ? "중지" : "허용"}`,
-    `모의 보유: ${status.openCount}/${status.maxOpenPositions}`,
+    `모의 보유: ${status.openCount}종목 · 종목 수 제한 없음`,
     `미완료 주문: ${orderTracker.pending().length}건`,
     `미국장 종료 재검증 대기: ${Object.keys(state.deferredUsEntries).length}건`,
     `키움 모의 자동주문: ${KIWOOM_ENABLED && KIWOOM_ENV === "mock" && status.mode === "PAPER_AUTO" ? "활성" : "비활성"}`,

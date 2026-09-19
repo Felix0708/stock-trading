@@ -20,7 +20,15 @@ assert.equal(calculatePositionSize({ ...base, conviction: "B", sbZScore: 3.15 })
 assert.equal(calculatePositionSize({ ...base, conviction: "B", sbZScore: 3.5 }).quantity, 25);
 assert.deepEqual(calculatePositionSize({ ...base, conviction: "B", sbZScore: 3.51 }), { blocked: true, reason: "Sigma 극심한 과열", quantity: 0 });
 assert.equal(calculatePositionSize({ equity: 100000, entryPrice: 1000, stopPrice: 999 }).quantity, 20);
-assert.equal(calculatePositionSize({ ...base, openPositions: 5 }).blocked, true);
+for (const openPositions of [5, 6, 1000]) {
+  assert.equal(calculatePositionSize({ ...base, environment: "mock", openPositions, maxOpenPositions: 5 }).quantity, 100);
+  assert.equal(calculatePositionSize({ ...base, environment: "live", openPositions, maxOpenPositions: 5 }).blocked, true);
+}
+assert.equal(calculatePositionSize({ ...base, environment: "live", openPositions: 4 }).blocked, false);
+assert.equal(calculatePositionSize({ ...base, environment: "live", openPositions: 5, hasExistingPosition: true }).blocked, false);
+assert.equal(calculatePositionSize({ ...base, openPositions: 1000, availableCash: 0 }).blocked, true);
+assert.equal(calculatePositionSize({ ...base, openPositions: 1000, conviction: "D" }).blocked, true);
+assert.equal(calculatePositionSize({ ...base, openPositions: 1000, currentPositionValue: 20000, hasExistingPosition: true }).blocked, true);
 assert.throws(() => calculatePositionSize({ ...base, stopPrice: 101 }), /손절가/);
 
 const record = {
@@ -33,6 +41,12 @@ const record = {
 const preview = calculateWebhookPositionPreview(record, {
   equity: 100000, availableCash: 100000, openPositions: 0, maxOpenPositions: 5,
 });
+for (const exchange of ["KRX", "NASDAQ"]) {
+  const crowdedAccount = { equity: 100000, availableCash: 100000, openPositions: 100, maxOpenPositions: 5 };
+  const signal = { ...record, payload: { ...record.payload, exchange } };
+  assert.equal(calculateWebhookPositionPreview(signal, crowdedAccount, "mock").blocked, false);
+  assert.equal(calculateWebhookPositionPreview(signal, crowdedAccount, "live").blocked, true);
+}
 assert.equal(preview.quantity, 110);
 assert.equal(preview.positionValue, 11000);
 assert.equal(preview.blocked, false);

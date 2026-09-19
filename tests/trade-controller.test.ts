@@ -24,8 +24,9 @@ for (let index = 1; index <= 5; index += 1) {
   assert.equal(controller.evaluate(entry(index)).verdict, "SHADOW_ENTRY");
 }
 const sixth = controller.evaluate(entry(6));
-assert.equal(sixth.verdict, "BLOCKED_MAX_POSITIONS");
-assert.equal(sixth.openCount, 5);
+assert.equal(sixth.verdict, "SHADOW_ENTRY");
+assert.equal(sixth.openCount, 6);
+assert.equal(sixth.maxOpenPositions, null);
 assert.equal(sixth.liveOrderCreated, false);
 
 const exit = {
@@ -34,7 +35,13 @@ const exit = {
   outcome: { decision: "EXIT_CANDIDATE", signal: { signalCode: "EXIT_FINAL" } },
 };
 assert.equal(controller.evaluate(exit).verdict, "SHADOW_EXIT");
-assert.equal(controller.evaluate(entry(6)).verdict, "SHADOW_ENTRY");
+assert.equal(controller.evaluate(entry(7)).verdict, "SHADOW_ENTRY");
+
+const uncappedPaper = new TradeController({ maxOpenPositions: 1, initialMode: "PAPER_AUTO" });
+for (let index = 1; index <= 7; index += 1) {
+  assert.equal(uncappedPaper.evaluate(entry(index)).verdict, "PAPER_ENTRY");
+}
+assert.equal(uncappedPaper.status().maxOpenPositions, null);
 
 const noStop = new TradeController().evaluate(entry(7, { sl: null }));
 assert.equal(noStop.verdict, "BLOCKED_INVALID_STOP");

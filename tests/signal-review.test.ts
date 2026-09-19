@@ -32,6 +32,8 @@ assert.equal(shouldReviewSignal(record("CHECK", { payload: { ...record().payload
 assert.equal(shouldReviewSignal(record("CHECK", { outcome: { duplicate: true, decision: "DUPLICATE_IGNORED" } })), false);
 
 const topic = buildSignalReviewTopic([record()]);
+assert.match(buildSignalReviewTopic([record("CHECK", { risk: { openCount: 6, maxOpenPositions: null } })]),
+  /positions=6\/unlimited \(paper only\)/);
 assert(topic.includes("Webhook v6.2"));
 assert(topic.includes("SETUP_FORMING"));
 assert(topic.includes("SIMULATOR 테스트"));

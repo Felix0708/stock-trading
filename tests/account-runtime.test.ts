@@ -66,19 +66,20 @@ function fixture(ids = ["KIS"], environment = "mock", readOnly = false, entryAll
 function message(r) { return { id: r.requestId, channelId: "signal", author: { id: "source", bot: true }, embeds: [{ footer: { text: encodeSignalEnvelope(r) } }] }; }
 
 (async () => {
-  for (const allocation of [false, true]) {
-    const capped = fixture(["KIS"], "mock", false, allocation);
+  for (const allocation of [false, true]) for (const brokerId of ["KIS", "KIWOOM"]) {
+    const capped = fixture([brokerId], "mock", false, allocation);
     for (let i = 0; i < 6; i++) {
       const candidate = record(`cap-${i}`);
       candidate.payload.ticker = `T${i}`;
       await capped.runtime.execute(capped.brokers[0], candidate);
     }
-    assert.equal(capped.brokers[0].state.requests.length, 5, "accepted unfilled buys occupy the same account slots as holdings");
+    assert.equal(capped.brokers[0].state.requests.length, 6, "mock entries are not capped at five, including accepted unfilled buys");
     for (const order of capped.brokers[0].state.orders) Object.assign(order, { status: "FILLED", filledQuantity: order.orderQuantity, remainingQuantity: 0, fillPrice: 100 });
     const balanceLag = record("balance-lag");
     balanceLag.payload.ticker = "LAG";
     await capped.runtime.execute(capped.brokers[0], balanceLag);
-    assert.equal(capped.brokers[0].state.requests.length, 5, "confirmed fills keep slots while broker balances lag");
+    assert.equal(capped.brokers[0].state.requests.length, allocation ? 6 : 7,
+      "no mock count cap; allocation still blocks mismatched broker balances and ledger fills");
   }
   const falling = fixture();
   let quotes = 0;

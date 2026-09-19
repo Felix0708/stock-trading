@@ -35,6 +35,8 @@ const base = {
 };
 
 const normal = formatWebhookRecord(base);
+assert.match(formatWebhookRecord({ ...base, risk: { ...base.risk, openCount: 6, maxOpenPositions: null } }).text,
+  /모의 보유\*\*: 6 \/ 종목 수 제한 없음/);
 assert.equal(normal.channel, "signal");
 assert.deepEqual(targetSignalChannels(base), ["국장-전체신호", "국장-진입신호", "국장-매매신호"]);
 assert(normal.text.includes("💰 정석 진입 @SR↩"));
