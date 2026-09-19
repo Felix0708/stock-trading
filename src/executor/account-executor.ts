@@ -111,17 +111,24 @@ function reviewPositionChanged(broker, record) {
 
 // Reuse the durable queue for a new assessment, never as proof of broker rejection.
 // Mock only: live retry permissions and approval expiries remain unchanged.
-function queueSignalRecheck(receipts, broker, record, now = new Date()) {
+function queueSignalRecheck(receipts, broker, record, now = new Date(), { ownerRequested = false } = {}) {
   const entry = receipts.state.signals[record.requestId];
   const buy = record.payload?.action === "BUY";
   const allowed = buy ? ["PAPER_ENTRY", "PAPER_ADD", "BUY_PENDING_APPROVAL"] : ["PAPER_EXIT", "PAPER_PARTIAL_EXIT"];
+  const status = entry?.progress[broker.id]?.status;
+  // Explicit local owner review can revisit an unsubmitted policy rejection.
+  // Automatic recovery still requires a prior transient failure; neither grants BUY approval.
+  const reviewable = ownerRequested
+    ? record.validation?.ok === true && ["NO_ACTION", "BLOCKED", "EXPIRED", "DEFER_REQUIRED"].includes(status)
+    : ["DEFER_REQUIRED", "EXPIRED"].includes(status)
+      && (entry?.progressHistory || []).some(h => h.brokerId === broker.id && h.status === "DEFER_REQUIRED");
   if (broker.environment !== "mock" || !entry || !["BUY", "SELL"].includes(record.payload?.action)
     || !allowed.includes(record.risk?.verdict) || ["APPROVAL", "EXPLICIT"].includes(record.executionDeadlineKind)
     || entry.declined || entry.approvalClosed || receipts.supersededEntry(broker.id, record)
     || receipts.attempt(broker.id, record) || broker.tracker.list().some(o => o.requestId === record.requestId)
-    || !["DEFER_REQUIRED", "EXPIRED"].includes(entry.progress[broker.id]?.status)
-    || !(entry.progressHistory || []).some(h => h.brokerId === broker.id && h.status === "DEFER_REQUIRED")) return null;
+    || !reviewable) return null;
   if (Object.values(receipts.state.pending).some((p: any) => p.record.requestId === record.requestId)) return null;
+  if (ownerRequested && receipts.state.deferred[`${broker.id}:${record.requestId}`]) return null;
   const restored = structuredClone(record);
   if (!buy || record.risk.verdict === "PAPER_ADD") {
     const owned = managedPosition(broker.tracker.list(), record.payload, broker.environment);
@@ -141,13 +148,18 @@ function queueSignalRecheck(receipts, broker, record, now = new Date()) {
   if (expiresAt <= next) return null;
   restored.executionDeadline = expiresAt;
   restored.executionDeadlineKind = "REVIEW";
+  if (ownerRequested) restored.reviewRequestedAt = now.toISOString();
   const key = `${broker.id}:${record.requestId}`;
   const deferred = { key, brokerId: broker.id, record: restored, kind: "REVIEW", queuedAt: now.getTime(),
     expiresAt, nextAttemptAt: next, lastAttemptMarketDate: "", verificationAttempts: 0,
     orderRetryAttempts: 0, orderRetrySessionKey: "" };
   receipts.state.deferred[key] = deferred;
+  // A previous "no eligible account" result is not a reservation. Recompute it at review.
+  if (ownerRequested && receipts.state.entryAllocations?.[record.requestId]?.brokerId === "") {
+    delete receipts.state.entryAllocations[record.requestId];
+  }
   receipts.signal(restored, broker.id, { status: "DEFER_REQUIRED",
-    reason: `${buy ? "매수" : "매도"} 확인 지연 · 다음 장 조건 재검토 예약 (주문 접수 아님)` });
+    reason: `${buy ? "매수" : "매도"} ${ownerRequested ? "사용자 재검토 요청" : "확인 지연"} · 다음 장 조건 재검토 예약 (주문 접수 아님)` });
   return deferred;
 }
 

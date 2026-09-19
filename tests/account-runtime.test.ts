@@ -107,6 +107,45 @@ function message(r) { return { id: r.requestId, channelId: "signal", author: { i
   assert.equal(sessionPlan.expiresAt, clock + 5 * 86400000, "fresh closed-session signal retains its intended plan lifetime");
   clock = daytime;
 
+  // A deliberate owner request, not automatic policy-block replay, can queue a weekend review.
+  {
+    const priorClock = clock;
+    clock = new RealDate("2026-09-19T01:00:00Z").getTime();
+    const requested = fixture(["KIS"], "mock", false, true), b = requested.brokers[0];
+    const r: any = { ...record("owner-review"), validation: { ok: true } };
+    r.receivedAt = "2026-09-18T20:01:00Z";
+    requested.receipts.signal(r, "KIS", { status: "NO_ACTION", reason: "최대 5종목 한도" });
+    requested.receipts.state.entryAllocations = { [r.requestId]: { brokerId: "", reason: "최대 5종목 한도" } };
+    assert.equal(queueSignalRecheck(requested.receipts, b, r), null);
+    assert.equal(queueSignalRecheck(requested.receipts, { ...b, environment: "live" }, r, new Date(), { ownerRequested: true }), null);
+    const plan = queueSignalRecheck(requested.receipts, b, r, new Date(), { ownerRequested: true });
+    assert.equal(new Date(plan.nextAttemptAt).toISOString(), "2026-09-21T13:30:00.000Z");
+    assert.equal(plan.record.receivedAt, r.receivedAt);
+    assert.equal(plan.record.reviewRequestedAt, new Date().toISOString());
+    assert.equal(requested.receipts.state.entryAllocations[r.requestId], undefined);
+    assert.equal(queueSignalRecheck(requested.receipts, b, r, new Date(), { ownerRequested: true }), null, "do not extend an existing reservation");
+    await requested.runtime.retryDeferred();
+    assert.equal(b.state.requests.length, 0, "no weekend order");
+    clock = plan.nextAttemptAt;
+    await requested.runtime.retryDeferred();
+    assert.equal(b.state.requests.length, 1, "recalculate allocation and sizing at Monday open");
+    await requested.runtime.retryDeferred();
+    assert.equal(b.state.requests.length, 1, "no duplicate order");
+    for (const guard of ["declined", "approvalClosed", "unknown", "submitted", "invalid", "old", "superseded"]) {
+      const denied = fixture(), db = denied.brokers[0];
+      const candidate: any = { ...record(`owner-denied-${guard}`), validation: { ok: true } };
+      denied.receipts.signal(candidate, "KIS", { status: "NO_ACTION" });
+      if (["declined", "approvalClosed"].includes(guard)) denied.receipts.state.signals[candidate.requestId][guard] = true;
+      if (guard === "unknown") denied.receipts.attempt("KIS", candidate, "UNKNOWN");
+      if (guard === "submitted") db.state.orders.push({ requestId: candidate.requestId, status: "ACCEPTED" });
+      if (guard === "invalid") candidate.validation.ok = false;
+      if (guard === "old") candidate.receivedAt = new Date(clock - 6 * 86400_000).toISOString();
+      if (guard === "superseded") denied.receipts.rememberExit("KIS", { ...candidate, payload: { ...candidate.payload, action: "SELL" }, risk: { verdict: "PAPER_EXIT" } });
+      assert.equal(queueSignalRecheck(denied.receipts, db, candidate, new Date(), { ownerRequested: true }), null, guard);
+    }
+    clock = priorClock;
+  }
+
   // Transient pre-order failures survive intake expiry without bypassing policy.
   {
     const startClock = clock;
