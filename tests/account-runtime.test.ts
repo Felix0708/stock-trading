@@ -116,6 +116,13 @@ function message(r) { return { id: r.requestId, channelId: "signal", author: { i
     r.receivedAt = "2026-09-18T20:01:00Z";
     requested.receipts.signal(r, "KIS", { status: "NO_ACTION", reason: "최대 5종목 한도" });
     requested.receipts.state.entryAllocations = { [r.requestId]: { brokerId: "", reason: "최대 5종목 한도" } };
+    const unsubmitted = record("expired-daily-allocation");
+    unsubmitted.payload.timeframe = "D";
+    unsubmitted.receivedAt = new Date(Date.parse(r.receivedAt) - 21.5 * 3600000).toISOString();
+    unsubmitted.risk.verdict = "BUY_PENDING_APPROVAL";
+    const expiredApproval = requested.receipts.putPending(unsubmitted, "old-approval", -1, ["KIS"]);
+    requested.receipts.state.entryAllocations[unsubmitted.requestId] = { requestId: unsubmitted.requestId,
+      brokerId: "KIS", symbol: "US:TEST", at: Date.parse(unsubmitted.receivedAt), timeframe: "D" };
     assert.equal(queueSignalRecheck(requested.receipts, b, r), null);
     assert.equal(queueSignalRecheck(requested.receipts, { ...b, environment: "live" }, r, new Date(), { ownerRequested: true }), null);
     const plan = queueSignalRecheck(requested.receipts, b, r, new Date(), { ownerRequested: true });
@@ -129,6 +136,9 @@ function message(r) { return { id: r.requestId, channelId: "signal", author: { i
     clock = plan.nextAttemptAt;
     await requested.runtime.retryDeferred();
     assert.equal(b.state.requests.length, 1, "recalculate allocation and sizing at Monday open");
+    assert.ok(requested.receipts.state.entryAllocations[unsubmitted.requestId], "preserve old allocation history");
+    assert.equal(b.state.orders.some(o => o.requestId === unsubmitted.requestId), false, "expired approval itself is never executed");
+    assert.ok(expiredApproval.expiresAt < clock);
     await requested.runtime.retryDeferred();
     assert.equal(b.state.requests.length, 1, "no duplicate order");
     for (const guard of ["declined", "approvalClosed", "unknown", "submitted", "invalid", "old", "superseded"]) {

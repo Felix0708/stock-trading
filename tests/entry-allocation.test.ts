@@ -12,7 +12,23 @@ const receipts = { state: { attempts: {}, exits: {}, pending: {} }, listDeferred
 const a = snapshot("A", 2000), b = snapshot("B", 9000), snapshots = [a, b];
 assert.equal(chooseAccount(record, snapshots, {}).brokerId, "B");
 const oldRoute = { old: { requestId: "old", symbol: "US:X", brokerId: "A", at: now - 1000, timeframe: "240" } };
-assert.equal(chooseAccount(record, snapshots, oldRoute).brokerId, "");
+assert.equal(chooseAccount(record, snapshots, oldRoute).brokerId, "B", "allocation without an order is not entry");
+assert.equal(chooseAccount(record, [b], oldRoute).brokerId, "", "missing previous broker evidence must not unlock entry");
+for (const status of ["ACCEPTED", "PARTIALLY_FILLED", "FILLED", "CANCEL_REQUESTED", "UNKNOWN", "CANCELED"]) {
+  a.broker.tracker.list().push({ requestId: "old", status });
+  assert.equal(chooseAccount(record, snapshots, oldRoute).brokerId, "", status);
+  a.broker.tracker.list().pop();
+}
+receipts.state.pending['old'] = { record: { ...record, requestId: "old", payload: { ...record.payload, action: "BUY" } }, expiresAt: now + 60000 };
+assert.match(allocationRisk(record, snapshots, receipts).reason, /승인 대기/);
+receipts.state.pending['old'].expiresAt = now - 1;
+assert.equal(allocationRisk(record, snapshots, receipts).blocked, false);
+delete receipts.state.pending['old'];
+for (const status of ["SUBMITTING", "UNKNOWN"]) {
+  receipts.state.attempts["A:old"] = { status };
+  assert.equal(allocationRisk(record, snapshots, receipts).retryable, true, status);
+}
+delete receipts.state.attempts["A:old"];
 oldRoute.old.at = now - 14400001;
 assert.equal(chooseAccount(record, snapshots, oldRoute).brokerId, "B");
 let totals = allocationRisk(record, snapshots, receipts);

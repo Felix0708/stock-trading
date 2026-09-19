@@ -93,7 +93,13 @@ function allocationRisk(record, snapshots, receipts) {
 
 function chooseAccount(record, snapshots, routes) {
   const at = Date.parse(record.receivedAt), key = symbolKey(record.payload);
-  const previous = Object.values(routes).filter((r: any) => r.symbol === key && r.brokerId && r.requestId !== record.requestId) as any[];
+  const previous = Object.values(routes).filter((r: any) => {
+    if (r.symbol !== key || !r.brokerId || r.requestId === record.requestId) return false;
+    const broker = snapshots.find(s => s.broker.id === r.brokerId)?.broker;
+    // Allocation is not entry: an expired, never-submitted approval must not start a cooldown.
+    // Missing broker evidence stays conservative; pending approvals/attempts are checked by allocationRisk.
+    return !broker || broker.tracker.list().some(o => o.requestId === r.requestId);
+  }) as any[];
   if (record.outcome?.decision !== "ADD_CANDIDATE" && previous.some(r => at - r.at < Math.max(frameMs(record.payload.timeframe), frameMs(r.timeframe)))) return { brokerId: "", reason: "같은 구간의 진입 신호 · 최소 한 봉 간격 후 새 신호 필요" };
   const candidates = snapshots.filter(s => !s.preview?.blocked && s.preview?.quantity > 0);
   candidates.sort((a, b) => b.account.availableCash / b.account.equity - a.account.availableCash / a.account.equity
