@@ -38,28 +38,28 @@ const normal = formatWebhookRecord(base);
 assert.match(formatWebhookRecord({ ...base, risk: { ...base.risk, openCount: 6, maxOpenPositions: null } }).text,
   /모의 보유\*\*: 6 \/ 종목 수 제한 없음/);
 assert.equal(normal.channel, "signal");
-assert.deepEqual(targetSignalChannels(base), ["국장-전체신호", "국장-진입신호", "국장-매매신호"]);
+assert.deepEqual(targetSignalChannels(base), ["국장-진입", "국장-매매신호"]);
 assert(normal.text.includes("💰 정석 진입 @SR↩"));
 assert(normal.text.includes("ENTRY_STANDARD"));
 assert(normal.text.includes("생성 안 됨"));
 assert(normal.text.includes("`ai_summary`: \"상승 추세\""));
 assert(normal.text.includes("`atr_dot`: false"));
-assert.equal(normal.embed.color, 0x57F287);
-assert.equal(normal.embed.title, "[4시간봉] 🟢 A · 💰 정석 진입 @SR↩");
+assert.equal(normal.transportEmbed.color, 0x57F287);
+assert.equal(normal.transportEmbed.title, "[4시간봉] 🟢 A · 💰 정석 진입 @SR↩");
 assert(normal.text.includes("BUY / 80000 / 4시간봉"));
 assert.equal(timeframeLabel("D"), "일봉");
 assert.equal(timeframeLabel("1D"), "일봉");
 assert.equal(timeframeLabel("240"), "4시간봉");
-assert(normal.embed.description.includes("삼성전자 (005930)"));
-assert(normal.embed.description.includes("80,000원 · SL 77,500원 · R/R 2.2"));
-assert(normal.embed.fields.some((field) => field.name === "AI 평가" && field.value === "상승 추세"));
-assert(normal.embed.fields.some((field) => field.name === "자동매매" && field.value.includes("PAPER_ENTRY")));
-assert.equal(normal.embed.footer, undefined);
-assert.equal(normal.embed.author.name, "자동주문 연동");
-assert(normal.embed.author.url.startsWith(TRANSPORT_URL_PREFIX));
-assert.equal(decodeSignalEmbed(normal.embed).requestId, base.requestId);
+assert(normal.transportEmbed.description.includes("삼성전자 (005930)"));
+assert(normal.transportEmbed.description.includes("80,000원 · SL 77,500원 · R/R 2.2"));
+assert(normal.transportEmbed.fields.some((field) => field.name === "AI 평가" && field.value === "상승 추세"));
+assert(normal.transportEmbed.fields.some((field) => field.name === "자동매매" && field.value.includes("PAPER_ENTRY")));
+assert.equal(normal.transportEmbed.footer, undefined);
+assert.equal(normal.transportEmbed.author.name, "자동주문 연동");
+assert(normal.transportEmbed.author.url.startsWith(TRANSPORT_URL_PREFIX));
+assert.equal(decodeSignalEmbed(normal.transportEmbed).requestId, base.requestId);
 assert.equal(decodeSignalEmbed({ footer: { text: encodeSignalEnvelope(base) } }).requestId, base.requestId);
-assert.equal(normal.embed.timestamp, undefined);
+assert.equal(normal.transportEmbed.timestamp, undefined);
 
 const observationRecord = {
   ...base,
@@ -72,8 +72,8 @@ const observationRecord = {
   },
 };
 const observation = formatWebhookRecord(observationRecord);
-assert.equal(observation.targetChannel, "관찰");
-assert.deepEqual(targetSignalChannels(observationRecord), ["관찰"]);
+assert.equal(observation.targetChannel, "미국-관찰");
+assert.deepEqual(targetSignalChannels(observationRecord), ["미국-관찰"]);
 assert(observation.text.includes("TradingView 관찰 신호"));
 assert.equal(observation.embed.color, 0xFEE75C);
 
@@ -85,7 +85,7 @@ assert.deepEqual(targetSignalChannels({
   ...base,
   payload: { ...base.payload, ticker: "NVDA", name: "NVIDIA", exchange: "NASDAQ" },
   orderAttempt: { status: "ERROR", reason: "키움 주문 실패" },
-}), ["진입", "미국-매매신호"]);
+}), ["미국-진입", "미국-매매신호"]);
 assert.equal(usTrade.embed.author, undefined);
 assert.equal(decodeSignalEmbed(usTrade.transportEmbed).requestId, base.requestId);
 assert(usTrade.embed.description.includes("엔비디아 (NVDA)"));
@@ -96,15 +96,15 @@ const domesticObservation = formatWebhookRecord({
   ...base,
   payload: { ...base.payload, action: "CHECK" },
   risk: { verdict: "NO_ACTION", reason: "주문 대상이 아닌 신호" },
-  outcome: { ...base.outcome, decision: "INFO_ONLY" },
+  outcome: { ...base.outcome, decision: "INFO_ONLY", signal: { signalCode: "SETUP_FORMING" } },
 });
-assert.equal(domesticObservation.targetChannel, "국장-관찰신호");
+assert.equal(domesticObservation.targetChannel, "국장-관찰");
 
 const dailyReview = formatWebhookRecord({
   ...base,
   risk: { verdict: "REVIEW_DAILY_CONFIRMATION", reason: "일봉 강세·정배열 미확정 — 주문 없이 검토" },
 });
-assert.equal(dailyReview.targetChannel, "국장-진입신호");
+assert.equal(dailyReview.targetChannel, "국장-진입");
 assert(dailyReview.text.includes("TradingView 진입 신호"));
 
 const pendingApproval = formatWebhookRecord({
@@ -114,13 +114,13 @@ const pendingApproval = formatWebhookRecord({
 assert.deepEqual(targetSignalChannels({
   ...base,
   risk: { verdict: "BUY_PENDING_APPROVAL" },
-}), ["국장-전체신호", "국장-진입신호", "국장-매매신호"]);
+}), ["국장-진입", "국장-매매신호"]);
 
 assert.deepEqual(targetSignalChannels({
   ...base,
   payload: { ...base.payload, action: "SELL" },
-  outcome: { ...base.outcome, decision: "PARTIAL_EXIT_CANDIDATE" },
-}), ["국장-전체신호", "국장-청산신호", "국장-매매신호"]);
+  outcome: { ...base.outcome, decision: "PARTIAL_EXIT_CANDIDATE", signal: { signalCode: "EXIT_PARTIAL_1" } },
+}), ["국장-관리", "국장-매매신호"]);
 
 const sized = formatWebhookRecord({
   ...base,
@@ -168,13 +168,13 @@ const clipped = formatWebhookRecord({
   },
   risk: { verdict: "PAPER_ENTRY", reason: "아".repeat(2_000) },
 });
-assert.equal(clipped.embed.fields.find((field) => field.name === "AI 평가").value.length, 1_024);
+assert.equal(clipped.transportEmbed.fields.find((field) => field.name === "AI 평가").value.length, 1_024);
 assert([
-  clipped.embed.title,
-  clipped.embed.description,
-  clipped.embed.author.name,
-  clipped.embed.author.url,
-  ...clipped.embed.fields.flatMap((field) => [field.name, field.value]),
+  clipped.transportEmbed.title,
+  clipped.transportEmbed.description,
+  clipped.transportEmbed.author.name,
+  clipped.transportEmbed.author.url,
+  ...clipped.transportEmbed.fields.flatMap((field) => [field.name, field.value]),
 ].reduce((sum, value) => sum + value.length, 0) <= 6_000);
 
 const duplicate = formatWebhookRecord({ ...base, outcome: { ...base.outcome, duplicate: true } });

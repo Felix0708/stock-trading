@@ -4,17 +4,20 @@ const { formatInstrumentLabel } = require("../research/instrument-names");
 const { normalizeSignal } = require("../signals/signal-normalizer");
 const { signalFingerprint } = require("../signals/signal-state-machine");
 
-const US_CHANNELS = ["오늘의시그널", "sepa분석", "4h리포트", "관찰", "진입", "추매", "관리", "청산", "모멘텀", "peg"];
-const US_EXCHANGES = new Set(["NASDAQ", "NYSE", "AMEX", "NYSEARCA", "ARCA", "ND", "NY", "NA", "BATS"]);
+const { SIGNAL_CHANNELS: US_CHANNELS, SIGNAL_MARKETS, signalMarket } = require("../signals/signal-market");
 const COLORS = { 관찰: 0xFEE75C, 진입: 0x57F287, 추매: 0x2ECC71, 관리: 0xE67E22, 청산: 0xED4245, 모멘텀: 0x9B59B6, peg: 0x3498DB };
 const GRADES = { GO: "진입 가능", HALF: "부분 진입", WAIT: "눌림 대기", NO: "진입 금지", OFF: "판단 없음 (기능 꺼짐)" };
 const LIMIT = 72 * 60 * 60_000;
 const text = (v, max = 500) => String(v ?? "미확인").replace(/@/g, "＠").slice(0, max);
 const number = v => typeof v === "number" && Number.isFinite(v);
-const price = v => number(v) ? `$${v.toLocaleString("en-US", { maximumFractionDigits: 4 })}` : "미제공";
+const marketPrice = (v, market) => {
+  if (!number(v)) return "미제공";
+  const n = v.toLocaleString("en-US", { maximumFractionDigits: 4 });
+  return market?.id === "US" ? `$${n}` : `${n}${market?.currency || " (통화 미확인)"}`;
+};
 const tf = v => ["D", "1D"].includes(String(v).toUpperCase()) ? "일봉" : ["240", "4H"].includes(String(v).toUpperCase()) ? "4시간봉" : ["W", "1W"].includes(String(v).toUpperCase()) ? "주봉" : text(v);
 const code = r => r.outcome?.signal?.signalCode || normalizeSignal(r.payload).signalCode;
-const isUsSignal = r => US_EXCHANGES.has(String(r.payload?.exchange || "").toUpperCase());
+const isUsSignal = r => signalMarket(r)?.id === "US";
 const validDate = value => Number.isFinite(Date.parse(value));
 
 function signalCategory(record) {
@@ -29,6 +32,7 @@ function signalCategory(record) {
 }
 
 function signalCard(record) {
+  const market = signalMarket(record), price = v => marketPrice(v, market);
   const p = record.payload || {}, s = p.indicator_stock || {}, m = p.indicator_market || {}, v = p.indicator_verdict || {};
   const pos = p.indicator_position || {}, category = signalCategory(record), c = code(record);
   const fields = [];
@@ -68,7 +72,7 @@ function signalCard(record) {
     if (category === "청산" && number(pos.entry) && pos.entry > 0 && number(p.price)) add("지표 진입 대비 변동 · 실제 수익률 아님", `${price(pos.entry)} → ${price(p.price)} (${((p.price / pos.entry - 1) * 100).toFixed(2)}%)`);
   }
   if (p.sl_wide) add("주의", "지표가 손절폭 과다로 표시했습니다.");
-  add("주문과 구분", "지표 알림이며 주문 접수·체결 증빙이 아닙니다. 계좌별 처리 결과는 주문승인·체결로그에서 확인하세요.");
+  add("주문과 구분", market?.id === "JP" ? "일본주식은 신호·분석 표시 전용입니다. 자동주문은 연결하지 않습니다." : "지표 알림이며 주문 접수·체결 증빙이 아닙니다. 계좌별 처리 결과는 주문승인·체결로그에서 확인하세요.");
   const bar = Number.isSafeInteger(p.bar_time) && p.bar_time > 0 ? new Date(p.bar_time) : null;
   const embed: any = { color: COLORS[category], title: text(`[${tf(p.timeframe)}] ${p.type || category}`, 200),
     description: `**${text(formatInstrumentLabel(p), 200)}**`, fields,
@@ -80,10 +84,10 @@ function signalCard(record) {
   return embed;
 }
 
-function recentSignals(records, now = Date.now()) {
+function recentSignals(records, now = Date.now(), market = SIGNAL_MARKETS[0]) {
   const seen = new Set();
   return records.filter(r => r.validation?.ok === true && !r.outcome?.duplicate && !["BLOCKED", "REJECTED_INVALID"].includes(r.outcome?.decision)
-    && r.payload?.paper_order_test !== true && isUsSignal(r) && validDate(r.receivedAt)
+    && r.payload?.paper_order_test !== true && signalMarket(r)?.id === market.id && validDate(r.receivedAt)
     && now - Date.parse(r.receivedAt) >= 0 && now - Date.parse(r.receivedAt) <= LIMIT)
     .sort((a, b) => Date.parse(a.receivedAt) - Date.parse(b.receivedAt)).filter(r => {
       const p = r.payload, k = p.schema_ver === "5.0" ? signalFingerprint(p, normalizeSignal(p)) : r.requestId || JSON.stringify([r.receivedAt, p.ticker, p.type, p.timeframe]);
@@ -91,18 +95,19 @@ function recentSignals(records, now = Date.now()) {
     });
 }
 
-function marketDate(ms) {
-  return new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(ms));
+function marketDate(ms, market = SIGNAL_MARKETS[0]) {
+  return new Intl.DateTimeFormat("en-CA", { timeZone: market.zone, year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(ms));
 }
 
 function reportGroup(record, period) {
   const p = record.payload, bar = Number.isSafeInteger(p.bar_time) && p.bar_time > 0 ? p.bar_time : null;
-  if (period === "D") return marketDate(bar ?? Date.parse(record.receivedAt));
+  if (period === "D") return marketDate(bar ?? Date.parse(record.receivedAt), signalMarket(record));
   return bar ? `봉 시작 ${new Date(bar).toISOString()}` : `봉 시각 미제공 · 수신 구간 ${new Date(Math.floor(Date.parse(record.receivedAt) / 14400000) * 14400000).toISOString()}`;
 }
 
-function digestCards(records, period, now = Date.now()) {
-  const matching = recentSignals(records, now).filter(r => period === "D" ? tf(r.payload.timeframe) === "일봉" : tf(r.payload.timeframe) === "4시간봉");
+function digestCards(records, period, now = Date.now(), market = SIGNAL_MARKETS[0]) {
+  const price = v => marketPrice(v, market);
+  const matching = recentSignals(records, now, market).filter(r => period === "D" ? tf(r.payload.timeframe) === "일봉" : tf(r.payload.timeframe) === "4시간봉");
   const title = period === "D" ? "오늘의 시그널 · 일봉" : "4H 리포트";
   if (!matching.length) return [{ color: 0x5865F2, title, description: "최근 72시간에 수신한 해당 시간봉의 유효 신호가 없습니다. 시장 전체 신호가 없다는 뜻은 아닙니다.", footer: { text: "실제 수신분만 집계 · 주문 및 계좌 수익률과 별개" } }];
   const newest = matching.reduce((a, b) => (b.payload.bar_time || Date.parse(b.receivedAt)) > (a.payload.bar_time || Date.parse(a.receivedAt)) ? b : a);
@@ -112,7 +117,7 @@ function digestCards(records, period, now = Date.now()) {
     `**수신 신호 ${selected.length}건 · ${new Set(selected.map(r => `${r.payload.exchange}:${r.payload.ticker}`)).size}종목**`,
     groups.filter(g => g.rows.length).map(g => `${g.category} ${g.rows.length}건`).join(" · "),
     "수신된 알림만 집계합니다. 집계 중이며 미수신·지연 알림은 포함되지 않을 수 있습니다.",
-  ].join("\n"), footer: { text: "미국 거래일/봉 기준 · 실현손익·승률 아님" }, timestamp: selected.at(-1).receivedAt }];
+  ].join("\n"), footer: { text: `${market.label} 거래일/봉 기준 · 실현손익·승률 아님` }, timestamp: selected.at(-1).receivedAt }];
   for (const { category, rows } of groups) {
     let lines = [], size = 0, page = 1;
     const flush = () => { if (lines.length) cards.push({ color: COLORS[category], title: `${category} · ${rows.length}건 (${page++})`, description: lines.join("\n\n"), footer: { text: `${title} · ${key}` } }); lines = []; size = 0; };
@@ -130,6 +135,7 @@ function digestCards(records, period, now = Date.now()) {
 }
 
 function sepaSnapshot(record) {
+  const price = v => marketPrice(v, signalMarket(record));
   const p = record.payload, s = p.indicator_stock || {}, m = p.indicator_market || {};
   return { color: 0x5865F2, title: `SEPA 사전점검 · ${text(formatInstrumentLabel(p), 180)}`,
     description: "**종합 등급 미산정**\n지표에서 확인한 자료입니다. 추세 템플릿 8개 조건과 실적·촉매·수급의 완전한 검증 결과가 아닙니다.",
@@ -143,7 +149,7 @@ function sepaSnapshot(record) {
 
 function sepaResearchPrompt(record) {
   const p = record.payload;
-  return ["미국 주식 SEPA 분석을 한국어로 작성하세요. 실제 인물의 발언이 아니라 AI 분석임을 밝히세요.",
+  return [`${signalMarket(record)?.label || "시장 미확인"} 주식 SEPA 분석을 한국어로 작성하세요. 실제 인물의 발언이 아니라 AI 분석임을 밝히세요.`,
     "반드시 최신 웹 검색으로 공식 공시·기업 IR·가격 데이터 출처를 확인하고 각 사실에 직접 링크와 기준일을 붙이세요. 검색하지 못했으면 분석 미완료라고 하세요.",
     "요약, 추세 템플릿 8개 조건(Pass/Fail/미확인), 실적(EPS·매출·가속), 촉매, 수급, 타이밍, 반대 근거 순서로 작성하세요.",
     "이평 기간·52주 고저·RS 정의를 구분하세요. 지표 확신/실행 등급을 SEPA 종합 등급으로 바꾸지 마세요. 임의의 100점·전설 투표·승률은 만들지 마세요.",

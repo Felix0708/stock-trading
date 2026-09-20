@@ -18,7 +18,8 @@ const {
 const {
   formatWebhookRecord,
 } = require("../discord/webhook-discord");
-const { US_CHANNELS, isUsSignal, signalCategory, signalCard, recentSignals, digestCards, sepaSnapshot, sepaResearchPrompt, marketDate } = require("../discord/us-signal-cards");
+const { signalCategory, signalCard, recentSignals, digestCards, sepaSnapshot, sepaResearchPrompt, marketDate } = require("../discord/us-signal-cards");
+const { SIGNAL_CHANNELS, SIGNAL_MARKETS, signalMarket, marketChannelName, matchesSignalChannel } = require("../signals/signal-market");
 const { createWebhookService, loadOrCreateWebhookToken } = require("../signals/webhook-server");
 const { readAccountHealth } = require("../executor/account-health");
 const { recordAlertReceipt, confirmAlert, applyAlertSnapshot, alertEvidenceSummary } = require("../signals/alert-evidence");
@@ -616,7 +617,7 @@ async function sendChunks(channel, text, allowedMentions = null) {
 
 async function sendFormattedWebhook(channel, formatted, content = "") {
   if (!formatted.embed) return sendChunks(channel, `${content}${content ? "\n" : ""}${formatted.text}`, { parse: [] });
-  const embed = channel.name === "미국-매매신호" ? formatted.transportEmbed || formatted.embed : formatted.embed;
+  const embed = SIGNAL_MARKETS.some(m => m.transport === channel.name) ? formatted.transportEmbed || formatted.embed : formatted.embed;
   const message: any = { embeds: [embed], allowedMentions: { parse: [] } };
   if (content) message.content = content.trim();
   return channel.send(message);
@@ -1029,14 +1030,14 @@ async function briefingSourceContext(clock) {
   };
 }
 
-function findTextChannelByName(name) {
+function findTextChannelByName(name, category = undefined) {
   const client = clients.get("druckenmiller");
   if (!client?.isReady()) return null;
   const guilds = process.env.DISCORD_GUILD_ID
     ? [client.guilds.cache.get(process.env.DISCORD_GUILD_ID)]
     : [...client.guilds.cache.values()];
   for (const guild of guilds) {
-    const channel = guild?.channels.cache.find((item) => item.name === name && item.isTextBased());
+    const channel = guild?.channels.cache.find((item) => matchesSignalChannel(item, name, category));
     if (channel) return channel;
   }
   return null;
@@ -1706,7 +1707,7 @@ async function publishWebhookRecord(record, options: any = {}) {
     const channelNames = formatted.targetChannels || [formatted.targetChannel
       || (formatted.channel === "signal" ? WEBHOOK_SIGNAL_CHANNEL : WEBHOOK_SYSTEM_CHANNEL)];
     for (const channelName of channelNames) {
-      const channel = findTextChannelByName(channelName);
+      const channel = findTextChannelByName(channelName, SIGNAL_MARKETS.some(m => m.transport === channelName) ? undefined : formatted.targetCategory);
       if (!channel) throw new Error(`Discord 채널을 찾지 못했습니다: #${channelName}`);
       await sendFormattedWebhook(channel, formatted, "♻️ **수신 중단 중 발생한 신호 복구**");
     }
@@ -1725,7 +1726,7 @@ async function publishWebhookRecord(record, options: any = {}) {
   const channelNames = formatted.targetChannels || [formatted.targetChannel
     || (formatted.channel === "signal" ? WEBHOOK_SIGNAL_CHANNEL : WEBHOOK_SYSTEM_CHANNEL)];
   for (const channelName of channelNames) {
-    const channel = findTextChannelByName(channelName);
+    const channel = findTextChannelByName(channelName, SIGNAL_MARKETS.some(m => m.transport === channelName) ? undefined : formatted.targetCategory);
     if (!channel) throw new Error(`Discord 채널을 찾지 못했습니다: #${channelName}`);
     await sendFormattedWebhook(channel, formatted);
   }
@@ -2195,11 +2196,11 @@ async function startTunnelStartupNotifier(
 }
 
 async function runSignalReviewBatch(records) {
-  const us = records.filter(isUsSignal);
-  for (const record of us) {
-    const channel = findTextChannelByName("sepa분석");
+  for (const record of records.filter(r => signalMarket(r))) {
+    const market = signalMarket(record);
+    const channel = findTextChannelByName(marketChannelName(market, "sepa분석"), market.category);
     if (!channel) throw new Error("Discord 채널을 찾지 못했습니다: #sepa분석");
-    const key = `${marketDate(Date.now())}:${record.payload.exchange}:${record.payload.ticker}`;
+    const key = `${marketDate(Date.now(), market)}:${record.payload.exchange}:${record.payload.ticker}`;
     if (state.sepaResearch[key]) continue;
     // Public signal fields only: no private shared context, account state, or resumed conversation.
     const persona = PERSONAS.find(p => p.id === "minervini");
@@ -2217,7 +2218,7 @@ async function runSignalReviewBatch(records) {
     for (const old of Object.keys(state.sepaResearch).filter(k => k.slice(0, 10) < marketDate(Date.now() - 7 * 86400000))) delete state.sepaResearch[old];
     saveState();
   }
-  records = records.filter(record => !isUsSignal(record));
+  records = records.filter(record => !signalMarket(record));
   if (!records.length) return;
   const channel = findTextChannelByName(AI_SIGNAL_REVIEW_CHANNEL);
   if (!channel) throw new Error(`Discord 채널을 찾지 못했습니다: #${AI_SIGNAL_REVIEW_CHANNEL}`);
@@ -2228,66 +2229,70 @@ async function runSignalReviewBatch(records) {
   console.log(`AI 신호 검토 완료: ${symbols}`);
 }
 
-async function refreshUsSignalReports() {
+async function refreshSignalReports() {
   const file = path.resolve(ROOT, WEBHOOK_LOG_FILE);
-  if (!fs.existsSync(file)) return;
   // ponytail: reuse the small local signal log; add an incremental index if reading it becomes costly.
-  const records = fs.readFileSync(file, "utf8").split("\n").filter(Boolean).flatMap(line => {
+  const records = (fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "").split("\n").filter(Boolean).flatMap(line => {
     try { return [JSON.parse(line)]; } catch { return []; }
   }).map(record => {
     const p = record.payload || {}, known = state.watchlist[`${p.exchange}:${p.ticker}`];
     return known?.koreanName ? { ...record, payload: { ...p, koreanName: known.koreanName } } : record;
   });
-  const recent = recentSignals(records);
-  const latest = new Map();
-  for (const r of recent.filter(r => ["관찰", "진입", "추매"].includes(signalCategory(r)))) latest.set(`${r.payload.exchange}:${r.payload.ticker}`, r);
-  const sepa = [...latest.values()].sort((a: any, b: any) => Date.parse(b.receivedAt) - Date.parse(a.receivedAt)).slice(0, 10).map(sepaSnapshot);
-  const bundles = [
-    ["오늘의시그널", digestCards(records, "D")], ["4h리포트", digestCards(records, "240")],
-    ["sepa분석", sepa.length ? sepa : [{ color: 0x5865F2, title: "SEPA 사전점검", description: "최근 72시간의 관찰·진입·추매 신호를 기다립니다. 종합 등급은 자료 확인 전 산정하지 않습니다." }]],
-  ];
-  for (const [name, cards] of bundles) {
-    const channel = findTextChannelByName(name);
-    if (!channel) continue;
-    const hash = require("node:crypto").createHash("sha256").update(JSON.stringify(cards)).digest("hex");
-    const previous = state.usSignalReports[name] || {};
-    if (previous.hash === hash) continue;
-    const ids = [...(previous.ids || [])];
-    // Persist each page immediately so a partial Discord failure does not duplicate the completed pages.
-    for (let i = 0; i < cards.length; i++) {
-      const message = await editOrSend(channel, ids[i], { embeds: [cards[i]], allowedMentions: { parse: [] } });
-      ids[i] = message.id;
-      state.usSignalReports[name] = { ids }; saveState();
+  for (const market of SIGNAL_MARKETS) {
+    // Keep existing US message IDs; namespace the other markets' report state.
+    const prefix = market.id === "US" ? "" : `${market.id}:`;
+    const recent = recentSignals(records, Date.now(), market);
+    const latest = new Map();
+    for (const r of recent.filter(r => ["관찰", "진입", "추매"].includes(signalCategory(r)))) latest.set(`${r.payload.exchange}:${r.payload.ticker}`, r);
+    const sepa = [...latest.values()].sort((a: any, b: any) => Date.parse(b.receivedAt) - Date.parse(a.receivedAt)).slice(0, 10).map(sepaSnapshot);
+    const bundles = [
+      ["오늘의시그널", digestCards(records, "D", Date.now(), market)], ["4h리포트", digestCards(records, "240", Date.now(), market)],
+      ["sepa분석", sepa.length ? sepa : [{ color: 0x5865F2, title: "SEPA 사전점검", description: "최근 72시간의 관찰·진입·추매 신호를 기다립니다. 종합 등급은 자료 확인 전 산정하지 않습니다." }]],
+    ];
+    for (const [name, cards] of bundles) {
+      const channel = findTextChannelByName(marketChannelName(market, name), market.category);
+      if (!channel) continue;
+      const hash = require("node:crypto").createHash("sha256").update(JSON.stringify(cards)).digest("hex");
+      const reportKey = `${prefix}${name}`;
+      const previous = state.usSignalReports[reportKey] || {};
+      if (previous.hash === hash) continue;
+      const ids = [...(previous.ids || [])];
+      // Persist each page immediately so a partial Discord failure does not duplicate the completed pages.
+      for (let i = 0; i < cards.length; i++) {
+        const message = await editOrSend(channel, ids[i], { embeds: [cards[i]], allowedMentions: { parse: [] } });
+        ids[i] = message.id;
+        state.usSignalReports[reportKey] = { ids }; saveState();
+      }
+      for (const id of ids.slice(cards.length)) {
+        try { await (await channel.messages.fetch(id)).delete(); }
+        catch (error) { if (!shouldReplaceMissingDiscordMessage(error)) throw error; }
+      }
+      state.usSignalReports[reportKey] = { ids: ids.slice(0, cards.length), hash }; saveState();
     }
-    for (const id of ids.slice(cards.length)) {
-      try { await (await channel.messages.fetch(id)).delete(); }
-      catch (error) { if (!shouldReplaceMissingDiscordMessage(error)) throw error; }
+    // One-time display migration only. These cards contain no execution envelope and never replay orders.
+    for (const name of SIGNAL_CHANNELS.slice(3)) {
+      const marker = `${prefix}seed:${name}`, channel = findTextChannelByName(marketChannelName(market, name), market.category);
+      if (!channel || (state.usSignalReports[marker]?.done && state.usSignalReports[marker]?.version === 2)) continue;
+      const rows = recent.filter(r => signalCategory(r) === name).slice(-5);
+      const ids = state.usSignalReports[marker]?.ids || [];
+      const cards = rows.length ? rows.map(signalCard) : [{ color: 0x5865F2, title: `${name} 신호`, description: "최근 72시간에 수신한 해당 신호가 없습니다. 새 신호부터 이 채널에 표시합니다." }];
+      for (let i = 0; i < cards.length; i++) {
+        const message = await editOrSend(channel, ids[i], { content: "최근 수신 기록 · 화면 이관 (주문 재실행 없음)", embeds: [cards[i]], allowedMentions: { parse: [] } });
+        ids[i] = message.id; state.usSignalReports[marker] = { ids }; saveState();
+      }
+      state.usSignalReports[marker] = { ids, done: true, version: 2 }; saveState();
     }
-    state.usSignalReports[name] = { ids: ids.slice(0, cards.length), hash }; saveState();
-  }
-  // One-time display migration only. These cards contain no execution envelope and never replay orders.
-  for (const name of US_CHANNELS.slice(3)) {
-    const marker = `seed:${name}`, channel = findTextChannelByName(name);
-    if (!channel || (state.usSignalReports[marker]?.done && state.usSignalReports[marker]?.version === 2)) continue;
-    const rows = recent.filter(r => signalCategory(r) === name).slice(-5);
-    const ids = state.usSignalReports[marker]?.ids || [];
-    const cards = rows.length ? rows.map(signalCard) : [{ color: 0x5865F2, title: `${name} 신호`, description: "최근 72시간에 수신한 해당 신호가 없습니다. 새 신호부터 이 채널에 표시합니다." }];
-    for (let i = 0; i < cards.length; i++) {
-      const message = await editOrSend(channel, ids[i], { content: "최근 수신 기록 · 화면 이관 (주문 재실행 없음)", embeds: [cards[i]], allowedMentions: { parse: [] } });
-      ids[i] = message.id; state.usSignalReports[marker] = { ids }; saveState();
-    }
-    state.usSignalReports[marker] = { ids, done: true, version: 2 }; saveState();
   }
 }
 
-function startUsSignalReports() {
+function startSignalReports() {
   if (!WEBHOOK_ENABLED) return;
   let running = false;
   const refresh = async () => {
     if (running) return;
     running = true;
-    try { await refreshUsSignalReports(); }
-    catch (error) { console.error("미국 신호 보고서 갱신 실패:", error.message); }
+    try { await refreshSignalReports(); }
+    catch (error) { console.error("시장별 신호 보고서 갱신 실패:", error.message); }
     finally { running = false; }
   };
   void refresh();
@@ -2296,7 +2301,7 @@ function startUsSignalReports() {
 
 function startSignalReviewBatcher() {
   if (!AI_SIGNAL_REVIEW_ENABLED && !WEBHOOK_ENABLED) return;
-  signalReviewBatcher = new SignalReviewBatcher(records => runSignalReviewBatch(records.filter(r => isUsSignal(r) || AI_SIGNAL_REVIEW_ENABLED)), {
+  signalReviewBatcher = new SignalReviewBatcher(records => runSignalReviewBatch(records.filter(r => signalMarket(r) || AI_SIGNAL_REVIEW_ENABLED)), {
     windowMs: AI_SIGNAL_REVIEW_BATCH_MS,
     maxBatch: AI_SIGNAL_REVIEW_MAX_BATCH,
     onError: async (error) => {
@@ -2305,7 +2310,7 @@ function startSignalReviewBatcher() {
       if (channel) await channel.send(`🛑 AI 신호 검토 실패: ${String(error.message).slice(0, 500)}`);
     },
   });
-  console.log(`미국 SEPA 검토 활성 · 종목당 하루 1회 · 기존 토론 검토 ${AI_SIGNAL_REVIEW_ENABLED ? "ON" : "OFF"}`);
+  console.log(`미국·국내·일본 SEPA 검토 활성 · 종목당 현지 날짜 하루 1회 · 기존 토론 검토 ${AI_SIGNAL_REVIEW_ENABLED ? "ON" : "OFF"}`);
 }
 
 async function startWebhookReceiver() {
@@ -2931,7 +2936,7 @@ async function main() {
   await startOrderStatusWatcher();
   startScheduledPaperExitScheduler();
   startSignalReviewBatcher();
-  startUsSignalReports();
+  startSignalReports();
   await notifySignalServerStartup();
   if (WEBHOOK_ENABLED) void startTunnelStartupNotifier();
   startTelegramScheduler();

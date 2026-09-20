@@ -97,7 +97,7 @@ class TradeController {
     if (!record.validation?.ok || ["BLOCKED", "REJECTED_INVALID"].includes(decision)) {
       verdict = "BLOCKED_INVALID_SIGNAL";
       reason = "명세 또는 신호 검증 실패";
-    } else if (payload.schema_ver === "5.0" && !["KRX", "NASDAQ", "NYSE", "AMEX", "NYSEARCA", "ARCA"].includes(payload.exchange)) {
+    } else if (["TSE", "TSEJP", "JPX"].includes(String(payload.exchange).toUpperCase()) || (payload.schema_ver === "5.0" && !["KRX", "NASDAQ", "NYSE", "AMEX", "NYSEARCA", "ARCA"].includes(payload.exchange))) {
       verdict = "BLOCKED_EXCHANGE";
       reason = "거래소 미확인 또는 주문 미지원 · 지표의 거래소 포함 설정 확인";
     } else if (this.accountNeutral && ENTRY_DECISIONS.has(decision)) {

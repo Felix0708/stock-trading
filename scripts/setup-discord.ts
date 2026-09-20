@@ -7,14 +7,13 @@ const {
   GatewayIntentBits,
   PermissionsBitField,
 } = require("discord.js");
-const { US_CHANNELS } = require("../src/discord/us-signal-cards");
+const { SIGNAL_CHANNELS, SIGNAL_MARKETS, marketChannelName } = require("../src/signals/signal-market");
 
 const STRUCTURE = [
   ["🌐 투자위원회", ["라운지", "시장-브리핑", "종목-토론"]],
-  ["🇺🇸 미국주식", US_CHANNELS],
-  ["🇰🇷 국내주식", ["국장-전체신호", "국장-관찰신호", "국장-진입신호", "국장-청산신호", "국장-매매신호"]],
+  ...SIGNAL_MARKETS.map(m => [m.category, SIGNAL_CHANNELS.map(n => marketChannelName(m, n))]),
   ["📚 투자기록", ["관심종목", "알람설정", "어닝-캘린더", "매매일지", "전략-연구", "주요인사-포트폴리오", "기관-포트폴리오", "내-포트폴리오"]],
-  ["🤖 주문관리", ["주문승인", "체결로그", "시스템상태", "미국-매매신호"]],
+  ["🤖 주문관리", ["주문승인", "체결로그", "시스템상태", "미국-매매신호", "국장-매매신호"]],
 ];
 
 const CATEGORY_RENAMES = new Map([
@@ -39,11 +38,11 @@ client.once(Events.ClientReady, async () => {
     if (!member.permissions.has(PermissionsBitField.Flags.ManageChannels)) {
       throw new Error(`'${guild.name}' 서버에서 드러켄밀러 봇에 '채널 관리' 권한이 없습니다.`);
     }
-    if (process.argv.includes("--us-only")) {
-      await migrateUsChannels(guild, process.argv.includes("--apply"));
+    if (process.argv.includes("--us-only") || process.argv.includes("--markets")) {
+      await migrateMarketChannels(guild, process.argv.includes("--apply"), process.argv.includes("--us-only") ? SIGNAL_MARKETS.slice(0, 1) : SIGNAL_MARKETS);
       return;
     }
-    if (["🇺🇸 미국주식", "🤖 주문관리", "📚 투자기록"].every(name => guild.channels.cache.some(c => c.name === name))) await migrateUsChannels(guild, true);
+    if (["🇺🇸 미국주식", "🤖 주문관리", "📚 투자기록"].every(name => guild.channels.cache.some(c => c.name === name))) await migrateMarketChannels(guild, true);
 
     for (const [oldName, newName] of CATEGORY_RENAMES) {
       const oldCategory = guild.channels.cache.find(
@@ -73,7 +72,7 @@ client.once(Events.ClientReady, async () => {
 
       for (const channelName of channelNames) {
         let channel = guild.channels.cache.find(
-          (candidate) => candidate.type === ChannelType.GuildText && candidate.name === channelName,
+          (candidate) => candidate.type === ChannelType.GuildText && candidate.name === channelName && candidate.parentId === category.id,
         );
         if (!channel) {
           channel = await guild.channels.create({
@@ -97,48 +96,80 @@ client.once(Events.ClientReady, async () => {
   }
 });
 
-async function migrateUsChannels(guild, apply) {
+async function migrateMarketChannels(guild, apply, markets = SIGNAL_MARKETS) {
   await guild.channels.fetch();
-  const find = name => guild.channels.cache.find(c => c.name === name);
-  const category = find("🇺🇸 미국주식"), operations = find("🤖 주문관리"), archive = find("📚 투자기록");
-  if (![category, operations, archive].every(c => c?.type === ChannelType.GuildCategory)) throw new Error("기존 미국주식·주문관리·투자기록 카테고리를 확인해야 합니다.");
-  const renames = [["미국-관찰신호", "관찰"], ["미국-진입신호", "진입"], ["미국-청산신호", "청산"]];
-  for (const name of US_CHANNELS) if (find(name) && find(name).parentId !== category.id) throw new Error(`다른 카테고리의 동명 채널: ${name}`);
-  for (const [oldName, newName] of renames) {
-    const old = find(oldName), existing = find(newName);
-    if (old && existing && old.id !== existing.id) throw new Error(`중복 채널 확인 필요: ${newName}`);
-    if (existing && existing.parentId !== category.id) throw new Error(`다른 카테고리의 동명 채널: ${newName}`);
-    if (old && old.parentId !== category.id) throw new Error(`기존 채널 위치 확인 필요: ${oldName}`);
-    if (old) { console.log(`${apply ? "변경" : "예정"}: ${oldName} → ${newName} (ID·권한·기록 유지)`); if (apply) await old.setName(newName); }
-  }
-  const transport = find("미국-매매신호");
-  if (!transport) throw new Error("기존 미국 주문 전달 채널이 없습니다. 자동 생성하지 않습니다.");
-  const transportId = transport.id, permissions = JSON.stringify(transport.permissionOverwrites.cache.toJSON());
-  for (const [name, parent] of [["미국-매매신호", operations], ["미국-전체신호", archive]]) {
-    const channel = find(name);
-    if (channel && channel.parentId !== parent.id) {
-      console.log(`${apply ? "이동" : "예정"}: ${name} → ${parent.name} (기록·권한 유지)`);
-      if (apply) await channel.setParent(parent.id, { lockPermissions: false });
+  const find = (name, parentId = undefined) => {
+    const matches = guild.channels.cache.filter(c => c.name === name && (!parentId || c.parentId === parentId));
+    if (matches.size > 1) throw new Error(`동명 채널 중복 확인 필요: ${name}`);
+    return matches.first();
+  };
+  const operations = find("🤖 주문관리"), archive = find("📚 투자기록"), template = find("🇺🇸 미국주식");
+  if (![operations, archive, template].every(c => c?.type === ChannelType.GuildCategory)) throw new Error("기존 시장·주문관리·투자기록 카테고리를 확인해야 합니다.");
+  const permissions = c => c.permissionOverwrites.cache.map(p => ({ id: p.id, type: p.type, allow: p.allow.bitfield, deny: p.deny.bitfield }));
+  const fingerprint = c => JSON.stringify(permissions(c).map(p => ({ ...p, allow: String(p.allow), deny: String(p.deny) })).sort((a, b) => a.id.localeCompare(b.id)));
+  const preserved = [];
+  // Preflight all markets before any write. Never recreate a missing order transport.
+  for (const market of markets) {
+    const category = find(market.category);
+    if (category && category.type !== ChannelType.GuildCategory) throw new Error(`카테고리 유형 불일치: ${market.category}`);
+    if (market.transport) {
+      const transport = find(market.transport);
+      if (transport?.type !== ChannelType.GuildText) throw new Error(`기존 주문 전달 채널 확인 필요: ${market.transport}`);
+      preserved.push({ id: transport.id, name: transport.name, permissions: fingerprint(transport) });
+    }
+    for (const name of SIGNAL_CHANNELS) {
+      const target = marketChannelName(market, name), existing = find(target);
+      if (existing && existing.parentId !== category?.id) throw new Error(`다른 위치의 채널: ${target}`);
+      const oldNames = [name, ...(market.legacy && ["관찰", "진입", "청산"].includes(name) ? [`${market.legacy}-${name}신호`] : [])];
+      const candidates = category ? oldNames.map(n => find(n, category.id)).filter(Boolean) : [];
+      if (candidates.length + Number(Boolean(existing)) > 1) throw new Error(`병합 대신 확인 필요: ${target}`);
     }
   }
-  for (const name of US_CHANNELS) {
-    const existing = find(name) || (!apply && find(renames.find(pair => pair[1] === name)?.[0]));
-    if (existing && existing.parentId !== category.id) throw new Error(`다른 위치의 동명 채널: ${name}`);
-    if (!existing) {
-      console.log(`${apply ? "생성" : "예정"}: ${name}`);
-      if (apply) await guild.channels.create({ name, type: ChannelType.GuildText, parent: category.id,
-        permissionOverwrites: category.permissionOverwrites.cache.map(p => ({ id: p.id, type: p.type, allow: p.allow.bitfield, deny: p.deny.bitfield })) });
+  const removeUsAll = process.argv.includes("--delete-us-all");
+  const obsolete = find("미국-전체신호");
+  if (removeUsAll && obsolete && (obsolete.type !== ChannelType.GuildText || ![template.id, archive.id, operations.id].includes(obsolete.parentId))) throw new Error("미국 전체신호 삭제 대상 위치 확인 필요");
+  for (const market of markets) {
+    let category = find(market.category);
+    if (!category) {
+      console.log(`${apply ? "생성" : "예정"}: ${market.category}`);
+      if (apply) category = await guild.channels.create({ name: market.category, type: ChannelType.GuildCategory, permissionOverwrites: permissions(template) });
+    }
+    for (const [name, parent] of [[market.transport, operations], [market.legacy && `${market.legacy}-전체신호`, archive]]) {
+      const channel = name && find(name);
+      if (removeUsAll && channel?.id === obsolete?.id) continue;
+      if (channel && channel.parentId !== parent.id) {
+        console.log(`${apply ? "이동" : "예정"}: ${name} → ${parent.name} (기록·권한 유지)`);
+        if (apply) await channel.setParent(parent.id, { lockPermissions: false });
+      }
+    }
+    for (const name of SIGNAL_CHANNELS) {
+      const target = marketChannelName(market, name);
+      if (find(target)) continue;
+      const old = category && (find(name, category.id) || (market.legacy && ["관찰", "진입", "청산"].includes(name) && find(`${market.legacy}-${name}신호`, category.id)));
+      console.log(`${apply ? old ? "변경" : "생성" : "예정"}: ${old ? `${old.name} → ` : ""}${target}`);
+      if (apply) {
+        if (old) await old.setName(target);
+        else await guild.channels.create({ name: target, type: ChannelType.GuildText, parent: category.id, permissionOverwrites: permissions(category) });
+      }
+    }
+    if (apply) {
+      const names = SIGNAL_CHANNELS.map(n => marketChannelName(market, n));
+      await guild.channels.setPositions(names.map((name, position) => ({ channel: find(name, category.id).id, position })));
+      await guild.channels.fetch();
+      const children = [...guild.channels.cache.values()].filter((c: any) => c.parentId === category.id).sort((a: any, b: any) => a.position - b.position).map((c: any) => c.name);
+      if (JSON.stringify(children) !== JSON.stringify(names)) throw new Error(`${market.category} 10개 채널/순서 검증 실패`);
+      console.log(`검증 완료: ${market.category} 10개 채널`);
     }
   }
-  if (apply) {
-    await guild.channels.setPositions(US_CHANNELS.map((name, position) => ({ channel: find(name).id, position })));
-    await guild.channels.fetch();
-    const preserved = find("미국-매매신호");
-    if (preserved.id !== transportId || JSON.stringify(preserved.permissionOverwrites.cache.toJSON()) !== permissions) throw new Error("주문 전달 채널 ID/권한 보존 검증 실패");
-    const children = [...guild.channels.cache.values()].filter((c: any) => c.parentId === category.id).sort((a: any, b: any) => a.position - b.position).map((c: any) => c.name);
-    if (JSON.stringify(children) !== JSON.stringify(US_CHANNELS)) throw new Error("미국주식 10개 채널/순서 검증 실패");
-    console.log("검증 완료: 미국주식 10개 채널 · 주문 전달 ID/권한 유지 · 삭제 없음");
+  if (apply) for (const original of preserved) {
+    const channel = find(original.name);
+    if (channel?.id !== original.id || fingerprint(channel) !== original.permissions) throw new Error("주문 전달 채널 ID/권한 보존 검증 실패");
   }
+  if (removeUsAll && obsolete) {
+    console.log(`${apply ? "삭제" : "삭제 예정"}: 미국-전체신호 (과거 메시지도 삭제, 복구 불가)`);
+    if (apply) { await obsolete.delete("사용자 요청: 미국 전체신호 제거, 매매신호 보존"); await guild.channels.fetch(); if (find("미국-전체신호")) throw new Error("삭제 검증 실패"); }
+  }
+  console.log(apply ? "완료: 기존 주문 전달 ID·권한 보존, 일본 자동주문 추가 없음" : "읽기 전용 확인 완료 · --apply로 적용");
 }
 
 function selectGuild() {

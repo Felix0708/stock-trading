@@ -4,6 +4,9 @@ const { signalCard, signalCategory, digestCards, recentSignals, sepaSnapshot, se
 const { formatWebhookRecord, targetSignalChannels } = require("../src/discord/webhook-discord");
 const { decodeSignalEmbed } = require("../src/discord/discord-signal-envelope");
 const { shouldReviewSignal } = require("../src/ai/signal-review");
+const { SIGNAL_MARKETS, marketChannelName, signalMarket, matchesSignalChannel } = require("../src/signals/signal-market");
+const { marketDate } = require("../src/discord/us-signal-cards");
+const { TradeController } = require("../src/trading/trade-controller");
 const now = Date.parse("2026-09-18T21:00:00Z");
 function record(type = "정석 진입", action = "BUY", changes: any = {}) {
   return { requestId: `synthetic-${type}`, receivedAt: new Date(now).toISOString(), validation: { ok: true }, outcome: { decision: "ENTRY_CANDIDATE" }, risk: { verdict: "PAPER_ENTRY" },
@@ -27,7 +30,7 @@ for (const [type, action, expected] of types) {
   assert.equal(card.author, undefined);
   assert.equal(decodeSignalEmbed(card), null);
   assert.equal(JSON.stringify(r), original); // presentation must not mutate execution data
-  assert.equal(targetSignalChannels(r)[0], expected);
+  assert.equal(targetSignalChannels(r)[0], `미국-${expected}`);
   const formatted = formatWebhookRecord(r);
   assert.equal(decodeSignalEmbed(formatted.transportEmbed).requestId, r.requestId);
 }
@@ -64,4 +67,40 @@ for (const card of [...cards, signalCard(record("x".repeat(9000), "BUY", { desc:
   const total = [card.title, card.description, card.footer?.text, ...(card.fields || []).flatMap(f => [f.name, f.value])].filter(Boolean).join("").length;
   assert(total <= 6000);
 }
-console.log("us-signal-cards test OK: routing, transport isolation, recent reports, pagination, missing data, privacy");
+const mixed = SIGNAL_MARKETS.map(m => record("정석 진입", "BUY", { exchange: m.exchanges[0], timeframe: "D" }));
+for (const market of SIGNAL_MARKETS) {
+  const entry = mixed.find(r => signalMarket(r).id === market.id);
+  const formatted = formatWebhookRecord(entry);
+  assert.equal(formatted.targetCategory, market.category);
+  assert.equal(formatted.targetChannel, `${market.prefix}-진입`);
+  assert.equal(formatted.embed.author, undefined);
+  assert.match(JSON.stringify(formatted.embed), market.id === "US" ? /\$100/ : new RegExp(`100${market.currency}`));
+  assert.match(JSON.stringify(sepaSnapshot(entry)), market.id === "US" ? /\$100/ : new RegExp(`100${market.currency}`));
+  assert(sepaResearchPrompt(entry).startsWith(`${market.label} 주식`));
+  assert.equal(recentSignals(mixed, now, market).length, 1);
+  assert(digestCards(mixed, "D", now, market)[0].footer.text.startsWith(market.label));
+  assert.match(digestCards(mixed, "D", now, market)[0].description, /수신 신호 1건/);
+  const channel = { name: marketChannelName(market, "진입"), parent: { name: market.category }, isTextBased: () => true };
+  assert(matchesSignalChannel(channel, channel.name, market.category));
+  assert(!matchesSignalChannel(channel, channel.name, "잘못된 카테고리"));
+  assert.equal(shouldReviewSignal(entry), true);
+  if (market.transport) assert.equal(decodeSignalEmbed(formatted.transportEmbed).requestId, entry.requestId);
+  else {
+    assert.equal(formatted.transportEmbed, undefined);
+    assert.deepEqual(formatted.targetChannels, ["일본-진입"]);
+    for (const schema_ver of [undefined, "5.0"]) for (const side of ["BUY", "SELL"]) {
+      const r = { ...entry, payload: { ...entry.payload, action: side, schema_ver }, outcome: { decision: side === "BUY" ? "ENTRY_CANDIDATE" : "EXIT_CANDIDATE" } };
+      r.risk = new TradeController({ initialMode: "PAPER_AUTO", accountNeutral: true }).evaluate(r);
+      assert.equal(r.risk.verdict, "BLOCKED_EXCHANGE");
+      assert.equal(formatWebhookRecord(r).channel, "signal");
+      assert.equal(formatWebhookRecord(r).transportEmbed, undefined);
+    }
+  }
+}
+assert.equal(new Set(SIGNAL_MARKETS.flatMap(m => US_CHANNELS.map(n => marketChannelName(m, n)))).size, 30);
+const boundary = Date.parse("2026-09-21T00:30:00Z");
+assert.equal(marketDate(boundary, SIGNAL_MARKETS[0]), "2026-09-20");
+assert.equal(marketDate(boundary, SIGNAL_MARKETS[1]), "2026-09-21");
+assert.equal(marketDate(boundary, SIGNAL_MARKETS[2]), "2026-09-21");
+assert.equal(formatWebhookRecord(record("정석 진입", "BUY", { exchange: "UNKNOWN" })).channel, "system");
+console.log("signal-cards test OK: 3 markets, prefixed routing, currency, dates, transport isolation, recent reports, pagination, privacy");

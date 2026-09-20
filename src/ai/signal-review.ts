@@ -3,7 +3,8 @@
 const WATCHLIST_CODES = new Set([
   "SETUP_FORMING", "VCP_FORMING", "PEG_STARTED", "RANGE_BREAKOUT", "POST_SURGE_PULLBACK",
 ]);
-const { isUsSignal, signalCategory } = require("../discord/us-signal-cards");
+const { signalCategory } = require("../discord/us-signal-cards");
+const { signalMarket } = require("../signals/signal-market");
 
 function shouldReviewSignal(record) {
   const pendingBuy = record?.payload?.action === "BUY" && record?.risk?.verdict === "BUY_PENDING_APPROVAL";
@@ -13,7 +14,7 @@ function shouldReviewSignal(record) {
     && record.payload?.paper_order_test !== true
     && !record.outcome?.duplicate
     && !["BLOCKED", "REJECTED_INVALID"].includes(record.outcome?.decision)
-    && ((isUsSignal(record) && ["진입", "추매"].includes(signalCategory(record))) || pendingBuy || dailyReview || (record.payload?.action === "CHECK" && WATCHLIST_CODES.has(record.outcome?.signal?.signalCode))),
+    && ((signalMarket(record) && ["진입", "추매"].includes(signalCategory(record))) || pendingBuy || dailyReview || (record.payload?.action === "CHECK" && WATCHLIST_CODES.has(record.outcome?.signal?.signalCode))),
   );
 }
 

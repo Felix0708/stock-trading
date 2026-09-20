@@ -2,7 +2,8 @@
 
 const { encodeSignalEnvelope, TRANSPORT_URL_PREFIX } = require("./discord-signal-envelope");
 const { formatInstrumentLabel } = require("../research/instrument-names");
-const { isUsSignal, signalCategory, signalCard } = require("./us-signal-cards");
+const { signalCategory, signalCard } = require("./us-signal-cards");
+const { signalMarket, marketChannelName } = require("../signals/signal-market");
 
 const DECISION_LABELS = {
   ENTRY_CANDIDATE: "진입 검토",
@@ -47,18 +48,12 @@ function signalKind(record) {
 }
 
 function targetSignalChannels(record) {
-  if (isUsSignal(record)) return [signalCategory(record), ...(encodeSignalEnvelope(record) ? ["미국-매매신호"] : [])];
-  const market = DOMESTIC_EXCHANGES.has(record.payload?.exchange) ? "국장" : "미국";
-  const kind = signalKind(record);
-  return [
-    `${market}-전체신호`,
-    `${market}-${kind}신호`,
-    ...(encodeSignalEnvelope(record) ? [`${market}-매매신호`] : []),
-  ];
+  const market = signalMarket(record);
+  return market ? [marketChannelName(market, signalCategory(record)), ...(market.transport && encodeSignalEnvelope(record) ? [market.transport] : [])] : [];
 }
 
 function targetSignalChannel(record) {
-  return isUsSignal(record) ? signalCategory(record) : targetSignalChannels(record)[1];
+  return targetSignalChannels(record)[0];
 }
 
 function display(value) {
@@ -174,7 +169,8 @@ function formatWebhookRecord(record) {
       ? `**주문**: 📨 ${brokerLabel} ${display(record.orderAttempt.side)} ${display(record.orderAttempt.orderQuantity)}주 접수 · 끝 4자리 ${String(record.orderAttempt.orderNo).slice(-4)}`
       : `**주문**: 🛑 ${display(record.orderAttempt.status)} — ${display(record.orderAttempt.reason)}`;
 
-  if (!record.validation?.ok || outcome.decision === "REJECTED_INVALID" || outcome.decision === "BLOCKED" || risk.verdict === "BLOCKED_EXCHANGE") {
+  const market = signalMarket(record);
+  if (!record.validation?.ok || outcome.decision === "REJECTED_INVALID" || outcome.decision === "BLOCKED" || !market || (risk.verdict === "BLOCKED_EXCHANGE" && market.id !== "JP")) {
     const reasons = [...(record.validation?.errors || []), ...(outcome.warnings || []), ...(risk.verdict === "BLOCKED_EXCHANGE" ? [risk.reason] : [])].slice(0, 3);
     return {
       channel: "system",
@@ -204,8 +200,9 @@ function formatWebhookRecord(record) {
     channel: "signal",
     targetChannel: targetSignalChannel(record),
     targetChannels: targetSignalChannels(record),
-    embed: isUsSignal(record) ? signalCard(record) : signalEmbed(record, identity, orderLine),
-    transportEmbed: signalEmbed(record, identity, orderLine),
+    targetCategory: market.category,
+    embed: signalCard(record),
+    transportEmbed: market.transport ? signalEmbed(record, identity, orderLine) : undefined,
     text: [
       `📡 **TradingView ${signalKind(record)} 신호**`,
       `**종목**: ${identity} / ${display(payload.exchange)}`,
