@@ -34,7 +34,7 @@ assert.equal(shouldReviewSignal(record("CHECK", { outcome: { duplicate: true, de
 const topic = buildSignalReviewTopic([record()]);
 assert.match(buildSignalReviewTopic([record("CHECK", { risk: { openCount: 6, maxOpenPositions: null } })]),
   /positions=6\/unlimited \(paper only\)/);
-assert(topic.includes("Webhook v6.2"));
+assert(topic.includes("TradingView 워치리스트"));
 assert(topic.includes("SETUP_FORMING"));
 assert(topic.includes("SIMULATOR 테스트"));
 assert(topic.includes("관찰 단계"));

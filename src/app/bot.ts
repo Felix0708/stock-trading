@@ -18,6 +18,7 @@ const {
 const {
   formatWebhookRecord,
 } = require("../discord/webhook-discord");
+const { US_CHANNELS, isUsSignal, signalCategory, signalCard, recentSignals, digestCards, sepaSnapshot, sepaResearchPrompt, marketDate } = require("../discord/us-signal-cards");
 const { createWebhookService, loadOrCreateWebhookToken } = require("../signals/webhook-server");
 const { readAccountHealth } = require("../executor/account-health");
 const { recordAlertReceipt, confirmAlert, applyAlertSnapshot, alertEvidenceSummary } = require("../signals/alert-evidence");
@@ -230,7 +231,7 @@ const DEFAULT_PERSONA_BY_CHANNEL = {
 
 function loadState() {
   if (!fs.existsSync(STATE_FILE)) return {
-    sessions: {}, scheduledRuns: {}, reviewedResearch: {}, telegramRuns: {},
+    sessions: {}, scheduledRuns: {}, reviewedResearch: {}, telegramRuns: {}, usSignalReports: {}, sepaResearch: {},
     investorPortfolioContext: "", investorPortfolioUpdatedAt: "", investorPortfolioSourceMtime: 0,
     investorPortfolioAnnouncedAt: "", investorPortfolioMessageId: "", investorPortfolioMessageIds: [], investorPortfolioDisplayContext: "", duquesne13fContext: "", duquesne13fUpdatedAt: "",
     muniPortfolioContext: "", muniPortfolioUpdatedAt: "", muniPortfolioMessageId: "",
@@ -245,6 +246,8 @@ function loadState() {
     const parsed = JSON.parse(fs.readFileSync(STATE_FILE, "utf8"));
     return {
       sessions: parsed.sessions || {},
+      usSignalReports: parsed.usSignalReports || {},
+      sepaResearch: parsed.sepaResearch || {},
       scheduledRuns: parsed.scheduledRuns || {},
       reviewedResearch: parsed.reviewedResearch || {},
       telegramRuns: parsed.telegramRuns || {},
@@ -585,7 +588,9 @@ function buildStoredWebhookContext(topic, jsonl, now = Date.now(), recentSignals
         `마지막 수신=${record.receivedAt} (${webhookAge(record.receivedAt, now)})`,
         `신호=${payload.type || "-"}, 내부코드=${signal.signalCode || "-"}, action=${payload.action || "-"}, price=${payload.price ?? "-"}, sl=${payload.sl ?? "-"}, rr=${payload.rr ?? "-"}`,
         `확신=${payload.conviction ?? "-"}, 점수=${payload.score ?? "-"}, 상태=${payload.status ?? "-"}, 시장=${payload.market ?? "-"}`,
-        `일봉추세=${payload.daily_trend ?? "-"}, RS=${payload.daily_rs ?? "-"}, 셋업=${payload.daily_setup_stage ?? "-"}, 거래량=${payload.daily_volume_trend ?? "-"}, 200일선위=${payload.daily_above_200ma ?? "-"}`,
+        payload.schema_ver === "5.0"
+          ? `상위봉=${payload.htf}, 추세=${payload.htf_trend}, 셋업=${payload.setup_stage}, 실행등급=${payload.grade}, 사유=${payload.grade_why}, 트리거=${payload.trigger_price}, TP1=${payload.tp1}, TP2=${payload.tp2}`
+          : `일봉추세=${payload.daily_trend ?? "-"}, RS=${payload.daily_rs ?? "-"}, 셋업=${payload.daily_setup_stage ?? "-"}, 거래량=${payload.daily_volume_trend ?? "-"}, 200일선위=${payload.daily_above_200ma ?? "-"}`,
         `ATR=${payload.atr_multiple ?? "-"}, Sigma Z=${payload.sb_z_score ?? "-"}, RSI2=${payload.rsi2 ?? "-"}`,
       ].join("\n");
     }),
@@ -611,7 +616,8 @@ async function sendChunks(channel, text, allowedMentions = null) {
 
 async function sendFormattedWebhook(channel, formatted, content = "") {
   if (!formatted.embed) return sendChunks(channel, `${content}${content ? "\n" : ""}${formatted.text}`, { parse: [] });
-  const message: any = { embeds: [formatted.embed], allowedMentions: { parse: [] } };
+  const embed = channel.name === "미국-매매신호" ? formatted.transportEmbed || formatted.embed : formatted.embed;
+  const message: any = { embeds: [embed], allowedMentions: { parse: [] } };
   if (content) message.content = content.trim();
   return channel.send(message);
 }
@@ -2189,6 +2195,30 @@ async function startTunnelStartupNotifier(
 }
 
 async function runSignalReviewBatch(records) {
+  const us = records.filter(isUsSignal);
+  for (const record of us) {
+    const channel = findTextChannelByName("sepa분석");
+    if (!channel) throw new Error("Discord 채널을 찾지 못했습니다: #sepa분석");
+    const key = `${marketDate(Date.now())}:${record.payload.exchange}:${record.payload.ticker}`;
+    if (state.sepaResearch[key]) continue;
+    // Public signal fields only: no private shared context, account state, or resumed conversation.
+    const persona = PERSONAS.find(p => p.id === "minervini");
+    const version = conversationVersion(channel.id);
+    const answer = await enqueueCodex(() => invokeCodex(persona, null, sepaResearchPrompt(record), [],
+      `sepa-public:${channel.id}`, channel.id, version, DEFAULT_CODEX_PROFILE));
+    const sourced = /https:\/\/[^\s)]+/.test(answer);
+    const pages = splitDiscordText(answer).map((part, index) => ({ embeds: [{ color: 0x5865F2,
+      title: `SEPA AI 분석 · ${formatInstrumentLabel(record.payload).slice(0, 140)} (${index + 1})`,
+      description: `${sourced ? "" : "⚠️ 출처 링크 미확인 · 검증 미완료\n\n"}${part}`,
+      footer: { text: "AI 해석 · 개별 출처와 기준일 확인 필요 · 주문에 자동 반영하지 않음" }, timestamp: new Date().toISOString(),
+    }], allowedMentions: { parse: [] } }));
+    for (const page of pages) await channel.send(page);
+    state.sepaResearch[key] = true;
+    for (const old of Object.keys(state.sepaResearch).filter(k => k.slice(0, 10) < marketDate(Date.now() - 7 * 86400000))) delete state.sepaResearch[old];
+    saveState();
+  }
+  records = records.filter(record => !isUsSignal(record));
+  if (!records.length) return;
   const channel = findTextChannelByName(AI_SIGNAL_REVIEW_CHANNEL);
   if (!channel) throw new Error(`Discord 채널을 찾지 못했습니다: #${AI_SIGNAL_REVIEW_CHANNEL}`);
   const symbols = records.map((record) => `${record.payload.ticker} ${record.payload.action}`).join(", ");
@@ -2198,9 +2228,75 @@ async function runSignalReviewBatch(records) {
   console.log(`AI 신호 검토 완료: ${symbols}`);
 }
 
+async function refreshUsSignalReports() {
+  const file = path.resolve(ROOT, WEBHOOK_LOG_FILE);
+  if (!fs.existsSync(file)) return;
+  // ponytail: reuse the small local signal log; add an incremental index if reading it becomes costly.
+  const records = fs.readFileSync(file, "utf8").split("\n").filter(Boolean).flatMap(line => {
+    try { return [JSON.parse(line)]; } catch { return []; }
+  }).map(record => {
+    const p = record.payload || {}, known = state.watchlist[`${p.exchange}:${p.ticker}`];
+    return known?.koreanName ? { ...record, payload: { ...p, koreanName: known.koreanName } } : record;
+  });
+  const recent = recentSignals(records);
+  const latest = new Map();
+  for (const r of recent.filter(r => ["관찰", "진입", "추매"].includes(signalCategory(r)))) latest.set(`${r.payload.exchange}:${r.payload.ticker}`, r);
+  const sepa = [...latest.values()].sort((a: any, b: any) => Date.parse(b.receivedAt) - Date.parse(a.receivedAt)).slice(0, 10).map(sepaSnapshot);
+  const bundles = [
+    ["오늘의시그널", digestCards(records, "D")], ["4h리포트", digestCards(records, "240")],
+    ["sepa분석", sepa.length ? sepa : [{ color: 0x5865F2, title: "SEPA 사전점검", description: "최근 72시간의 관찰·진입·추매 신호를 기다립니다. 종합 등급은 자료 확인 전 산정하지 않습니다." }]],
+  ];
+  for (const [name, cards] of bundles) {
+    const channel = findTextChannelByName(name);
+    if (!channel) continue;
+    const hash = require("node:crypto").createHash("sha256").update(JSON.stringify(cards)).digest("hex");
+    const previous = state.usSignalReports[name] || {};
+    if (previous.hash === hash) continue;
+    const ids = [...(previous.ids || [])];
+    // Persist each page immediately so a partial Discord failure does not duplicate the completed pages.
+    for (let i = 0; i < cards.length; i++) {
+      const message = await editOrSend(channel, ids[i], { embeds: [cards[i]], allowedMentions: { parse: [] } });
+      ids[i] = message.id;
+      state.usSignalReports[name] = { ids }; saveState();
+    }
+    for (const id of ids.slice(cards.length)) {
+      try { await (await channel.messages.fetch(id)).delete(); }
+      catch (error) { if (!shouldReplaceMissingDiscordMessage(error)) throw error; }
+    }
+    state.usSignalReports[name] = { ids: ids.slice(0, cards.length), hash }; saveState();
+  }
+  // One-time display migration only. These cards contain no execution envelope and never replay orders.
+  for (const name of US_CHANNELS.slice(3)) {
+    const marker = `seed:${name}`, channel = findTextChannelByName(name);
+    if (!channel || (state.usSignalReports[marker]?.done && state.usSignalReports[marker]?.version === 2)) continue;
+    const rows = recent.filter(r => signalCategory(r) === name).slice(-5);
+    const ids = state.usSignalReports[marker]?.ids || [];
+    const cards = rows.length ? rows.map(signalCard) : [{ color: 0x5865F2, title: `${name} 신호`, description: "최근 72시간에 수신한 해당 신호가 없습니다. 새 신호부터 이 채널에 표시합니다." }];
+    for (let i = 0; i < cards.length; i++) {
+      const message = await editOrSend(channel, ids[i], { content: "최근 수신 기록 · 화면 이관 (주문 재실행 없음)", embeds: [cards[i]], allowedMentions: { parse: [] } });
+      ids[i] = message.id; state.usSignalReports[marker] = { ids }; saveState();
+    }
+    state.usSignalReports[marker] = { ids, done: true, version: 2 }; saveState();
+  }
+}
+
+function startUsSignalReports() {
+  if (!WEBHOOK_ENABLED) return;
+  let running = false;
+  const refresh = async () => {
+    if (running) return;
+    running = true;
+    try { await refreshUsSignalReports(); }
+    catch (error) { console.error("미국 신호 보고서 갱신 실패:", error.message); }
+    finally { running = false; }
+  };
+  void refresh();
+  setInterval(refresh, 60_000).unref();
+}
+
 function startSignalReviewBatcher() {
-  if (!AI_SIGNAL_REVIEW_ENABLED) return;
-  signalReviewBatcher = new SignalReviewBatcher(runSignalReviewBatch, {
+  if (!AI_SIGNAL_REVIEW_ENABLED && !WEBHOOK_ENABLED) return;
+  signalReviewBatcher = new SignalReviewBatcher(records => runSignalReviewBatch(records.filter(r => isUsSignal(r) || AI_SIGNAL_REVIEW_ENABLED)), {
     windowMs: AI_SIGNAL_REVIEW_BATCH_MS,
     maxBatch: AI_SIGNAL_REVIEW_MAX_BATCH,
     onError: async (error) => {
@@ -2209,7 +2305,7 @@ function startSignalReviewBatcher() {
       if (channel) await channel.send(`🛑 AI 신호 검토 실패: ${String(error.message).slice(0, 500)}`);
     },
   });
-  console.log(`AI 워치리스트 검토: ${AI_SIGNAL_REVIEW_BATCH_MS}ms / 최대 ${AI_SIGNAL_REVIEW_MAX_BATCH}개씩 #${AI_SIGNAL_REVIEW_CHANNEL}`);
+  console.log(`미국 SEPA 검토 활성 · 종목당 하루 1회 · 기존 토론 검토 ${AI_SIGNAL_REVIEW_ENABLED ? "ON" : "OFF"}`);
 }
 
 async function startWebhookReceiver() {
@@ -2835,6 +2931,7 @@ async function main() {
   await startOrderStatusWatcher();
   startScheduledPaperExitScheduler();
   startSignalReviewBatcher();
+  startUsSignalReports();
   await notifySignalServerStartup();
   if (WEBHOOK_ENABLED) void startTunnelStartupNotifier();
   startTelegramScheduler();

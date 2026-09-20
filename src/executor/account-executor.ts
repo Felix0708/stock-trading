@@ -1,6 +1,7 @@
 "use strict";
 
 const fs = require("node:fs");
+const { higherTimeframeContext, entryReferencePrice } = require("../signals/nested-webhook");
 const { createHash } = require("node:crypto");
 const { Client, GatewayIntentBits } = require("discord.js");
 const { syncAccountPortfolio, strategyComparison, formatStrategyComparisonMessage } = require("./account-portfolio");
@@ -12,7 +13,7 @@ const { brokerStop, protectionReadiness, currentProtection, ensureProtection, re
 const { formatLifecycleCard } = require("./signal-lifecycle");
 const { calendarNotices } = require("../trading/market-calendar");
 const { parseBuyApprovalCommand } = require("./buy-approval");
-const { decodeSignalEmbed } = require("../discord/discord-signal-envelope");
+const { decodeSignalEmbed, PAYLOAD_FIELDS } = require("../discord/discord-signal-envelope");
 const { KiwoomClient, kiwoomCredentials } = require("../brokers/kiwoom-client");
 const { KisClient, kisCredentials } = require("../brokers/kis-client");
 const { enrichInstrumentNames, formatInstrumentLabel } = require("../research/instrument-names");
@@ -213,7 +214,7 @@ class SignalReceiptStore {
     // ponytail: per-account JSON ledger; archive closed signal cards if file rewrite latency grows.
     const entry = this.state.signals[record.requestId] ||= { record: {
       requestId: record.requestId, receivedAt: record.receivedAt,
-      payload: Object.fromEntries(["ticker", "exchange", "action", "timeframe", "name", "koreanName", "englishName", "price", "sl", "conviction", "sb_z_score"].map(key => [key, record.payload?.[key]])),
+      payload: Object.fromEntries([...PAYLOAD_FIELDS, "koreanName", "englishName"].filter(key => record.payload?.[key] !== undefined).map(key => [key, record.payload[key]])),
       outcome: { signal: record.outcome?.signal, decision: record.outcome?.decision }, risk: record.risk, policyVersion: record.policyVersion || POLICY_VERSION,
     }, progress: {}, messageId: "" };
     for (const key of ["name", "koreanName", "englishName"]) if (record.payload?.[key]) entry.record.payload[key] = record.payload[key];
@@ -559,12 +560,13 @@ function orderStatusUnknown(error) {
 
 function liveAutoBuyEligible(record) {
   const payload = record?.payload || {};
+  const higher = higherTimeframeContext(payload);
   return payload.action === "BUY"
     && normalizedTimeframe(payload.timeframe) === "240"
     && ["A", "S"].includes(payload.conviction)
-    && payload.daily_trend === "BULL"
-    && payload.daily_ema_aligned === true
-    && payload.daily_above_200ma === true;
+    && higher.trend === "BULL"
+    && higher.aligned === true
+    && higher.above200 === true;
 }
 
 function approvedEntryVerdict(record) {
@@ -597,8 +599,9 @@ function momentumExitRecommendation(account, payload) {
   } else {
     return { label: "수익률 확인 불가", range: null, ratio: null, quantity: 0, profitRate: null };
   }
-  const ratio = payload.daily_trend === "BULL" ? range[0]
-    : payload.daily_trend === "BEAR" ? range[1] : (range[0] + range[1]) / 2;
+  const trend = higherTimeframeContext(payload).trend;
+  const ratio = trend === "BULL" ? range[0]
+    : trend === "BEAR" ? range[1] : (range[0] + range[1]) / 2;
   return { label, range, ratio, quantity: Math.floor(account.currentPositionQuantity * ratio), profitRate };
 }
 
@@ -1539,7 +1542,7 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
         }
         record.originalSignalPrice ??= record.payload.price;
         record.payload.price = record.payload.action === "BUY" && signalExchange(record.payload.exchange) !== "KRX"
-          ? protectedUsBuyLimit(record.originalSignalPrice, quote) : quote;
+          ? protectedUsBuyLimit(entryReferencePrice(record), quote) : quote;
       } catch (error) {
         error.accountVerificationFailed = true;
         throw error;

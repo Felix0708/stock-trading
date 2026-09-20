@@ -14,6 +14,8 @@ const PAYLOAD_FIELDS = [
   "momentum_sl", "momentum_tp",
   "daily_above_200ma", "daily_trend", "daily_ema_aligned", "daily_setup_stage",
   "atr_multiple", "atr_dot", "atr_dot_threshold", "sb_z_score", "paper_order_test",
+  "schema_ver", "bar_time", "htf", "htf_trend", "htf_ema_aligned", "htf_above_200ma",
+  "grade", "grade_why", "trigger_price", "tp1", "tp2", "setup_stage",
 ];
 
 function checksum(value) {
@@ -67,4 +69,4 @@ function decodeSignalEmbed(embed) {
   return decodeSignalEnvelope(encoded);
 }
 
-module.exports = { decodeSignalEmbed, decodeSignalEnvelope, encodeSignalEnvelope, PREFIX, TRANSPORT_URL_PREFIX };
+module.exports = { decodeSignalEmbed, decodeSignalEnvelope, encodeSignalEnvelope, PAYLOAD_FIELDS, PREFIX, TRANSPORT_URL_PREFIX };

@@ -3,6 +3,7 @@
 const fs = require("node:fs");
 const { POLICY_VERSION } = require("./policy-study");
 const { effectiveStopPrice, isDailyTimeframe } = require("./position-sizer");
+const { higherTimeframeContext, executionGradeBlock } = require("../signals/nested-webhook");
 
 const TRADING_MODES = new Set(["OFF", "SHADOW", "PAPER_AUTO"]);
 const ENTRY_DECISIONS = new Set(["ENTRY_CANDIDATE", "ADD_CANDIDATE"]);
@@ -21,7 +22,8 @@ function dailyEntryApprovalReason(payload) {
   if (!["S", "A", "B"].includes(String(payload.conviction || "").toUpperCase())) {
     return "일봉 단독 진입 C등급 — 절반 수량 사용자 승인 대기";
   }
-  if (payload.daily_trend !== "BULL" || payload.daily_ema_aligned !== true || payload.daily_above_200ma !== true) {
+  const higher = higherTimeframeContext(payload);
+  if (higher.trend !== "BULL" || higher.aligned !== true || higher.above200 !== true) {
     return "일봉 단독 진입 추세 미확정 — 절반 수량 사용자 승인 대기";
   }
   return "";
@@ -95,6 +97,9 @@ class TradeController {
     if (!record.validation?.ok || ["BLOCKED", "REJECTED_INVALID"].includes(decision)) {
       verdict = "BLOCKED_INVALID_SIGNAL";
       reason = "명세 또는 신호 검증 실패";
+    } else if (payload.schema_ver === "5.0" && !["KRX", "NASDAQ", "NYSE", "AMEX", "NYSEARCA", "ARCA"].includes(payload.exchange)) {
+      verdict = "BLOCKED_EXCHANGE";
+      reason = "거래소 미확인 또는 주문 미지원 · 지표의 거래소 포함 설정 확인";
     } else if (this.accountNeutral && ENTRY_DECISIONS.has(decision)) {
       ({ verdict, reason } = this.evaluateAccountNeutralEntry(record));
     } else if (this.accountNeutral && FULL_EXIT_DECISIONS.has(decision)) {
@@ -192,21 +197,22 @@ class TradeController {
         ? { verdict: "BLOCKED_ADD_NOT_PROFITABLE", reason: "손실 또는 본전 포지션 추가매수 차단" }
         : { verdict: "BLOCKED_ADD_PROFIT_UNKNOWN", reason: "기존 포지션 수익 여부를 확인할 수 없어 추가매수 차단" };
     }
-    const weakDaily = payload.daily_trend === "BEAR" || payload.daily_above_200ma !== true;
+    const higher = higherTimeframeContext(payload);
+    const weakDaily = higher.trend === "BEAR" || higher.above200 !== true;
     const pegWithoutStop = ["PEG_PULLBACK", "PEG_REBREAK"].includes(record.outcome?.signal?.signalCode)
       && effectiveStopPrice(record) === null;
     const dailyApprovalReason = dailyEntryApprovalReason(payload);
     if ((weakDaily || pegWithoutStop || dailyApprovalReason) && this.state.mode === "PAPER_AUTO" && record.buyApproved !== true) {
       return { verdict: "BUY_PENDING_APPROVAL", reason: dailyApprovalReason || (pegWithoutStop
         ? "PEG 손절가 없음 — 종목 최대 10% 수동 승인 대기"
-        : "일봉 약세 또는 200일선 아래 — 소액 진입 사용자 승인 대기") };
+        : "상위봉 약세 또는 기준선 아래 — 소액 진입 사용자 승인 대기") };
     }
-    if (payload.daily_trend !== "BULL" || !payload.daily_ema_aligned || payload.daily_above_200ma !== true) {
+    if (higher.trend !== "BULL" || !higher.aligned || higher.above200 !== true) {
       if (!this.earlyEntryApprovalEnabled || this.state.mode !== "PAPER_AUTO") {
-        return { verdict: "REVIEW_DAILY_CONFIRMATION", reason: "일봉 강세·정배열 미확정 — 주문 없이 검토" };
+        return { verdict: "REVIEW_DAILY_CONFIRMATION", reason: "상위봉 강세·정배열 미확정 — 주문 없이 검토" };
       }
       if (record.buyApproved !== true) {
-        return { verdict: "BUY_PENDING_APPROVAL", reason: "일봉 초기 신호 — 소액 진입 사용자 승인 대기" };
+        return { verdict: "BUY_PENDING_APPROVAL", reason: "상위봉 초기 신호 — 소액 진입 사용자 승인 대기" };
       }
     }
     const approvalPending = this.buyApprovalRequired && this.state.mode === "PAPER_AUTO" && record.buyApproved !== true;
@@ -273,15 +279,21 @@ class TradeController {
     const payload = record.payload;
     if (this.state.mode === "OFF") return { verdict: "BLOCKED_MODE_OFF", reason: "매매 모드 OFF" };
     if (this.state.halted) return { verdict: "BLOCKED_HALTED", reason: "신규 진입 중지 상태" };
-    if (payload.conviction === "D") return { verdict: "BLOCKED_CONVICTION_D", reason: "Webhook v6.2 conviction D 매수 차단" };
+    const gradeBlock = executionGradeBlock(payload);
+    if (gradeBlock) return { verdict: "BLOCKED_EXECUTION_GRADE", reason: gradeBlock };
+    if (payload.schema_ver === "5.0" && !["240", "D", "1D"].includes(String(payload.timeframe).toUpperCase())) {
+      return { verdict: "BLOCKED_TIMEFRAME", reason: "자동매매 설정 대상은 4시간봉·일봉입니다." };
+    }
+    if (payload.conviction === "D") return { verdict: "BLOCKED_CONVICTION_D", reason: "확신등급 D 매수 차단" };
     if (effectiveStopPrice(record) === null
         && !["PEG_PULLBACK", "PEG_REBREAK"].includes(record.outcome?.signal?.signalCode)) {
       return { verdict: "BLOCKED_INVALID_STOP", reason: "유효한 손절가가 없어 자동 진입 차단" };
     }
-    if (!["BULL", "MIXED", "BEAR"].includes(payload.daily_trend)
-        || typeof payload.daily_ema_aligned !== "boolean"
-        || typeof payload.daily_above_200ma !== "boolean") {
-      return { verdict: "BLOCKED_DAILY_DATA", reason: "일봉 필터 데이터 누락 또는 형식 오류" };
+    const higher = higherTimeframeContext(payload);
+    if (!["BULL", "MIXED", "BEAR"].includes(higher.trend)
+        || typeof higher.aligned !== "boolean"
+        || typeof higher.above200 !== "boolean") {
+      return { verdict: "BLOCKED_DAILY_DATA", reason: "상위봉 필터 데이터 누락 또는 형식 오류" };
     }
     return null;
   }
@@ -295,10 +307,11 @@ class TradeController {
     const pegWithoutStop = ["PEG_PULLBACK", "PEG_REBREAK"].includes(record.outcome?.signal?.signalCode)
       && effectiveStopPrice(record) === null;
     const dailyApprovalReason = dailyEntryApprovalReason(payload);
-    if (dailyApprovalReason || pegWithoutStop || payload.daily_trend === "BEAR" || payload.daily_above_200ma !== true) {
+    const higher = higherTimeframeContext(payload);
+    if (dailyApprovalReason || pegWithoutStop || higher.trend === "BEAR" || higher.above200 !== true) {
       return {
         verdict: "BUY_PENDING_APPROVAL",
-        reason: dailyApprovalReason || (pegWithoutStop ? "PEG 손절가 없음 — 종목 최대 10% 수동 승인 대기" : "일봉 약세 또는 200일선 아래 — 소액 진입 사용자 승인 대기"),
+        reason: dailyApprovalReason || (pegWithoutStop ? "PEG 손절가 없음 — 종목 최대 10% 수동 승인 대기" : "상위봉 약세 또는 기준선 아래 — 소액 진입 사용자 승인 대기"),
       };
     }
     return {

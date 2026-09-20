@@ -1,6 +1,7 @@
 "use strict";
 
 const { normalizeSignal } = require("./signal-normalizer");
+const { normalizedTimeframe, normalizedSymbol } = require("../trading/position-ownership");
 
 const ENTRY_CODES = new Set([
   "ENTRY_STANDARD",
@@ -24,10 +25,16 @@ const PARTIAL_EXIT_CODES = new Set([
 ]);
 
 function instrumentKey(payload) {
+  if (payload.schema_ver === "5.0") return `${payload.exchange || "UNKNOWN"}:${normalizedSymbol(payload.ticker)}:${normalizedTimeframe(payload.timeframe) || payload.timeframe}`;
   return `${payload.exchange || "UNKNOWN"}:${payload.ticker}:${payload.timeframe}`;
 }
 
 function signalFingerprint(payload, normalized) {
+  if (payload.schema_ver === "5.0" && Number.isSafeInteger(payload.bar_time)) {
+    return JSON.stringify(["bar", String(payload.exchange).toUpperCase(), normalizedSymbol(payload.ticker),
+      normalizedTimeframe(payload.timeframe) || payload.timeframe, payload.bar_time,
+      normalized.signalCode === "UNKNOWN" ? normalized.rawType : normalized.signalCode, normalized.tpLevel, payload.action]);
+  }
   return JSON.stringify([
     instrumentKey(payload),
     normalized.signalCode,
@@ -45,7 +52,7 @@ class SignalStateMachine {
   constructor(snapshot: any = {}, options: any = {}) {
     this.deduplicationMs = options.deduplicationMs ?? 5_000;
     this.instruments = new Map(Object.entries(snapshot.instruments || {}));
-    this.recentFingerprints = new Map();
+    this.recentFingerprints = new Map(Object.entries(snapshot.recentFingerprints || {}));
   }
 
   handle(payload, receivedAt = new Date()) {
@@ -56,8 +63,9 @@ class SignalStateMachine {
     const key = instrumentKey(payload);
     const fingerprint = signalFingerprint(payload, normalized);
     const previousTime = this.recentFingerprints.get(fingerprint);
+    const deduplicationMs = payload.schema_ver === "5.0" ? 7 * 86400_000 : this.deduplicationMs;
     if (previousTime !== undefined && timestamp.getTime() - previousTime >= 0
-        && timestamp.getTime() - previousTime <= this.deduplicationMs) {
+        && timestamp.getTime() - previousTime <= deduplicationMs) {
       return this.result(key, normalized, "DUPLICATE_IGNORED", [], true);
     }
     this.recentFingerprints.set(fingerprint, timestamp.getTime());
@@ -76,6 +84,8 @@ class SignalStateMachine {
       current.pegEntrySignals = [];
     } else if (normalized.signalCode === "PEG_EXPIRED") {
       current.pegActive = false;
+    } else if (payload.schema_ver === "5.0" && ["PEG_PULLBACK", "PEG_REBREAK"].includes(normalized.signalCode)) {
+      decision = "INFO_ONLY"; // Timing information, not a new entry in the nested schema.
     } else if (ENTRY_CODES.has(normalized.signalCode)) {
       const pegEntry = ["PEG_PULLBACK", "PEG_REBREAK"].includes(normalized.signalCode);
       if (pegEntry && current.pegActive !== true) {
@@ -151,16 +161,18 @@ class SignalStateMachine {
 
   pruneFingerprints(nowMs) {
     for (const [fingerprint, timestamp] of this.recentFingerprints) {
-      if (nowMs - timestamp > this.deduplicationMs) this.recentFingerprints.delete(fingerprint);
+      const ttl = fingerprint.startsWith('["bar",') ? 7 * 86400_000 : this.deduplicationMs;
+      if (nowMs - timestamp > ttl) this.recentFingerprints.delete(fingerprint);
     }
   }
 
   snapshot() {
-    return { instruments: Object.fromEntries(this.instruments) };
+    return { instruments: Object.fromEntries(this.instruments), recentFingerprints: Object.fromEntries(this.recentFingerprints) };
   }
 }
 
 module.exports = {
+  signalFingerprint,
   SignalStateMachine,
   instrumentKey,
 };

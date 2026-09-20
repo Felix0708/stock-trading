@@ -5,7 +5,7 @@ const fs = require("node:fs");
 const http = require("node:http");
 const path = require("node:path");
 const { SignalStateMachine } = require("./signal-state-machine");
-const { validateWebhookPayload } = require("./webhook-schema");
+const { validateWebhookPayload, normalizeWebhookPayload } = require("./webhook-schema");
 
 function sendJson(response, statusCode, body) {
   const text = JSON.stringify(body);
@@ -165,9 +165,10 @@ function createWebhookService(options: any = {}) {
   for (const record of [...history.values() as Iterable<any>].sort((a, b) => Date.parse(a.receivedAt) - Date.parse(b.receivedAt))) {
     // Replay pure indicator state chronologically, including intake saved before a failed result-log write.
     const validation = record.validation || validateWebhookPayload(record.payload);
-    const outcome = validation.ok ? stateMachine.handle(record.payload, record.receivedAt)
+    const payload = validation.ok ? normalizeWebhookPayload(record.payload) : record.payload;
+    const outcome = validation.ok ? stateMachine.handle(payload, record.receivedAt)
       : { decision: "REJECTED_INVALID", duplicate: false, orderCreated: false, warnings: validation.errors };
-    if (!processed.has(record.requestId)) processed.set(record.requestId, { ...record, validation, outcome });
+    if (!processed.has(record.requestId)) processed.set(record.requestId, { ...record, payload, validation, outcome });
   }
 
   const queue = createAsyncQueue(async (event) => {
@@ -176,9 +177,10 @@ function createWebhookService(options: any = {}) {
       let record: any = processed.get(event.requestId);
       if (!record) {
         const validation = validateWebhookPayload(event.payload);
-        const outcome = validation.ok ? stateMachine.handle(event.payload, event.receivedAt)
+        const payload = validation.ok ? normalizeWebhookPayload(event.payload) : event.payload;
+        const outcome = validation.ok ? stateMachine.handle(payload, event.receivedAt)
           : { decision: "REJECTED_INVALID", duplicate: false, orderCreated: false, warnings: validation.errors };
-        record = { requestId: event.requestId, receivedAt: event.receivedAt, payload: event.payload, validation, outcome };
+        record = { requestId: event.requestId, receivedAt: event.receivedAt, payload, validation, outcome };
         // Keep the computed outcome even if disk I/O fails; never mutate the indicator twice on retry.
         processed.set(event.requestId, record);
       }

@@ -2,6 +2,7 @@
 
 const { encodeSignalEnvelope, TRANSPORT_URL_PREFIX } = require("./discord-signal-envelope");
 const { formatInstrumentLabel } = require("../research/instrument-names");
+const { isUsSignal, signalCategory, signalCard } = require("./us-signal-cards");
 
 const DECISION_LABELS = {
   ENTRY_CANDIDATE: "진입 검토",
@@ -37,6 +38,7 @@ function isTradeSignal(record) {
 }
 
 function signalKind(record) {
+  if (record.payload?.schema_ver === "5.0" && record.outcome?.decision === "INFO_ONLY") return "관찰";
   const decision = record.outcome?.decision;
   const action = record.payload?.action;
   return ENTRY_DECISIONS.has(decision) || action === "BUY"
@@ -45,6 +47,7 @@ function signalKind(record) {
 }
 
 function targetSignalChannels(record) {
+  if (isUsSignal(record)) return [signalCategory(record), ...(encodeSignalEnvelope(record) ? ["미국-매매신호"] : [])];
   const market = DOMESTIC_EXCHANGES.has(record.payload?.exchange) ? "국장" : "미국";
   const kind = signalKind(record);
   return [
@@ -55,7 +58,7 @@ function targetSignalChannels(record) {
 }
 
 function targetSignalChannel(record) {
-  return targetSignalChannels(record)[1];
+  return isUsSignal(record) ? signalCategory(record) : targetSignalChannels(record)[1];
 }
 
 function display(value) {
@@ -83,6 +86,8 @@ function timeframeLabel(value) {
   const timeframe = String(value || "").trim().toUpperCase();
   if (["D", "1D", "DAY", "1DAY"].includes(timeframe)) return "일봉";
   if (timeframe === "240") return "4시간봉";
+  if (["W", "1W"].includes(timeframe)) return "주봉";
+  if (["M", "1M"].includes(timeframe)) return "월봉";
   return /^\d+$/.test(timeframe) ? `${timeframe}분봉` : timeframe || "시간봉 미확인";
 }
 
@@ -96,6 +101,13 @@ function signalEmbed(record, identity, orderLine) {
     : preview?.blocked ? `\n수량 차단 · ${display(preview.reason)}` : "";
   const envelope = encodeSignalEnvelope(record);
   const fields = [
+    ...(payload.schema_ver === "5.0" ? [
+      { name: "실행 등급", value: payload.action === "BUY" ? clip(`${display(payload.grade)} · ${display(payload.grade_why)}`, 512) : "청산·관찰에는 미적용" },
+      { name: "매매 계획", value: clip(`트리거 ${signalPrice(payload.trigger_price, payload.exchange)} · TP1 ${signalPrice(payload.tp1, payload.exchange)} · TP2 ${signalPrice(payload.tp2, payload.exchange)}`, 512) },
+      { name: "상위봉", value: `${timeframeLabel(payload.htf)} · ${display(payload.htf_trend)}` },
+      { name: "과열", value: `ATR 이격 ${display(payload.atr_multiple)} / 임계 ${display(payload.atr_dot_threshold)} · Sigma ${display(payload.sb_z_score)}` },
+      { name: "지표 보유 상태 (참고)", value: payload.indicator_position?.held ? "지표상 보유 · 실제 계좌 보유와 별개" : "지표상 미보유 · 실제 계좌 보유와 별개" },
+    ] : []),
     { name: "상태", value: clip(status, 512) },
     { name: "AI 평가", value: clip(payload.ai_summary, 1024) },
     { name: "설명", value: clip(payload.desc, 1024) },
@@ -162,8 +174,8 @@ function formatWebhookRecord(record) {
       ? `**주문**: 📨 ${brokerLabel} ${display(record.orderAttempt.side)} ${display(record.orderAttempt.orderQuantity)}주 접수 · 끝 4자리 ${String(record.orderAttempt.orderNo).slice(-4)}`
       : `**주문**: 🛑 ${display(record.orderAttempt.status)} — ${display(record.orderAttempt.reason)}`;
 
-  if (!record.validation?.ok || outcome.decision === "REJECTED_INVALID" || outcome.decision === "BLOCKED") {
-    const reasons = [...(record.validation?.errors || []), ...(outcome.warnings || [])].slice(0, 3);
+  if (!record.validation?.ok || outcome.decision === "REJECTED_INVALID" || outcome.decision === "BLOCKED" || risk.verdict === "BLOCKED_EXCHANGE") {
+    const reasons = [...(record.validation?.errors || []), ...(outcome.warnings || []), ...(risk.verdict === "BLOCKED_EXCHANGE" ? [risk.reason] : [])].slice(0, 3);
     return {
       channel: "system",
       text: [
@@ -192,7 +204,8 @@ function formatWebhookRecord(record) {
     channel: "signal",
     targetChannel: targetSignalChannel(record),
     targetChannels: targetSignalChannels(record),
-    embed: signalEmbed(record, identity, orderLine),
+    embed: isUsSignal(record) ? signalCard(record) : signalEmbed(record, identity, orderLine),
+    transportEmbed: signalEmbed(record, identity, orderLine),
     text: [
       `📡 **TradingView ${signalKind(record)} 신호**`,
       `**종목**: ${identity} / ${display(payload.exchange)}`,

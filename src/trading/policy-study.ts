@@ -5,7 +5,7 @@ const { tradingDay } = require("./market-calendar");
 const POLICY_VERSION = "2026-09-14-mock-allocation-v2";
 function policyFingerprint(env = process.env) {
   const hash = createHash("sha256");
-  for (const file of ["position-sizer.ts", "position-ownership.ts", "trade-controller.ts", "paper-order-executor.ts", "../executor/account-executor.ts", "../executor/entry-allocation.ts", "../executor/broker-protection.ts", "../signals/signal-state-machine.ts"]) {
+  for (const file of ["position-sizer.ts", "position-ownership.ts", "trade-controller.ts", "paper-order-executor.ts", "../executor/account-executor.ts", "../executor/entry-allocation.ts", "../executor/broker-protection.ts", "../signals/signal-state-machine.ts", "../signals/nested-webhook.ts", "../signals/signal-normalizer.ts"]) {
     hash.update(file); hash.update(fs.readFileSync(path.join(__dirname, file)));
   }
   for (const key of ["ACCOUNT_ENTRY_ALLOCATION", "ACCOUNT_BROKER_PROTECTION", "KIS_LIVE_AFTER_MARKET_EXTENDED", "ACCOUNT_AUTO_CAP_RATIO", "ACCOUNT_MAX_OPEN_RISK_RATIO", "MAX_OPEN_POSITIONS", "PARTIAL_EXIT_1_RATIO", "PARTIAL_EXIT_2_RATIO", "BUY_APPROVAL_TTL_MINUTES", "ACCOUNT_SIGNAL_MAX_AGE_MINUTES", "KIS_SIGNAL_MAX_AGE_MINUTES"]) hash.update(`${key}=${env[key] || "default"}\n`);

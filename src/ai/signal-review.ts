@@ -3,6 +3,7 @@
 const WATCHLIST_CODES = new Set([
   "SETUP_FORMING", "VCP_FORMING", "PEG_STARTED", "RANGE_BREAKOUT", "POST_SURGE_PULLBACK",
 ]);
+const { isUsSignal, signalCategory } = require("../discord/us-signal-cards");
 
 function shouldReviewSignal(record) {
   const pendingBuy = record?.payload?.action === "BUY" && record?.risk?.verdict === "BUY_PENDING_APPROVAL";
@@ -12,7 +13,7 @@ function shouldReviewSignal(record) {
     && record.payload?.paper_order_test !== true
     && !record.outcome?.duplicate
     && !["BLOCKED", "REJECTED_INVALID"].includes(record.outcome?.decision)
-    && (pendingBuy || dailyReview || (record.payload?.action === "CHECK" && WATCHLIST_CODES.has(record.outcome?.signal?.signalCode))),
+    && ((isUsSignal(record) && ["진입", "추매"].includes(signalCategory(record))) || pendingBuy || dailyReview || (record.payload?.action === "CHECK" && WATCHLIST_CODES.has(record.outcome?.signal?.signalCode))),
   );
 }
 
@@ -25,8 +26,10 @@ function compactSignal(record, index) {
     `action=${payload.action}, raw_type=${payload.type}, signal_code=${signal.signalCode}, decision=${outcome.decision}`,
     `price=${payload.price}, sl=${payload.sl ?? "null"}, rr=${payload.rr ?? "null"}, timeframe=${payload.timeframe}`,
     `conviction=${payload.conviction}, score=${payload.score}, status=${payload.status}, market=${payload.market}`,
-    `daily_trend=${payload.daily_trend}, daily_rs=${payload.daily_rs}, setup=${payload.daily_setup_stage}, volume=${payload.daily_volume_trend}, above_200ma=${payload.daily_above_200ma}`,
-    `atr_multiple=${payload.atr_multiple}, atr_dot=${payload.atr_dot}, z_score=${payload.sb_z_score}, rsi2=${payload.rsi2}, upper_wick_pct=${payload.upper_wick_pct}`,
+    payload.schema_ver === "5.0"
+      ? `higher_timeframe=${payload.htf}, trend=${payload.htf_trend}, setup=${payload.setup_stage}, above_200ma=${payload.htf_above_200ma}, execution_grade=${payload.grade}, reason=${payload.grade_why}, trigger=${payload.trigger_price}, tp1=${payload.tp1}, tp2=${payload.tp2}`
+      : `daily_trend=${payload.daily_trend}, daily_rs=${payload.daily_rs}, setup=${payload.daily_setup_stage}, volume=${payload.daily_volume_trend}, above_200ma=${payload.daily_above_200ma}`,
+    `atr_multiple=${payload.atr_multiple}, energy_limit=${payload.atr_dot_threshold}, atr_dot=${payload.atr_dot}, z_score=${payload.sb_z_score}`,
     `risk_gate=${record.risk?.verdict || "-"}, risk_reason=${record.risk?.reason || "-"}, positions=${record.risk?.openCount ?? "-"}/${record.risk?.maxOpenPositions === null ? "unlimited (paper only)" : record.risk?.maxOpenPositions ?? "-"}`,
   ].join("\n");
 }
@@ -36,7 +39,7 @@ function buildSignalReviewTopic(records) {
   const pendingBuy = records.some((record) => record.risk?.verdict === "BUY_PENDING_APPROVAL");
   const dailyReview = records.some((record) => record.risk?.verdict === "REVIEW_DAILY_CONFIRMATION");
   return [
-    "TradingView Webhook v6.2 워치리스트 사전 검토입니다. 제공된 원본 값과 내부 코드는 공통 사실이며 임의로 바꾸지 마세요.",
+    "TradingView 워치리스트 사전 검토입니다. 제공된 값과 내부 코드는 공통 사실이며 임의로 바꾸지 마세요. 실행 등급과 확신 등급은 별개입니다. 상위봉의 실제 시간대를 유지하고 지표상 보유를 계좌 보유로 해석하지 마세요.",
     pendingBuy
       ? "BUY 신호는 사용자 승인 대기 중이며 아직 주문·체결되지 않았습니다."
       : dailyReview

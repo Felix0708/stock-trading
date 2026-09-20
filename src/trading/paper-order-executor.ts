@@ -5,6 +5,7 @@ const { setTimeout: delay } = require("node:timers/promises");
 const { refreshPaperOrder, trackPaperOrder } = require("./order-tracking");
 const { scopePositionPreview, managedPosition, normalizedSymbol, normalizedTimeframe } = require("./position-ownership");
 const { tradingDay } = require("./market-calendar");
+const { entryReferencePrice, executionGradeBlock } = require("../signals/nested-webhook");
 
 type SignalRecord = { payload: any; risk?: any; positionPreview?: any; outcome?: any; source?: string; requestId?: string; [key: string]: any };
 type ExecutorOptions = { enabled: boolean; environment: string; domesticClient: any; overseasClient: any; tracker: any; brokerLabel?: string; partialExit1Ratio?: number; partialExit2Ratio?: number; now?: Date; symbol?: string; lockFile?: string; client?: any; attempts?: number; delayMs?: number; [key: string]: any };
@@ -232,6 +233,7 @@ async function submitPaperOrder(record: SignalRecord, options: ExecutorOptions) 
   if (!options.enabled) return blocked(`${options.brokerLabel || "키움"} 모의 자동주문 비활성`);
   if (!["mock", "live"].includes(options.environment)) return blocked("지원하지 않는 계좌 환경");
   const side = entry ? "BUY" : "SELL";
+  if (entry && executionGradeBlock(payload)) return blocked(executionGradeBlock(payload));
 
   const exchange = String(payload.exchange || "").toUpperCase();
   if (exchange !== "KRX" && !US_EXCHANGE[exchange]) return blocked(`지원하지 않는 거래소: ${exchange || "없음"}`);
@@ -304,7 +306,7 @@ async function submitPaperOrder(record: SignalRecord, options: ExecutorOptions) 
     if (entry) {
       const quote = await client.getUsQuote({ exchange: kiwoomExchange, symbol: payload.ticker });
       referencePrice = quote.currentPrice;
-      limitPrice = protectedUsBuyLimit(payload.price, referencePrice);
+      limitPrice = protectedUsBuyLimit(Math.min(payload.price, entryReferencePrice(record)), referencePrice);
       const stopPrice = positionPreview?.stopPrice ?? payload.sl;
       if (Number.isFinite(stopPrice) && (referencePrice <= stopPrice || limitPrice <= stopPrice)) {
         return blocked("주문 직전 현재가가 손절 기준 이탈 · 매수 무효");

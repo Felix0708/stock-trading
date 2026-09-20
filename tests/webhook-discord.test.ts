@@ -72,8 +72,8 @@ const observationRecord = {
   },
 };
 const observation = formatWebhookRecord(observationRecord);
-assert.equal(observation.targetChannel, "미국-관찰신호");
-assert.deepEqual(targetSignalChannels(observationRecord), ["미국-전체신호", "미국-관찰신호"]);
+assert.equal(observation.targetChannel, "관찰");
+assert.deepEqual(targetSignalChannels(observationRecord), ["관찰"]);
 assert(observation.text.includes("TradingView 관찰 신호"));
 assert.equal(observation.embed.color, 0xFEE75C);
 
@@ -85,7 +85,9 @@ assert.deepEqual(targetSignalChannels({
   ...base,
   payload: { ...base.payload, ticker: "NVDA", name: "NVIDIA", exchange: "NASDAQ" },
   orderAttempt: { status: "ERROR", reason: "키움 주문 실패" },
-}), ["미국-전체신호", "미국-진입신호", "미국-매매신호"]);
+}), ["진입", "미국-매매신호"]);
+assert.equal(usTrade.embed.author, undefined);
+assert.equal(decodeSignalEmbed(usTrade.transportEmbed).requestId, base.requestId);
 assert(usTrade.embed.description.includes("엔비디아 (NVDA)"));
 const dailyTrade = formatWebhookRecord({ ...base, payload: { ...base.payload, timeframe: "D" } });
 assert(dailyTrade.embed.title.startsWith("[일봉]"));

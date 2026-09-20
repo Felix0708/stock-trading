@@ -66,6 +66,28 @@ function fixture(ids = ["KIS"], environment = "mock", readOnly = false, entryAll
 function message(r) { return { id: r.requestId, channelId: "signal", author: { id: "source", bot: true }, embeds: [{ footer: { text: encodeSignalEnvelope(r) } }] }; }
 
 (async () => {
+  // Both mock broker routes must keep the nested-schema guard after transport and repricing.
+  for (const brokerId of ["KIS", "KIWOOM"]) {
+    let fullQuantity = 0;
+    for (const grade of ["GO", "HALF", "WAIT", "NO", "OFF"]) {
+      const f = fixture([brokerId]);
+      const r: any = record(`nested-${brokerId}-${grade}`);
+      Object.assign(r.payload, { schema_ver: "5.0", bar_time: clock, grade, trigger_price: 99,
+        htf: "D", htf_trend: "BULL", htf_ema_aligned: true, htf_above_200ma: true,
+        atr_multiple: 2, atr_dot: false, atr_dot_threshold: 8, setup_stage: "NONE" });
+      for (const key of ["daily_trend", "daily_ema_aligned", "daily_above_200ma"]) delete r.payload[key];
+      await f.runtime.processMessage(message(r));
+      const saved = f.receipts.state.signals[r.requestId].record.payload;
+      assert.equal(saved.grade, grade); assert.equal(saved.trigger_price, 99);
+      const requests = f.brokers[0].state.requests;
+      if (["GO", "HALF"].includes(grade)) {
+        assert.equal(requests.length, 1);
+        assert.equal(requests[0].price, 99, "trigger caps the entry, even after current-price refresh");
+        if (grade === "GO") fullQuantity = requests[0].quantity;
+        else assert.equal(requests[0].quantity, Math.floor(fullQuantity / 2));
+      } else assert.equal(requests.length, 0, "execution grade cannot be bypassed by a forwarded PAPER_ENTRY verdict");
+    }
+  }
   for (const allocation of [false, true]) for (const brokerId of ["KIS", "KIWOOM"]) {
     const capped = fixture([brokerId], "mock", false, allocation);
     for (let i = 0; i < 6; i++) {

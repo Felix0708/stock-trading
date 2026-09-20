@@ -1,6 +1,7 @@
 "use strict";
 
-const WEBHOOK_SPEC_VERSION = "6.2";
+const WEBHOOK_SPEC_VERSION = "7.0";
+const { validateNestedWebhook, normalizeWebhookPayload } = require("./nested-webhook");
 
 const FIELD_TYPES = {
   ticker: "string",
@@ -60,6 +61,7 @@ function validateWebhookPayload(payload) {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
     return { ok: false, errors: ["payload는 JSON 객체여야 합니다."], warnings };
   }
+  if (Object.hasOwn(payload, "schema_ver") || Object.hasOwn(payload, "symbol")) return validateNestedWebhook(payload);
 
   for (const [field, expected] of Object.entries(FIELD_TYPES)) {
     if (!Object.hasOwn(payload, field)) errors.push(`필수 필드 누락: ${field}`);
@@ -110,4 +112,5 @@ module.exports = {
   FIELD_TYPES,
   WEBHOOK_SPEC_VERSION,
   validateWebhookPayload,
+  normalizeWebhookPayload,
 };

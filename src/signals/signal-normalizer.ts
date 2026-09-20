@@ -6,6 +6,8 @@ const SIGNAL_RULES = [
   ["공격 진입", "ENTRY_AGGRESSIVE", "BUY"],
   ["피라미딩 추매", "ADD_PYRAMID", "BUY"],
   ["강한 눌림목", "ADD_STRONG_PULLBACK", "BUY"],
+  ["눌림 진입", "PULLBACK_TIMING", "BUY"],
+  ["눌림 만료", "PULLBACK_EXPIRED", "CHECK"],
   ["모멘텀 BUY", "MOMENTUM_BUY", "BUY"],
   ["PEG Pullback", "PEG_PULLBACK", "BUY"],
   ["PEG Rebreak", "PEG_REBREAK", "BUY"],

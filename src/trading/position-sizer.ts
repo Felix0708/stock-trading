@@ -1,10 +1,11 @@
 "use strict";
+const { higherTimeframeContext, executionGradeBlock } = require("../signals/nested-webhook");
 
-type SignalPayload = { timeframe?: string; sl?: number | null; momentum_sl?: number | null; price: number; conviction?: string; daily_setup_stage?: string; atr_multiple?: number | null; atr_dot?: boolean; atr_dot_threshold?: number; sb_z_score?: number; daily_trend?: string; daily_ema_aligned?: boolean; daily_above_200ma?: boolean };
+type SignalPayload = { schema_ver?: string; action?: string; grade?: string; htf?: string; htf_trend?: string; htf_ema_aligned?: boolean; htf_above_200ma?: boolean; setup_stage?: string; timeframe?: string; sl?: number | null; momentum_sl?: number | null; price: number; conviction?: string; daily_setup_stage?: string; atr_multiple?: number | null; atr_dot?: boolean; atr_dot_threshold?: number; sb_z_score?: number; daily_trend?: string; daily_ema_aligned?: boolean; daily_above_200ma?: boolean };
 type SignalRecord = { payload: SignalPayload; outcome?: { decision?: string; signal?: { signalCode?: string } } };
 type Holding = { profitLoss?: number; purchaseAmount?: number; evaluationAmount?: number; profitRate?: number };
 type TrackedPosition = { fillPrice?: number };
-type PositionSizeInput = { environment?: string; equity: number; availableCash?: number; entryPrice: number; stopPrice?: number | null; conviction?: string; dailySetupStage?: string; atrMultiple?: number | null; atrDot?: boolean; atrDotThreshold?: number; sbZScore?: number; openPositions?: number; maxOpenPositions?: number; currentPositionValue?: number; hasExistingPosition?: boolean; earlyEntry?: boolean; capitalOnly?: boolean };
+type PositionSizeInput = { executionScale?: number; environment?: string; equity: number; availableCash?: number; entryPrice: number; stopPrice?: number | null; conviction?: string; dailySetupStage?: string; atrMultiple?: number | null; atrDot?: boolean; atrDotThreshold?: number; sbZScore?: number; openPositions?: number; maxOpenPositions?: number; currentPositionValue?: number; hasExistingPosition?: boolean; earlyEntry?: boolean; capitalOnly?: boolean };
 type AccountSizingContext = { equity: number; availableCash: number; openPositions: number; maxOpenPositions: number; currentPositionValue: number; currentPositionQuantity?: number; hasExistingPosition?: boolean; positionProfitable?: boolean | null; currency?: string; totalAccountEquity?: number | null; autoCapital?: number | null; autoCapitalRatio?: number; currentOpenRisk?: number | null; maxOpenRisk?: number | null; maxOpenRiskRatio?: number };
 
 const CONVICTION_MULTIPLIER: Record<string, number> = { S: 1.3, A: 1.1, B: 1, C: 0.7, D: 0 };
@@ -16,6 +17,10 @@ function isDailyTimeframe(value: unknown) {
 function effectiveStopPrice(record: SignalRecord) {
   const payload: SignalPayload = record?.payload || ({} as SignalPayload);
   const signalCode = record?.outcome?.signal?.signalCode || "";
+  if (payload.schema_ver === "5.0" && signalCode === "MOMENTUM_BUY") {
+    return typeof payload.momentum_sl === "number" && payload.momentum_sl > 0 && payload.momentum_sl < payload.price
+      ? payload.momentum_sl : null;
+  }
   if (typeof payload.sl === "number" && Number.isFinite(payload.sl) && payload.sl > 0 && payload.sl < payload.price) return payload.sl;
   if (["PEG_PULLBACK", "PEG_REBREAK"].includes(signalCode)
       && typeof payload.momentum_sl === "number" && Number.isFinite(payload.momentum_sl)
@@ -49,9 +54,10 @@ function calculatePositionSize(input: PositionSizeInput = {} as PositionSizeInpu
     dailySetupStage = "NONE", atrMultiple = null, atrDot = false,
     atrDotThreshold = 7, sbZScore = 0, openPositions = 0, maxOpenPositions = 5,
     currentPositionValue = 0, hasExistingPosition = false, earlyEntry = false,
-    capitalOnly = false, environment = "mock",
+    capitalOnly = false, environment = "mock", executionScale = 1,
   } = input;
   if (!["mock", "live"].includes(environment)) throw new Error("계좌 환경이 올바르지 않습니다.");
+  if (![0.5, 1].includes(executionScale)) throw new Error("실행 비중이 올바르지 않습니다.");
   for (const [name, value] of Object.entries({ equity, entryPrice })) {
     if (!Number.isFinite(value) || value <= 0) throw new Error(`${name}는 0보다 큰 숫자여야 합니다.`);
   }
@@ -90,11 +96,11 @@ function calculatePositionSize(input: PositionSizeInput = {} as PositionSizeInpu
   else if (sbZScore > 2) heatMultiplier *= 0.7;
 
   const baseRisk = equity * (earlyEntry ? 0.0025 : 0.005);
-  const riskBudget = Math.min(equity * 0.01, baseRisk * qualityMultiplier * heatMultiplier);
+  const riskBudget = Math.min(equity * 0.01, baseRisk * qualityMultiplier * heatMultiplier) * executionScale;
   const positionLimitRatio = earlyEntry ? 0.1 : 0.2;
   const positionLimit = equity * positionLimitRatio;
   const capitalLimit = Math.min(Math.max(0, positionLimit - currentPositionValue), availableCash);
-  const capitalQuantity = Math.floor(capitalLimit / entryPrice);
+  const capitalQuantity = Math.floor(capitalLimit / entryPrice * executionScale);
   if (capitalQuantity < 1) {
     return {
       blocked: true, reason: availableCash < entryPrice ? "가용 주문금액이 1주 가격 미만" : `한 종목 총 보유금액 ${positionLimitRatio * 100}% 한도 도달`, quantity: 0,
@@ -116,7 +122,7 @@ function calculatePositionSize(input: PositionSizeInput = {} as PositionSizeInpu
     stopLossAmount: capitalOnly ? null : quantity * (entryPrice - validStopPrice),
     riskBudget: capitalOnly ? null : riskBudget,
     capitalOnly,
-    qualityMultiplier, positionLimitRatio, earlyEntry,
+    qualityMultiplier, positionLimitRatio, earlyEntry, executionScale,
     heatMultiplier,
   };
 }
@@ -130,12 +136,14 @@ function calculateWebhookPositionPreview(record: SignalRecord, account: AccountS
   if (!["ENTRY_CANDIDATE", "ADD_CANDIDATE"].includes(decision || "")) return null;
 
   const payload: SignalPayload = record.payload || ({} as SignalPayload);
+  const gradeBlock = executionGradeBlock(payload);
+  if (gradeBlock) return { available: true, blocked: true, reason: gradeBlock, quantity: 0 };
   const stopPrice = effectiveStopPrice(record);
   const capitalOnly = ["PEG_PULLBACK", "PEG_REBREAK"].includes(record?.outcome?.signal?.signalCode || "") && stopPrice === null;
-  const dailyProvided = payload.daily_trend !== undefined
-    || payload.daily_ema_aligned !== undefined || payload.daily_above_200ma !== undefined;
-  const earlyEntry = capitalOnly || isDailyTimeframe(payload.timeframe) || (dailyProvided && (payload.daily_trend !== "BULL"
-    || payload.daily_ema_aligned !== true || payload.daily_above_200ma !== true));
+  const higher = higherTimeframeContext(payload);
+  const dailyProvided = higher.trend !== undefined || higher.aligned !== undefined || higher.above200 !== undefined;
+  const earlyEntry = capitalOnly || isDailyTimeframe(payload.timeframe) || (dailyProvided && (higher.trend !== "BULL"
+    || higher.aligned !== true || higher.above200 !== true));
   const result = calculatePositionSize({
     environment,
     equity: account.equity,
@@ -143,7 +151,8 @@ function calculateWebhookPositionPreview(record: SignalRecord, account: AccountS
     entryPrice: payload.price,
     stopPrice,
     conviction: payload.conviction,
-    dailySetupStage: payload.daily_setup_stage,
+    dailySetupStage: payload.schema_ver === "5.0" ? payload.setup_stage : payload.daily_setup_stage,
+    executionScale: payload.schema_ver === "5.0" && payload.grade === "HALF" ? 0.5 : 1,
     atrMultiple: payload.atr_multiple,
     atrDot: payload.atr_dot,
     atrDotThreshold: payload.atr_dot_threshold,
