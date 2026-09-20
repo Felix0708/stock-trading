@@ -72,7 +72,7 @@ function signalCard(record) {
     if (category === "청산" && number(pos.entry) && pos.entry > 0 && number(p.price)) add("지표 진입 대비 변동 · 실제 수익률 아님", `${price(pos.entry)} → ${price(p.price)} (${((p.price / pos.entry - 1) * 100).toFixed(2)}%)`);
   }
   if (p.sl_wide) add("주의", "지표가 손절폭 과다로 표시했습니다.");
-  add("주문과 구분", market?.id === "JP" ? "일본주식은 신호·분석 표시 전용입니다. 자동주문은 연결하지 않습니다." : "지표 알림이며 주문 접수·체결 증빙이 아닙니다. 계좌별 처리 결과는 주문승인·체결로그에서 확인하세요.");
+  add("주문과 구분", market?.id === "JP" ? "일본 매매신호는 실행기로 자동 전달됩니다. 현재 일본 주문은 미지원으로 차단·기록하며, 접수·체결이 아닙니다." : "지표 알림이며 주문 접수·체결 증빙이 아닙니다. 계좌별 처리 결과는 주문승인·체결로그에서 확인하세요.");
   const bar = Number.isSafeInteger(p.bar_time) && p.bar_time > 0 ? new Date(p.bar_time) : null;
   const embed: any = { color: COLORS[category], title: text(`[${tf(p.timeframe)}] ${p.type || category}`, 200),
     description: `**${text(formatInstrumentLabel(p), 200)}**`, fields,

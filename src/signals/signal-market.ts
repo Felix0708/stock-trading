@@ -6,7 +6,7 @@ const SIGNAL_MARKETS = [
     exchanges: ["NASDAQ", "NYSE", "AMEX", "NYSEARCA", "ARCA", "ND", "NY", "NA", "BATS"] },
   { id: "KR", label: "국내", prefix: "국장", category: "🇰🇷 국내주식", currency: "원", zone: "Asia/Seoul", transport: "국장-매매신호", legacy: "국장",
     exchanges: ["KRX", "KOSPI", "KOSDAQ"] },
-  { id: "JP", label: "일본", prefix: "일본", category: "🇯🇵 일본주식", currency: "엔", zone: "Asia/Tokyo", transport: null, legacy: null,
+  { id: "JP", label: "일본", prefix: "일본", category: "🇯🇵 일본주식", currency: "엔", zone: "Asia/Tokyo", transport: "일본-매매신호", legacy: null,
     exchanges: ["TSE", "TSEJP", "JPX"] },
 ];
 

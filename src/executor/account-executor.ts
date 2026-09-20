@@ -2,6 +2,7 @@
 
 const fs = require("node:fs");
 const { higherTimeframeContext, entryReferencePrice } = require("../signals/nested-webhook");
+const { signalMarket } = require("../signals/signal-market");
 const { createHash } = require("node:crypto");
 const { Client, GatewayIntentBits } = require("discord.js");
 const { syncAccountPortfolio, strategyComparison, formatStrategyComparisonMessage } = require("./account-portfolio");
@@ -102,6 +103,12 @@ function shouldConsumeMessage(message, config) {
   return message?.author?.bot === true
     && config.sourceChannelIds.has(message.channelId)
     && config.sourceBotIds.has(message.author.id);
+}
+
+function unsupportedMarketResult(record) {
+  return signalMarket(record)?.id === "JP" || record.risk?.verdict === "BLOCKED_EXCHANGE"
+    ? { status: "SKIPPED_UNSUPPORTED_MARKET", reason: "신호 수신 완료 · 현재 실행기의 주문 미지원 시장 · 증권사 요청·예약·자동 재시도 없음" }
+    : null;
 }
 
 function reviewPositionChanged(broker, record) {
@@ -1497,6 +1504,8 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
 
   async function executeOrder(broker, record, { manual = false } = {}) {
     if (!readOnlySignalAllowed(record, readOnly)) return null;
+    const unsupported = unsupportedMarketResult(record);
+    if (unsupported) return unsupported;
     if (reviewPositionChanged(broker, record)) return { status: "CANCELLED", reason: "재검토 대상 보유분 종료 또는 변경 · 옛 신호 주문 안 함" };
     if (record.source === "LOCAL_STOP_GUARD") {
       if (broker.environment !== "mock") return { status: "BLOCKED", reason: "로컬 자동 손절은 모의계좌 전용" };
@@ -1694,6 +1703,8 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
 
   async function executeOrDefer(broker, record, { retry = false, manual = false, fromInbox = false } = {}) {
     if (!readOnlySignalAllowed(record, readOnly)) return null;
+    const unsupported = unsupportedMarketResult(record);
+    if (unsupported) { progress(broker, record, unsupported); return unsupported; }
     function queueSession(now = Date.now()) {
       // Fresh intake and an already-authorized next-session plan are different
       // deadlines. Assign the latter once, only for a confirmed market closure.
@@ -2160,6 +2171,12 @@ function createAccountRuntime({ brokers, receipts, client, readOnly = false, sou
   async function processInboxBroker(item, broker) {
     if (item.completed.includes(broker.id)) return;
     const record = structuredClone(item.reviewRecords?.[broker.id] || item.record);
+    const unsupported = unsupportedMarketResult(record);
+    if (unsupported) {
+      progress(broker, record, unsupported);
+      receipts.completeBroker(item, broker.id);
+      return;
+    }
     const expiresAt = item.reviewRecords?.[broker.id]?.executionDeadline ?? item.expiresAt;
     record.executionDeadlineKind = record.executionDeadlineKind === "REVIEW" ? "REVIEW"
       : Number.isFinite(record.executionDeadline) ? "EXPLICIT" : "INTAKE";

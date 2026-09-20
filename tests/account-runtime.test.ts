@@ -66,6 +66,24 @@ function fixture(ids = ["KIS"], environment = "mock", readOnly = false, entryAll
 function message(r) { return { id: r.requestId, channelId: "signal", author: { id: "source", bot: true }, embeds: [{ footer: { text: encodeSignalEnvelope(r) } }] }; }
 
 (async () => {
+  // Japanese transport is consumed and recorded, never turned into a US order or retry.
+  for (const side of ["BUY", "SELL"]) for (const verdict of ["BLOCKED_EXCHANGE", side === "BUY" ? "PAPER_ENTRY" : "PAPER_EXIT"]) {
+    const f = fixture(["KIS", "KIWOOM"]);
+    const r: any = record(`jp-${side}-${verdict}`, side);
+    r.payload.exchange = "TSE"; r.payload.ticker = "TESTJP"; r.risk.verdict = verdict;
+    for (const broker of f.brokers) for (const api of [broker.domesticClient, broker.overseasClient]) {
+      for (const key of Object.keys(api)) api[key] = async () => { throw Error("Japanese signal must not call a broker API"); };
+    }
+    await f.runtime.processMessage(message(r));
+    for (const broker of f.brokers) {
+      assert.equal(f.receipts.state.signals[r.requestId].progress[broker.id].status, "SKIPPED_UNSUPPORTED_MARKET");
+      assert.equal((await f.runtime.executeOrDefer(broker, r)).status, "SKIPPED_UNSUPPORTED_MARKET");
+      assert.equal((await f.runtime.execute(broker, r)).status, "SKIPPED_UNSUPPORTED_MARKET");
+      assert.equal(broker.state.requests.length, 0);
+    }
+    assert.equal(Object.keys(f.receipts.state.deferred).length, 0);
+    assert.deepEqual(f.receipts.state.inbox[r.requestId].completed.sort(), ["KIS", "KIWOOM"]);
+  }
   // Both mock broker routes must keep the nested-schema guard after transport and repricing.
   for (const brokerId of ["KIS", "KIWOOM"]) {
     let fullQuantity = 0;

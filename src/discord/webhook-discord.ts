@@ -72,6 +72,7 @@ function clip(value, max) {
 
 function signalPrice(value, exchange) {
   if (!Number.isFinite(value)) return display(value);
+  if (signalMarket({ payload: { exchange } })?.id === "JP") return `${value.toLocaleString("ja-JP", { maximumFractionDigits: 4 })}엔`;
   return DOMESTIC_EXCHANGES.has(exchange)
     ? `${value.toLocaleString("ko-KR")}원`
     : `$${value.toLocaleString("en-US", { maximumFractionDigits: 4 })}`;

@@ -84,17 +84,20 @@ for (const market of SIGNAL_MARKETS) {
   assert(matchesSignalChannel(channel, channel.name, market.category));
   assert(!matchesSignalChannel(channel, channel.name, "잘못된 카테고리"));
   assert.equal(shouldReviewSignal(entry), true);
-  if (market.transport) assert.equal(decodeSignalEmbed(formatted.transportEmbed).requestId, entry.requestId);
+  if (market.id !== "JP") assert.equal(decodeSignalEmbed(formatted.transportEmbed).requestId, entry.requestId);
   else {
-    assert.equal(formatted.transportEmbed, undefined);
-    assert.deepEqual(formatted.targetChannels, ["일본-진입"]);
+    assert.deepEqual(formatted.targetChannels, ["일본-진입", "일본-매매신호"]);
+    assert.match(formatted.transportEmbed.description, /100엔/);
     for (const schema_ver of [undefined, "5.0"]) for (const side of ["BUY", "SELL"]) {
       const r = { ...entry, payload: { ...entry.payload, action: side, schema_ver }, outcome: { decision: side === "BUY" ? "ENTRY_CANDIDATE" : "EXIT_CANDIDATE" } };
       r.risk = new TradeController({ initialMode: "PAPER_AUTO", accountNeutral: true }).evaluate(r);
       assert.equal(r.risk.verdict, "BLOCKED_EXCHANGE");
       assert.equal(formatWebhookRecord(r).channel, "signal");
-      assert.equal(formatWebhookRecord(r).transportEmbed, undefined);
+      assert.equal(decodeSignalEmbed(formatWebhookRecord(r).transportEmbed).risk.verdict, "BLOCKED_EXCHANGE");
+      assert.equal(formatWebhookRecord(r).targetChannels.at(-1), "일본-매매신호");
     }
+    const observe = { ...entry, payload: { ...entry.payload, action: "CHECK", type: "셋업 형성 중" }, outcome: { decision: "INFO_ONLY" }, risk: { verdict: "BLOCKED_EXCHANGE" } };
+    assert.deepEqual(formatWebhookRecord(observe).targetChannels, ["일본-관찰"]);
   }
 }
 assert.equal(new Set(SIGNAL_MARKETS.flatMap(m => US_CHANNELS.map(n => marketChannelName(m, n)))).size, 30);

@@ -2,12 +2,14 @@
 
 const crypto = require("node:crypto");
 const zlib = require("node:zlib");
+const { signalMarket } = require("../signals/signal-market");
 
 const PREFIX = "LAZY_SIGNAL_V1:";
 const TRANSPORT_URL_PREFIX = "https://discord.com/#";
 const ALLOWED_VERDICTS = new Set([
   "BUY_PENDING_APPROVAL", "PAPER_ENTRY", "PAPER_ADD", "PAPER_PARTIAL_EXIT", "PAPER_EXIT",
   "WAIT", "KEEP", "REVIEW_PARTIAL_EXIT",
+  "BLOCKED_EXCHANGE",
 ]);
 const PAYLOAD_FIELDS = [
   "ticker", "name", "exchange", "timeframe", "action", "type", "price", "sl", "rr", "conviction",
@@ -24,6 +26,9 @@ function checksum(value) {
 
 function encodeSignalEnvelope(record) {
   if (!ALLOWED_VERDICTS.has(record?.risk?.verdict)) return null;
+  // Japanese trade intents reach the executor as an explicit non-executable status.
+  if (record.risk.verdict === "BLOCKED_EXCHANGE" && (signalMarket(record)?.id !== "JP"
+    || !["ENTRY_CANDIDATE", "ADD_CANDIDATE", "EXIT_CANDIDATE", "PARTIAL_EXIT_CANDIDATE", "REVIEW_PARTIAL_EXIT", "WAIT_FOR_CONFIRMATION", "KEEP_IF_FILLED", "EXIT_IF_FILLED"].includes(record.outcome?.decision))) return null;
   const value = {
     requestId: record.requestId,
     receivedAt: record.receivedAt,

@@ -11,6 +11,7 @@ const STATUS = { RECEIVED: "신호 수신 · 계좌 확인 중", PROCESSING: "�
   UNKNOWN: "접수 여부 미확인 · 재주문 차단", SUBMITTING: "주문 전송 중", DEFER_REQUIRED: "재확인 대기",
   SKIPPED_NO_POSITION: "미보유 · 주문 대상 아님", SKIPPED_EXISTING_POSITION: "기존 보유 · 중복 진입 안 함",
   SKIPPED_TIMEFRAME: "진입 시간봉과 다름 · 주문 대상 아님", SKIPPED_UNMANAGED_POSITION: "자동매매 보유분 없음",
+  SKIPPED_UNSUPPORTED_MARKET: "수신 완료 · 주문 미지원 시장",
   NO_ACTION: "관찰 신호 · 주문 대상 아님" };
 
 function lifecycleBrokerState(entry, broker, receipts, now = Date.now()) {

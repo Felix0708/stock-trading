@@ -13,7 +13,7 @@ const STRUCTURE = [
   ["🌐 투자위원회", ["라운지", "시장-브리핑", "종목-토론"]],
   ...SIGNAL_MARKETS.map(m => [m.category, SIGNAL_CHANNELS.map(n => marketChannelName(m, n))]),
   ["📚 투자기록", ["관심종목", "알람설정", "어닝-캘린더", "매매일지", "전략-연구", "주요인사-포트폴리오", "기관-포트폴리오", "내-포트폴리오"]],
-  ["🤖 주문관리", ["주문승인", "체결로그", "시스템상태", "미국-매매신호", "국장-매매신호"]],
+  ["🤖 주문관리", ["주문승인", "체결로그", "시스템상태", ...SIGNAL_MARKETS.map(m => m.transport)]],
 ];
 
 const CATEGORY_RENAMES = new Map([
@@ -114,8 +114,11 @@ async function migrateMarketChannels(guild, apply, markets = SIGNAL_MARKETS) {
     if (category && category.type !== ChannelType.GuildCategory) throw new Error(`카테고리 유형 불일치: ${market.category}`);
     if (market.transport) {
       const transport = find(market.transport);
-      if (transport?.type !== ChannelType.GuildText) throw new Error(`기존 주문 전달 채널 확인 필요: ${market.transport}`);
-      preserved.push({ id: transport.id, name: transport.name, permissions: fingerprint(transport) });
+      if (!transport && market.id === "JP") { /* New Japanese transport is created below. */ }
+      else {
+        if (transport?.type !== ChannelType.GuildText) throw new Error(`기존 주문 전달 채널 확인 필요: ${market.transport}`);
+        preserved.push({ id: transport.id, name: transport.name, permissions: fingerprint(transport) });
+      }
     }
     for (const name of SIGNAL_CHANNELS) {
       const target = marketChannelName(market, name), existing = find(target);
@@ -130,6 +133,11 @@ async function migrateMarketChannels(guild, apply, markets = SIGNAL_MARKETS) {
   if (removeUsAll && obsolete && (obsolete.type !== ChannelType.GuildText || ![template.id, archive.id, operations.id].includes(obsolete.parentId))) throw new Error("미국 전체신호 삭제 대상 위치 확인 필요");
   for (const market of markets) {
     let category = find(market.category);
+    if (market.id === "JP" && !find(market.transport)) {
+      console.log(`${apply ? "생성" : "예정"}: ${market.transport} (신호 전달·미지원 상태 기록용)`);
+      if (apply) await guild.channels.create({ name: market.transport, type: ChannelType.GuildText, parent: operations.id,
+        permissionOverwrites: permissions(find("미국-매매신호")), topic: "일본 매매신호 자동 전달 · 실행기 수신·미지원 상태 기록 · 현재 증권사 일본 주문 없음" });
+    }
     if (!category) {
       console.log(`${apply ? "생성" : "예정"}: ${market.category}`);
       if (apply) category = await guild.channels.create({ name: market.category, type: ChannelType.GuildCategory, permissionOverwrites: permissions(template) });
@@ -169,7 +177,7 @@ async function migrateMarketChannels(guild, apply, markets = SIGNAL_MARKETS) {
     console.log(`${apply ? "삭제" : "삭제 예정"}: 미국-전체신호 (과거 메시지도 삭제, 복구 불가)`);
     if (apply) { await obsolete.delete("사용자 요청: 미국 전체신호 제거, 매매신호 보존"); await guild.channels.fetch(); if (find("미국-전체신호")) throw new Error("삭제 검증 실패"); }
   }
-  console.log(apply ? "완료: 기존 주문 전달 ID·권한 보존, 일본 자동주문 추가 없음" : "읽기 전용 확인 완료 · --apply로 적용");
+  console.log(apply ? "완료: 기존 주문 전달 ID·권한 보존, 일본 신호 전달 채널 구성 (증권사 주문과 별개)" : "읽기 전용 확인 완료 · --apply로 적용");
 }
 
 function selectGuild() {
