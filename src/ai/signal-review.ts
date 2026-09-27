@@ -65,10 +65,16 @@ class SignalReviewBatcher {
     this.pending = [];
     this.timer = null;
     this.processing = Promise.resolve();
+    this.isolateRecords = options.isolateRecords ?? false;
+    this.key = options.key || (record => record);
+    this.queued = new Set();
   }
 
   add(record) {
     if (!shouldReviewSignal(record)) return false;
+    const key = this.key(record);
+    if (this.queued.has(key)) return false;
+    this.queued.add(key);
     this.pending.push(record);
     if (this.pending.length >= this.maxBatch) void this.flush();
     else if (!this.timer) this.timer = setTimeout(() => void this.flush(), this.windowMs);
@@ -80,7 +86,13 @@ class SignalReviewBatcher {
     this.timer = null;
     if (!this.pending.length) return this.processing;
     const batch = this.pending.splice(0, this.maxBatch);
-    this.processing = this.processing.then(() => this.onBatch(batch)).catch(this.onError);
+    this.processing = this.processing.then(async () => {
+      for (const items of this.isolateRecords ? batch.map(record => [record]) : [batch]) {
+        try { await this.onBatch(items); }
+        catch (error) { try { await this.onError(error); } catch { /* Notification failure must not stop remaining records. */ } }
+        finally { for (const record of items) this.queued.delete(this.key(record)); }
+      }
+    });
     if (this.pending.length) this.timer = setTimeout(() => void this.flush(), 0);
     return this.processing;
   }

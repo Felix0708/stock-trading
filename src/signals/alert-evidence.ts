@@ -39,8 +39,8 @@ function applyAlertSnapshot(evidence, items, snapshot, now = new Date()) {
   }
   return applied;
 }
-function alertEvidenceSummary(items, evidence = {}, now = new Date()) {
-  const rows = items.flatMap(item => ["240", "1D"].map(timeframe => {
+function alertEvidenceSummary(items, evidence = {}, now = new Date(), timeframes = ["240", "1D"]) {
+  const rows = items.flatMap(item => timeframes.map(timeframe => {
     const key = alertKey({ ...item, timeframe }), proof = evidence[key] || {};
     const age = now.getTime() - Date.parse(proof.verifiedAt || "");
     const verified = proof.active !== false && age >= 0 && age <= 7 * 86400_000 && (!proof.expiresAt || Date.parse(proof.expiresAt) > now.getTime());

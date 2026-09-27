@@ -49,6 +49,14 @@ async function run() {
   await batcher.flush();
   assert.equal(batches.length, 1);
   assert.equal(batches[0].length, 2);
+  const visited=[],errors=[];
+  const isolated=new SignalReviewBatcher(async items=>{visited.push(items[0].id);if(items[0].id===1)throw Error("synthetic");},
+    {maxBatch:3,windowMs:60000,isolateRecords:true,key:r=>r.id,onError:e=>errors.push(e)});
+  for(const id of [1,2,3]) isolated.add({...record(),id});
+  assert.equal(isolated.add({...record(),id:2}),false);
+  await isolated.flush();
+  assert.deepEqual(visited,[1,2,3]);assert.equal(errors.length,1);
+  isolated.add({...record(),id:1});await isolated.flush();assert.deepEqual(visited,[1,2,3,1]);
   console.log("signal-review test OK");
 }
 

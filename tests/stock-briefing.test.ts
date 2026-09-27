@@ -72,6 +72,10 @@ assert.throws(() => stockBriefingSnapshot([{
 
 (async () => {
   const token = `sb_sync_${"a".repeat(43)}`;
+  const large=[{id:"KIWOOM",environment:"mock",overseas:{holdingPositions:Array.from({length:200},(_,i)=>({code:`T${i}`,quantity:1,purchasePrice:10}))}}];
+  assert.equal(stockBriefingSnapshot(large).length,200);
+  assert.equal((await syncStockBriefingHoldings(large,{token,fetchImpl:async()=>Response.json({ok:true,synced:200})})).synced,200);
+  for(const invalid of [null,undefined,"6",-1,0,7]) await assert.rejects(syncStockBriefingHoldings(accounts,{token,fetchImpl:async()=>Response.json({ok:true,synced:invalid})}),/건수/);
   const originalTimeout = AbortSignal.timeout, timeoutBudgets = [];
   try {
     AbortSignal.timeout = ms => { timeoutBudgets.push(ms); return originalTimeout(ms); };

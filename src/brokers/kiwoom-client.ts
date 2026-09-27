@@ -27,7 +27,10 @@ function toNumber(value: unknown, field: string) {
 
 function toOptionalNumber(value: unknown, field: string, absolute = false) {
   if (value === undefined || value === null || String(value).trim() === "") return null;
-  const number = toNumber(value, field);
+  const number = Number(String(value).replaceAll(",", ""));
+  // Broker APIs sometimes use a display placeholder in optional P/L fields.
+  // Missing optional evidence is safer than failing the whole balance snapshot.
+  if (!Number.isFinite(number)) return null;
   return absolute ? Math.abs(number) : number;
 }
 

@@ -1,6 +1,8 @@
 "use strict";
 
-// Wire schema 5.0 (reference v7). Keep the legacy internal contract at one boundary.
+// Wire schema 5.x (reference v7). Keep the legacy internal contract at one boundary.
+// The published v7 document says 5.0, but the current indicator emits 5.1 with the same blocks.
+const SUPPORTED_SCHEMA_VERSIONS = new Set(["5.0", "5.1"]);
 const BLOCK_FIELDS = {
   symbol: { string: "ticker name exchange tf htf market preset" },
   signal: { string: "action type desc grade grade_why conviction", number: "price max_stop conviction_score", nullable: "sl rr trigger_price tp1 tp2", boolean: "sl_wide" },
@@ -15,7 +17,7 @@ const BLOCK_FIELDS = {
 
 function validateNestedWebhook(payload) {
   const errors = [], warnings = [];
-  if (payload.schema_ver !== "5.0") errors.push("지원하지 않는 schema_ver");
+  if (!SUPPORTED_SCHEMA_VERSIONS.has(String(payload.schema_ver))) errors.push("지원하지 않는 schema_ver");
   if (!Number.isSafeInteger(payload.bar_time) || payload.bar_time <= 0) errors.push("bar_time: 양의 ms epoch 정수 필요");
   for (const [block, groups] of Object.entries(BLOCK_FIELDS)) {
     const value = payload[block];
@@ -38,7 +40,12 @@ function validateNestedWebhook(payload) {
     ["setup", "stage", ["NONE", "FORMING", "COMPLETE"]],
     ["momentum", "status", ["없음", "BUY", "SELL"]],
   ] as [string, string, string[]][]) {
-    if (!allowed.includes(payload[block]?.[field])) errors.push(`${block}.${field}: 허용되지 않은 값`);
+    const value = payload[block]?.[field];
+    // The live indicator briefly emits an empty status while momentum is inactive.
+    // Treat it as the documented inactive value instead of rejecting the whole signal.
+    if (!(block === "momentum" && field === "status" && value === "") && !allowed.includes(value)) {
+      errors.push(`${block}.${field}: 허용되지 않은 값`);
+    }
   }
   for (const key of ["ticker", "tf", "htf"]) if (typeof payload.symbol?.[key] !== "string" || !payload.symbol[key].trim()) errors.push(`symbol.${key}: 문자열 필요`);
   if (typeof payload.signal?.type !== "string" || !payload.signal.type.trim()) errors.push("signal.type: 문자열 필요");
@@ -54,16 +61,16 @@ function validateNestedWebhook(payload) {
 
 function normalizeWebhookPayload(payload) {
   // Idempotent for recovered records; never promote an invalid wire payload.
-  if (!payload?.symbol || payload.schema_ver !== "5.0") return payload;
+  if (!payload?.symbol || !SUPPORTED_SCHEMA_VERSIONS.has(String(payload.schema_ver))) return payload;
   const { symbol: s, signal: g, verdict: v, market: m, stock: t, setup: u, position, exit, momentum: p } = payload;
   return {
-    schema_ver: payload.schema_ver, bar_time: payload.bar_time,
+    schema_ver: "5.0", bar_time: payload.bar_time,
     ticker: s.ticker.trim().toUpperCase(), name: s.name,
     exchange: ["KOSPI", "KOSDAQ"].includes(s.exchange.trim().toUpperCase()) ? "KRX" : s.exchange.trim().toUpperCase(),
     timeframe: s.tf, htf: s.htf, market: s.market, preset: s.preset,
     ...g, ai_summary: v.smart, score: v.score, status: v.traffic,
     signal: u.signals, signals_n: u.signals_n, setup_stage: u.stage,
-    momentum: p.status, momentum_sl: p.sl, momentum_tp: p.tp, momentum_bars: p.bars,
+    momentum: p.status || "없음", momentum_sl: p.sl, momentum_tp: p.tp, momentum_bars: p.bars,
     energy: t.energy, ema1_dist: t.ema1_dist, candle_type: t.candle, candle_strength: t.candle_strength,
     ema_touch: t.ema_touch, ema_align: t.ema_align,
     htf_trend: m.htf_trend, htf_ema_aligned: m.htf_align === "정배열", htf_above_200ma: m.htf_above200,
@@ -75,13 +82,13 @@ function normalizeWebhookPayload(payload) {
 }
 
 function higherTimeframeContext(payload) {
-  return payload?.schema_ver === "5.0"
+  return SUPPORTED_SCHEMA_VERSIONS.has(String(payload?.schema_ver))
     ? { timeframe: payload.htf, trend: payload.htf_trend, aligned: payload.htf_ema_aligned, above200: payload.htf_above_200ma }
     : { timeframe: "D", trend: payload?.daily_trend, aligned: payload?.daily_ema_aligned, above200: payload?.daily_above_200ma };
 }
 
 function executionGradeBlock(payload) {
-  if (payload?.schema_ver !== "5.0" || payload.action !== "BUY") return "";
+  if (!SUPPORTED_SCHEMA_VERSIONS.has(String(payload?.schema_ver)) || payload.action !== "BUY") return "";
   if (payload.grade === "WAIT") return "실행 등급 WAIT · 눌림 대기, 새 진입 신호 필요";
   if (payload.grade === "NO") return "실행 등급 NO · 진입 금지";
   if (payload.grade === "OFF") return "실행 등급 OFF · 판단 없음, 자동 진입 보류";
@@ -92,9 +99,9 @@ function executionGradeBlock(payload) {
 function entryReferencePrice(record) {
   const p = record.payload || {};
   const signalPrice = record.originalSignalPrice ?? p.price;
-  return p.schema_ver === "5.0" && record.outcome?.decision === "ENTRY_CANDIDATE"
+  return SUPPORTED_SCHEMA_VERSIONS.has(String(p.schema_ver)) && record.outcome?.decision === "ENTRY_CANDIDATE"
     && typeof p.trigger_price === "number" && Number.isFinite(p.trigger_price) && p.trigger_price > 0
     ? Math.min(signalPrice, p.trigger_price) : signalPrice;
 }
 
-module.exports = { BLOCK_FIELDS, validateNestedWebhook, normalizeWebhookPayload, higherTimeframeContext, executionGradeBlock, entryReferencePrice };
+module.exports = { BLOCK_FIELDS, SUPPORTED_SCHEMA_VERSIONS, validateNestedWebhook, normalizeWebhookPayload, higherTimeframeContext, executionGradeBlock, entryReferencePrice };

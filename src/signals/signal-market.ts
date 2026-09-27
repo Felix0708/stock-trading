@@ -1,6 +1,6 @@
 "use strict";
 
-const SIGNAL_CHANNELS = ["오늘의시그널", "sepa분석", "4h리포트", "관찰", "진입", "추매", "관리", "청산", "모멘텀", "peg"];
+const SIGNAL_CHANNELS = ["오늘의시그널", "sepa분석", "4h리포트", "관찰", "진입", "추매", "관리", "청산", "모멘텀", "peg", "주간성과", "월간결산"];
 const SIGNAL_MARKETS = [
   { id: "US", label: "미국", prefix: "미국", category: "🇺🇸 미국주식", currency: "$", zone: "America/New_York", transport: "미국-매매신호", legacy: "미국",
     exchanges: ["NASDAQ", "NYSE", "AMEX", "NYSEARCA", "ARCA", "ND", "NY", "NA", "BATS"] },

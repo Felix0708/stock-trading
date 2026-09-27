@@ -88,9 +88,9 @@ assert.deepEqual(targetSignalChannels({
 }), ["미국-진입", "미국-매매신호"]);
 assert.equal(usTrade.embed.author, undefined);
 assert.equal(decodeSignalEmbed(usTrade.transportEmbed).requestId, base.requestId);
-assert(usTrade.embed.description.includes("엔비디아 (NVDA)"));
+assert((usTrade.transportEmbed?.description || usTrade.embed.description).includes("엔비디아 (NVDA)"));
 const dailyTrade = formatWebhookRecord({ ...base, payload: { ...base.payload, timeframe: "D" } });
-assert(dailyTrade.embed.title.startsWith("[일봉]"));
+assert((dailyTrade.transportEmbed?.title || dailyTrade.embed.title).startsWith("[일봉]"));
 
 const domesticObservation = formatWebhookRecord({
   ...base,

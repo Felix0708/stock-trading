@@ -2,7 +2,7 @@
 
 const { encodeSignalEnvelope, TRANSPORT_URL_PREFIX } = require("./discord-signal-envelope");
 const { formatInstrumentLabel } = require("../research/instrument-names");
-const { signalCategory, signalCard } = require("./us-signal-cards");
+const { signalCategory, signalCard, signalCardComponents } = require("./us-signal-cards");
 const { signalMarket, marketChannelName } = require("../signals/signal-market");
 
 const DECISION_LABELS = {
@@ -203,6 +203,7 @@ function formatWebhookRecord(record) {
     targetChannels: targetSignalChannels(record),
     targetCategory: market.category,
     embed: signalCard(record),
+    components: signalCardComponents(record),
     transportEmbed: market.transport ? signalEmbed(record, identity, orderLine) : undefined,
     text: [
       `📡 **TradingView ${signalKind(record)} 신호**`,

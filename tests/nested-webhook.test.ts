@@ -38,6 +38,10 @@ for (const block of Object.keys(BLOCK_FIELDS)) {
 }
 assert.equal(validateWebhookPayload({ ...wire, schema_ver: "6.0" }).ok, false);
 assert.equal(validateWebhookPayload({ ...wire, bar_time: "1789000000000" }).ok, false);
+const currentWire = structuredClone(wire); currentWire.schema_ver = "5.1"; currentWire.momentum.status = "";
+assert.equal(validateWebhookPayload(currentWire).ok, true);
+assert.equal(normalizeWebhookPayload(currentWire).schema_ver, "5.0");
+assert.equal(normalizeWebhookPayload(currentWire).momentum, "없음");
 const p = normalizeWebhookPayload(wire);
 assert.equal(p.timeframe, "240"); assert.equal(p.market, "display only");
 assert.equal(p.daily_trend, undefined); assert.equal(p.rsi2, undefined);
@@ -85,7 +89,7 @@ assert.equal(entryReferencePrice(record), 99);
 assert.equal(entryReferencePrice({ ...record, outcome: { decision: "ADD_CANDIDATE" } }), 100);
 assert.equal(effectiveStopPrice({ ...record, payload: { ...p, momentum_sl: 94 }, outcome: { signal: { signalCode: "MOMENTUM_BUY" } } }), 94);
 const daily = { ...record, payload: { ...p, timeframe: "D", htf: "W" } };
-assert(formatWebhookRecord(daily).embed.fields.some(f => f.name === "상위봉" && f.value.includes("주봉")));
+assert((formatWebhookRecord(daily).transportEmbed || formatWebhookRecord(daily).embed).fields.some(f => f.name === "상위봉" && f.value.includes("주봉")));
 assert.equal(normalizeWebhookPayload({ ...wire, symbol: { ...wire.symbol, exchange: "KOSDAQ", ticker: "123456" } }).exchange, "KRX");
 
 async function roundtrip() {

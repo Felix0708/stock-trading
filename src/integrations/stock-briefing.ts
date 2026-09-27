@@ -14,7 +14,8 @@ const FILING_HOSTS = {
   US: new Set(["www.sec.gov", "sec.gov"]),
   JP: new Set(["disclosure2.edinet-fsa.go.jp"]),
 };
-const MAX_HOLDINGS = 50;
+// Transport bound, not a trading position limit. Keep receiver in sync.
+const MAX_HOLDINGS = 200;
 
 function baseUrl(value, fallback) {
   const url = new URL(String(value || fallback).replace(/\/+$/, ""));
@@ -114,11 +115,13 @@ async function syncStockBriefingHoldings(accounts, {
     throw new Error("Stock-Briefing 보유종목 동기화 요청에 실패했습니다.");
   }
   const payload = await responseJson(response, 20_000);
-  if (!response.ok || payload.ok !== true) {
-    const detail = typeof payload.error === "string" ? `: ${payload.error.slice(0, 200)}` : "";
-    throw new Error(`Stock-Briefing 보유종목 동기화 실패 (${response.status})${detail}`);
+  if (!response.ok || payload?.ok !== true) {
+    throw new Error(`Stock-Briefing 보유종목 동기화 실패 (${response.status})`);
   }
-  return { synced: Number(payload.synced) || 0, holdings, performance };
+  if (!Number.isInteger(payload.synced) || payload.synced !== holdings.length) {
+    throw new Error("Stock-Briefing 보유종목 저장 건수가 전송 목록과 일치하지 않습니다.");
+  }
+  return { synced: payload.synced, holdings, performance };
 }
 
 async function syncStockBriefingTax(records, {
